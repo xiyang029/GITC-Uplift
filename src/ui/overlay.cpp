@@ -595,29 +595,10 @@ void FinishSetup(OverlayView* view, OverlayState* state, const void* device, con
   }
 }
 
-// The status card as widgets::CardView, the piece of chrome widgets::DrawStatusCard draws: the tone (green
-// while NR works, red for a fault the player must repair, amber while it needs the player, grey when nothing
-// is wrong), the glyph beside the title, and either why it is not working or what is running.
+// The status card as widgets::CardView, the piece of chrome widgets::DrawStatusCard draws: the title, and
+// either why it is not working or what is running.
 widgets::CardView BuildCardView(const StatusCard& card, const OverlayView& view) {
   widgets::CardView shown;
-  switch (card.stage) {
-    case CardStage::DEVICE:
-    case CardStage::CONFLICTS:
-    case CardStage::RUNTIME: shown.tone = widgets::CardTone::BAD; break;
-    case CardStage::SWITCH: shown.tone = widgets::CardTone::IDLE; break;
-    case CardStage::WORKING: shown.tone = widgets::CardTone::GOOD; break;
-    case CardStage::SESSION:
-    case CardStage::PLACEMENT:
-    case CardStage::BUDGET:
-    case CardStage::FRAME:
-    case CardStage::EVALUATE: shown.tone = widgets::CardTone::WARN; break;
-  }
-  switch (shown.tone) {
-    case widgets::CardTone::GOOD: shown.glyph = widgets::CardGlyph::CHECK; break;
-    case widgets::CardTone::WARN: shown.glyph = widgets::CardGlyph::WARNING; break;
-    case widgets::CardTone::BAD: shown.glyph = widgets::CardGlyph::CROSS; break;
-    case widgets::CardTone::IDLE: shown.glyph = widgets::CardGlyph::CIRCLE; break;
-  }
   shown.title = card.title;
   shown.showing_work = card.working;
   if (!card.working) {
@@ -668,11 +649,15 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   gui::SameLine();
   const float hotkey_width =
       std::max(1.f, gui::GetContentRegionAvail().x - gui::GetFontSize() * widgets::kLanguageEm - gui::GetStyle().ItemSpacing.x);
+  const auto hotkey_button_width = [&](const char* label) {
+    return std::min(hotkey_width, gui::CalcTextSize(label).x + gui::GetStyle().FramePadding.x * 2.f);
+  };
   // 1.1.0 (a player's report): Esc also closes ReShade's overlay, so it cannot be the way to clear the hotkey. A right-click on the button clears it
   // (capturing or not); Esc only cancels a capture. A capture whose overlay closed ends by itself (ExpireKeyCapture), so the hotkey never stays off.
   if (state->capturing_key) {
     state->capture_seen = std::chrono::steady_clock::now();
-    gui::Button("Press a key (right-click clears)", ImVec2(hotkey_width, 0.f));
+    constexpr char capture_label[] = "Press a key (right-click clears)";
+    gui::Button(capture_label, ImVec2(hotkey_button_width(capture_label), 0.f));
     if (gui::IsItemClicked(ImGuiMouseButton_Right)) {
       settings->enable_key = 0u;
       state->capturing_key = false;
@@ -702,7 +687,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
         key_label = std::format("Hotkey: key {:#04x}", settings->enable_key);
       }
     }
-    if (gui::Button(key_label.c_str(), ImVec2(std::min(hotkey_width, gui::CalcTextSize(key_label.c_str()).x + gui::GetStyle().FramePadding.x * 2.f), 0.f))) {
+    if (gui::Button(key_label.c_str(), ImVec2(hotkey_button_width(key_label.c_str()), 0.f))) {
       state->capturing_key = true;
       state->capture_seen = std::chrono::steady_clock::now();
     } else if (gui::IsItemClicked(ImGuiMouseButton_Right) && settings->enable_key != 0u) {

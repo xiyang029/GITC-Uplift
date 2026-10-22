@@ -70,13 +70,12 @@ inline float row_slot_x = 0.f;
 // The language combo's width, in font sizes: enough for "简体中文 / Chinese".
 constexpr float kLanguageEm = 12.f;
 
-// A settings row: the label in the secondary colour in a fixed-width left column, then the control, then
-// the reset slot one frame high at the end. The slot is reserved whether or not the row shows its reset
-// button, so every control on the panel starts and ends at the same x. A label longer than its column ends
-// in "..." and shows in full on hover, and a row's `tooltip` shows over its label as well as its control.
-// On a panel narrower than kStackEm the label takes its own line and the control the panel's width under
-// it. Call right before a control whose own label is hidden ("##id"): the next item's width is the
-// control column.
+// A settings row: the label in the secondary colour at its own width -- never cut, never wrapped --, then
+// the control right after it, then the reset slot one frame high at the end. The slot is reserved whether
+// or not the row shows its reset button, so every control ends at the same x. A row's `tooltip` shows over
+// its label as well as its control. On a panel narrower than kStackEm the label takes its own line and the
+// control the panel's width under it. Call right before a control whose own label is hidden ("##id"): the
+// next item's width is the control column.
 inline void RowLabel(const char* label, const char* tooltip = nullptr) {
   const std::string text = gui::Display(label);
   const std::string tip = (tooltip != nullptr ? gui::Display(tooltip) : std::string());
@@ -84,15 +83,11 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
   const float avail = ImGui::GetContentRegionAvail().x;
   const float font = ImGui::GetFontSize();
   const bool stacked = avail < font * tokens::kStackEm;
-  const float column = stacked ? 0.f : (std::min)(font * tokens::kLabelEm, avail * tokens::kLabelShare);
   if (stacked) {
     ImGui::Dummy(ImVec2(0.f, 0.f));
   }
   const ImVec2 at = ImGui::GetCursorScreenPos();
   row_slot_x = at.x + avail - ImGui::GetFrameHeight();
-  // [style] leave a little more air between the label column and the control column
-  const float fit = stacked ? avail : column - style.ItemSpacing.x * 1.5f;
-  const bool clipped = ImGui::CalcTextSize(text.c_str()).x > fit;
   if (!stacked) {
     ImGui::AlignTextToFramePadding();
   }
@@ -100,19 +95,18 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
     {
       StyleScope secondary;
       secondary.Color(ImGuiCol_Text, tokens::kTextSecondary);
-      gui::TextUnformatted(Ellipsize(text.c_str(), fit).c_str());
+      gui::TextUnformatted(text.c_str());
     }
-    if (clipped && !tip.empty()) {
-      ItemTooltip("%s\n%s", text.c_str(), tip.c_str());
-    } else if (clipped || !tip.empty()) {
-      ItemTooltip("%s", clipped ? text.c_str() : tip.c_str());
+    if (!tip.empty()) {
+      ItemTooltip("%s", tip.c_str());
     }
   }
   if (!stacked) {
     gui::SameLine();
-    gui::SetCursorScreenPos(ImVec2(at.x + column, gui::GetCursorScreenPos().y));
+    gui::SetNextItemWidth(row_slot_x - style.ItemSpacing.x - ImGui::GetCursorScreenPos().x);
+  } else {
+    gui::SetNextItemWidth(row_slot_x - style.ItemSpacing.x - at.x);
   }
-  gui::SetNextItemWidth(row_slot_x - style.ItemSpacing.x - (at.x + column));
 }
 
 // A row label with no control column: the control that follows sits right after the label's words instead
@@ -343,12 +337,14 @@ inline bool SectionHeader(const char* english, const char* hint, const char* res
   return open;
 }
 
-// An on/off switch: a rounded track in the accent colour when on, the knob at the end it points to.
-// Returns true on the frame it flipped *value.
+// An on/off switch: a rounded track in the accent colour when on, the knob at the end it points to. The
+// switch sits at the row's far end, just before the reset slot, whatever the label's width, so all rows'
+// switches line up down the panel. Returns true on the frame it flipped *value.
 inline bool Switch(const char* id, bool* value) {
   const float height = ImGui::GetFrameHeight();
   const float width = height * 1.9f;
   const float radius = height * 0.5f;
+  ImGui::SetCursorScreenPos(ImVec2(row_slot_x - ImGui::GetStyle().ItemSpacing.x - width, ImGui::GetCursorScreenPos().y));
   const ImVec2 at = ImGui::GetCursorScreenPos();
   const bool pressed = ImGui::InvisibleButton(id, ImVec2(width, height));
   if (pressed) {
@@ -494,55 +490,13 @@ inline int LanguageCombo(const char* id, const char* const* names, int count, in
 }
 
 // The status card: the add-on's state in a fixed-height region, sized for the card's worst case so a
-// transient reason or line never shifts the rows below it, and never scrolled. A card is a tone (the
-// colour of its bar and its heading glyph), a title, some lines, and the caller's own buttons.
+// transient reason or line never shifts the rows below it, and never scrolled. A card is a title, some
+// lines, and the caller's own buttons.
 
-// The tones (FoveatedDLSS5's ui/widgets.hpp, adopted by RenoDX-DLSS5-Generic): a card is green only while
-// the add-on works, amber while it needs the player, red while something must be installed or replaced,
-// and grey when nothing is wrong.
-enum class CardTone {
-  GOOD,
-  WARN,
-  BAD,
-  IDLE,
-};
-
-inline ImVec4 ToneColor(CardTone tone) {
-  switch (tone) {
-    case CardTone::GOOD: return tokens::kGood;
-    case CardTone::WARN: return tokens::kWarn;
-    case CardTone::BAD: return tokens::kBad;
-    case CardTone::IDLE: return tokens::kIdle;
-  }
-  return tokens::kIdle;
-}
-
-// The glyph a card's heading carries, in the same tones as the bar.
-enum class CardGlyph {
-  CHECK,
-  WARNING,
-  CROSS,
-  CIRCLE,
-};
-
-inline const char* GlyphIcon(CardGlyph glyph) {
-  switch (glyph) {
-    case CardGlyph::CHECK: return icons::kCheck;
-    case CardGlyph::WARNING: return icons::kWarning;
-    case CardGlyph::CROSS: return icons::kCross;
-    case CardGlyph::CIRCLE: return icons::kCircle;
-  }
-  return icons::kCircle;
-}
-
-// The glyph in the card's tone and the title, at the title size: the card's first line.
-inline void CardHeading(CardTone tone, CardGlyph glyph, const std::string& title) {
-  StyleScope mark;
-  mark.FontSize(TitleFontSize()).Color(ImGuiCol_Text, ToneColor(tone));
-  ImGui::TextUnformatted(GlyphIcon(glyph));
-  ImGui::SameLine();
+// The card's title, at the panel's base size: the card's first line.
+inline void CardHeading(const std::string& title) {
   StyleScope heading;
-  heading.FontSize(TitleFontSize());
+  heading.FontSize(BaseFontSize());
   gui::TextUnformatted(title.c_str());
 }
 
@@ -626,12 +580,10 @@ struct CardLine {
   std::string value;
 };
 
-// Everything the card draws, assembled by the caller from whatever its own state is: the tone, the glyph, the
-// title, an account of why it is idle or broken, the fix's steps, and the key/value lines of a working card.
+// Everything the card draws, assembled by the caller from whatever its own state is: the title, an account
+// of why it is idle or broken, the fix's steps, and the key/value lines of a working card.
 // No model of the add-on's state lives here, so any panel can build a card out of its own facts.
 struct CardView {
-  CardTone tone = CardTone::IDLE;
-  CardGlyph glyph = CardGlyph::CIRCLE;
   bool showing_work = false;        // the lines below describe what runs, not why nothing does
   std::string title;
   std::string reason;               // shown when it is not working
@@ -645,7 +597,7 @@ struct CardView {
 // note and its footer) or why it is not (the reason, then the fix's steps numbered). The caller draws the
 // card's own CardActionButton after this.
 inline void DrawStatusCard(const CardView& card) {
-  CardHeading(card.tone, card.glyph, card.title);
+  CardHeading(card.title);
   if (!card.showing_work) {
     if (!card.reason.empty()) {
       CardWrapped(card.reason);

@@ -44,10 +44,8 @@ constexpr ImVec4 kBgControlHover = Hex(0x2F343C);
 constexpr ImVec4 kStroke = Hex(0x2A2E36);
 constexpr ImVec4 kTextPrimary = Hex(0xE8EAED);
 constexpr ImVec4 kTextSecondary = Hex(0x9AA0A8);
-constexpr ImVec4 kGood = Hex(0x76B900);          // the status card while the add-on works
 constexpr ImVec4 kWarn = Hex(0xF5A623);          // the status card while it needs the player
 constexpr ImVec4 kBad = Hex(0xEB5757);           // the status card while something must be installed or replaced
-constexpr ImVec4 kIdle = Hex(0x6E7681);          // the status card at rest, or off by choice: nothing is wrong
 constexpr ImVec4 kAccent = Hex(0x4CA6A0);        // the one saturated colour in the panel
 constexpr ImVec4 kAccentHover = Hex(0x5BB8B2);
 constexpr ImVec4 kAccentActive = Hex(0x3E8C87);  // a control held down
@@ -65,13 +63,10 @@ constexpr float kRadiusSmall = 4.f;
 constexpr float kRowGap = 8.f;
 constexpr float kSectionGap = 16.f;
 constexpr float kCardPadding = 12.f;
-// Row geometry, in units of the font size so it follows the player's ReShade font. The label column is a
-// fixed width, never more than kLabelShare of a narrow panel; a panel narrower than kStackEm has no room
-// for a label column beside a usable control (ReShade docks it at ~450 px), so each label goes on its own
-// line over a control as wide as the panel. A slider's value has its own column (kValueEm) instead of
-// sitting under the knob.
-constexpr float kLabelEm = 12.f;
-constexpr float kLabelShare = 0.42f;
+// Row geometry, in units of the font size so it follows the player's ReShade font. A label is as wide as
+// its own words; a panel narrower than kStackEm has no room for a label beside a usable control (ReShade
+// docks it at ~450 px), so each label goes on its own line over a control as wide as the panel. A slider's
+// value has its own column (kValueEm) instead of sitting under the knob.
 constexpr float kValueEm = 3.5f;
 constexpr float kStackEm = 24.f;
 constexpr float kTooltipEm = 35.f;
@@ -81,10 +76,6 @@ constexpr float kTooltipEm = 35.f;
 // ForkAwesome glyphs, as ReShade merges them (external/reshade/res/fonts/forkawesome.h: the subset ReShade
 // ships, which is all the atlas holds). Add the ones a control needs; the atlas has no other glyph.
 namespace icons {
-constexpr const char* kCheck = "\xef\x80\x8c";      // U+F00C ok
-constexpr const char* kWarning = "\xef\x81\xb1";    // U+F071 warning
-constexpr const char* kCross = "\xef\x80\x8d";      // U+F00D cancel
-constexpr const char* kCircle = "\xef\x84\x8c";     // U+F10C circle_empty
 constexpr const char* kUndo = "\xef\x83\xa2";       // U+F0E2 undo
 }  // namespace icons
 
@@ -97,7 +88,6 @@ inline float BaseFontSize() {
   const float base = ImGui::GetStyle().FontSizeBase;
   return (base > 0.f ? base : 13.f) * kFontScale;
 }
-inline float TitleFontSize() { return BaseFontSize() * (15.f / 13.f); }
 inline float SmallFontSize() { return BaseFontSize() * (12.f / 13.f); }
 
 inline ImU32 ToU32(const ImVec4& color) { return ImGui::GetColorU32(color); }
