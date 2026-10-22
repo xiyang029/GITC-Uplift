@@ -661,9 +661,10 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
   const nr::Size uniform = state.settle.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, slider_held);
   // Foveated edge scaling (2026-10-21), as DeviceContext::SettleLayout: only after upscaling, the player's output pixels carried onto the settled grid
   // (MapToWork), and the identity grid whenever that grid cannot pay for the warp.
-  const nr::foveation::Params foveation_params =
-      nr::foveation::MapToWork({config_.foveation_width, config_.foveation_height, config_.foveation_falloff, config_.foveation_edge / 100.f},
-                               output.width, output.height, uniform.width, uniform.height);
+  const nr::foveation::Params foveation_params = nr::foveation::MapToWork(
+      nr::foveation::FromPercent(config_.foveation_width, config_.foveation_height, config_.foveation_falloff_x, config_.foveation_falloff_y,
+                                 config_.foveation_edge, output.width, output.height),
+      output.width, output.height, uniform.width, uniform.height);
   const nr::foveation::Grid grid = nr::foveation::MakeGrid(config_.foveation && !before_upscaling, foveation_params, uniform.width, uniform.height);
   const nr::Size image = {nr::foveation::WarpedExtent(uniform.width, grid.x), nr::foveation::WarpedExtent(uniform.height, grid.y)};
   const nr::Size canvas = ((before_upscaling && !nr::MeetsNrFloor(image)) ? sources::CanvasSize(image) : image);

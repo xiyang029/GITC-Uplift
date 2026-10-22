@@ -4,11 +4,11 @@
 //
 // The NR model is same-resolution, so "foveated" means a separable warp of the
 // working image: per axis, density 1 inside the centre zone, a smoothstep
-// fall-off over `falloff` pixels, and `edge` beyond it.  Centre W x H and the
-// fall-off are given in WORKING-GRID pixels -- the same grid the warp is applied
+// fall-off over that axis' `falloff` pixels, and `edge` beyond it.  Centre W x H
+// and both fall-offs are given in WORKING-GRID pixels -- the same grid the warp is applied
 // to -- and clamped against it each frame, so an axis whose centre covers the
-// whole grid is simply not warped.  The player's numbers are in output pixels:
-// MapToWork carries them across, so the centre keeps its share of the screen
+// whole grid is simply not warped.  The player's sliders are shares of the screen: FromPercent turns
+// them into output pixels and MapToWork carries those across, so the centre keeps its share of the screen
 // when the Resolution mode shrinks the working grid.
 //
 // One NR evaluate, one temporal history, no tile seams.
@@ -42,13 +42,28 @@ inline constexpr float kMaxEdge = 1.f;
 // the NR pixels they remove: the grid stands down to uniform.
 inline constexpr double kMinSaving = 0.05;
 
-// Player settings, in output pixels.  MapToWork carries them to the working grid.
+// The foveation geometry in output pixels: FromPercent builds it from the player's sliders,
+// MapToWork carries it to the working grid.
 struct Params {
   uint32_t center_width = 1400;
   uint32_t center_height = 800;
-  uint32_t falloff = 400;  // the same length on all four sides
-  float edge = 0.5f;       // density beyond the fall-off, per axis
+  uint32_t falloff_x = 400;  // the fall-off on the left/right sides
+  uint32_t falloff_y = 400;  // the fall-off on the top/bottom sides
+  float edge = 0.5f;         // density beyond the fall-off, per axis
 };
+
+// The player's sliders, whole per cent of the screen: the centre's width as % of the output's width, its height and both
+// fall-offs as % of the output's height.  Returns the output-pixel Params MapToWork takes; 100 % is the screen itself.
+// The two fall-offs are separate because the vertical one is the one a screen's aspect cuts short: shortening it alone
+// lets the vertical ramp reach the edge density.  Called at the two places that know the output's size.
+inline Params FromPercent(uint32_t width_pct, uint32_t height_pct, uint32_t falloff_x_pct, uint32_t falloff_y_pct,
+                          uint32_t edge_pct, uint32_t out_width, uint32_t out_height) {
+  const auto pixels = [](uint32_t pct, uint32_t full) {
+    return (std::clamp(pct, 0u, 100u) * full + 50u) / 100u;  // rounded to the nearest pixel
+  };
+  return {pixels(width_pct, out_width), pixels(height_pct, out_height), pixels(falloff_x_pct, out_height),
+          pixels(falloff_y_pct, out_height), static_cast<float>(edge_pct) * 0.01f};
+}
 
 // The player's output-pixel parameters on a working grid of work_width x
 // work_height.  Called once per frame before MakeGrid, so the two never
@@ -59,8 +74,9 @@ inline Params MapToWork(const Params& params, uint32_t out_width, uint32_t out_h
   Params work = params;
   work.center_width = static_cast<uint32_t>(std::lround(params.center_width * sx));
   work.center_height = static_cast<uint32_t>(std::lround(params.center_height * sy));
-  // One length on all four sides: the smaller share keeps it inside both axes.
-  work.falloff = static_cast<uint32_t>(std::lround(params.falloff * std::min(sx, sy)));
+  // Each axis carries its own fall-off, so a shorter vertical one is not dragged back to the horizontal's length.
+  work.falloff_x = static_cast<uint32_t>(std::lround(params.falloff_x * sx));
+  work.falloff_y = static_cast<uint32_t>(std::lround(params.falloff_y * sy));
   return work;
 }
 
@@ -139,8 +155,8 @@ struct Grid {
 inline Grid MakeGrid(bool enabled, const Params& params, uint32_t full_width, uint32_t full_height) {
   Grid grid;
   if (!enabled) return grid;
-  grid.x = MakeAxis(full_width, params.center_width, params.falloff, params.edge);
-  grid.y = MakeAxis(full_height, params.center_height, params.falloff, params.edge);
+  grid.x = MakeAxis(full_width, params.center_width, params.falloff_x, params.edge);
+  grid.y = MakeAxis(full_height, params.center_height, params.falloff_y, params.edge);
   if (grid.active() && grid.PixelFactor() > 1.0 - kMinSaving) {
     grid = Grid{};
   }

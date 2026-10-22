@@ -212,7 +212,6 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         const char* const format = (descriptor.key == "GraceSeconds" ? "%.1f"
                                     : resolution_scale                      ? "%.0f %%"
                                     : descriptor.key == "AutoExposureBlend" ? "%.0f %%"
-                                    : descriptor.key == "FoveationEdge"     ? "%.0f %%"
                                     : descriptor.key == "StabilizeMs"       ? "%.0f ms"
                                                                             : "%.2f");
         widgets::RowLabel(label.c_str(), tip_text);
@@ -780,12 +779,13 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state);
   changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state);
   changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state);
-  // Foveated edge scaling (2026-10-21): the four rows below are the centre, its fall-off and the density it reaches; they only matter while it is on.
+  // Foveated edge scaling (2026-10-21): the five rows below are the centre, its two fall-offs and the density they reach; they only matter while it is on.
   changed |= DrawRow(*FindSetting("Foveation"), view, settings, state);
   if (settings->foveation) {
     changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state);
     changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state);
-    changed |= DrawRow(*FindSetting("FoveationFalloff"), view, settings, state);
+    changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state);
+    changed |= DrawRow(*FindSetting("FoveationFalloffY"), view, settings, state);
     changed |= DrawRow(*FindSetting("FoveationEdge"), view, settings, state);
   }
 

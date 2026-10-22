@@ -242,13 +242,15 @@ struct Settings {
   ResolutionMode resolution_mode = ResolutionMode::FULL;  // user ruling: Full by default
   float resolution_scale = 100.f;                         // Custom: % of the output, 25-100
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
-  // Foveated edge scaling (2026-10-21): NR's work grid keeps the centre of the output at full density and falls off toward the edges. The centre and the
-  // fall-off are in the output's own pixels; `edge` is the density the fall-off reaches (a tenth of a percent, 25-100).
+  // Foveated edge scaling (2026-10-21): NR's work grid keeps the centre of the output at full density and falls off toward the edges. The centre's width is a
+  // share of the output's width, its height and both fall-offs shares of the output's height (whole per cent, the UI's sliders); `edge` is the density the
+  // fall-off reaches (whole per cent, 25-100, where 100 is off). The two fall-offs are separate: the vertical one is the one a screen's aspect cuts short.
   bool foveation = false;
-  uint32_t foveation_width = 1400;
-  uint32_t foveation_height = 800;
-  uint32_t foveation_falloff = 400;
-  float foveation_edge = 50.f;
+  uint32_t foveation_width = 55;     // % of the output's width
+  uint32_t foveation_height = 55;    // % of the output's height
+  uint32_t foveation_falloff_x = 28;  // left/right sides, % of the output's height
+  uint32_t foveation_falloff_y = 15;  // top/bottom sides, % of the output's height: short enough that the vertical ramp reaches the edge density
+  uint32_t foveation_edge = 50;
   // Split chain (2026-10-10): a later stage group's size (its first pass is not pass 1), keyed by stage; pass 1's group uses Resolution above. Before
   // upscaling is always the first stage, so it has none.
   ResolutionMode resolution_mode_after_dlss = ResolutionMode::FULL;
