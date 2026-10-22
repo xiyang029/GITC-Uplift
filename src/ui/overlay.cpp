@@ -156,7 +156,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         } else {
           widgets::RowLabel(label.c_str(), tip_text);
         }
-        if (widgets::Switch(hidden.c_str(), &value)) {
+        // In place on the Enable row: its line carries the hotkey button and the language combo after the
+        // switch, so the row's far end is not the switch's to take.
+        if (widgets::Switch(hidden.c_str(), &value, /*at_row_end=*/!inline_label)) {
           if (value && !descriptor.enable_warning.empty()) {
             state->enable_warning_key = descriptor.key;
           } else {

@@ -345,14 +345,19 @@ inline bool SectionHeader(const char* english, const char* hint, const char* res
   return open;
 }
 
-// An on/off switch: a rounded track in the accent colour when on, the knob at the end it points to. The
-// switch sits at the row's far end, just before the reset slot, whatever the label's width, so all rows'
-// switches line up down the panel. Returns true on the frame it flipped *value.
-inline bool Switch(const char* id, bool* value) {
+// An on/off switch: a rounded track in the accent colour when on, the knob at the end it points to. By
+// default the switch sits at the row's far end, just before the reset slot, whatever the label's width, so
+// all rows' switches line up down the panel. A row that already ends in something else (Enable, whose
+// hotkey button and whose language combo share the line) passes at_row_end = false: the switch then draws
+// where the cursor is, right after the label. Returns true on the frame it flipped *value.
+inline bool Switch(const char* id, bool* value, bool at_row_end = true) {
   const float height = ImGui::GetFrameHeight();
   const float width = height * 1.9f;
   const float radius = height * 0.5f;
-  ImGui::SetCursorScreenPos(ImVec2(row_slot_x - ImGui::GetStyle().ItemSpacing.x - width, ImGui::GetCursorScreenPos().y));
+  if (at_row_end) {
+    ImGui::SetCursorScreenPos(
+        ImVec2(row_slot_x - ImGui::GetStyle().ItemSpacing.x - width, ImGui::GetCursorScreenPos().y));
+  }
   const ImVec2 at = ImGui::GetCursorScreenPos();
   const bool pressed = ImGui::InvisibleButton(id, ImVec2(width, height));
   if (pressed) {
