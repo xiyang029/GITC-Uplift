@@ -514,7 +514,8 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
                 {"Remove the other NR add-on, or set \"When another NR producer runs\" to Observe (Advanced)."},
                 CardButton::NONE);
   }
-  if (!facts.enabled) return card(CardStage::SWITCH, "NR is off", "Neural rendering is switched off.", {}, CardButton::TURN_ON);
+  // No button: the switch at the top of the panel is the way back on (the card's own "Turn on" was removed).
+  if (!facts.enabled) return card(CardStage::SWITCH, "NR is off", "Neural rendering is switched off.", {}, CardButton::NONE);
   // Plan 15: after the game's NGX shutdown on Direct3D 12 NR waits for the game's DLSS, whatever the stage (a temporary cause; Setup greys with the same text).
   if (!facts.held.empty()) return card(CardStage::PLACEMENT, "Waiting for the game's DLSS", facts.held, {}, CardButton::NONE);
   const nr::SessionStatus& session = facts.session;

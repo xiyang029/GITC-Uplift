@@ -23,7 +23,7 @@ namespace uplift::color {
 namespace {
 
 constexpr uint32_t ROOT_CONSTANTS = 32u;     // the root signature's; each pass sets only what its shader reads
-constexpr uint32_t PASS_CONSTANTS = 16u;     // Plans 2-4's passes
+constexpr uint32_t PASS_CONSTANTS = 20u;     // Plans 2-4's passes, plus the foveated grid's four dwords
 constexpr uint32_t SHADER_RESOURCES = 5u;    // t0-t4
 constexpr uint32_t UNORDERED_ACCESSES = 2u;  // u0, u1
 constexpr uint32_t TABLE_SIZE = SHADER_RESOURCES + UNORDERED_ACCESSES;
@@ -88,6 +88,7 @@ std::array<uint32_t, PASS_CONSTANTS> EncodeConstants(const EncodePass& pass, uin
       (whole ? 0u : pass.region.x), (whole ? 0u : pass.region.y), (whole ? pass.width : pass.region.width),
       (whole ? pass.height : pass.region.height), (unpadded ? pass.width : pass.canvas.width),
       (unpadded ? pass.height : pass.canvas.height), change_mode, pass.options, 0u,
+      pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
   };
 }
 
@@ -345,6 +346,7 @@ bool ColorPipeline::RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot,
       pass.region.x, pass.region.y, pass.region.width, pass.region.height, pass.image.width, pass.image.height,
       pass.canvas.width, pass.canvas.height, Bits(pass.scale_x), Bits(pass.scale_y),
       (pass.flip_y ? 1u : 0u), Bits(pass.offset_x), Bits(pass.offset_y), 0u, 0u, 0u,
+      pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
   };
   DispatchCompute(list, motion_pipeline_.Get(), constants, base, pass.canvas.width, pass.canvas.height);
   return true;
@@ -372,6 +374,7 @@ bool ColorPipeline::RecordDecode(ID3D12GraphicsCommandList* list, uint32_t slot,
       Bits(pass.exposure_factor), 0u, 0u, pass.width, pass.height,
       (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u), 0u, 0u,
       pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u), Bits(pass.chroma_clamp),
+      pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
   };
   const D3D12_VIEWPORT viewport = {.TopLeftX = 0.f, .TopLeftY = 0.f, .Width = static_cast<float>(pass.width),
                                    .Height = static_cast<float>(pass.height), .MinDepth = 0.f, .MaxDepth = 1.f};
@@ -401,6 +404,7 @@ bool ColorPipeline::RecordComputeDecode(ID3D12GraphicsCommandList* list, uint32_
       Bits(pass.color_strength), (pass.exposure != nullptr ? 1u : 0u), Bits(pass.exposure_factor), pass.origin_x,
       pass.origin_y, pass.width, pass.height, (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u),
       pass.source_x, pass.source_y, pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u), Bits(pass.chroma_clamp),
+      pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
   };
   DispatchCompute(list, compute_decode_pipeline_.Get(), constants, base, pass.width, pass.height);
   return true;

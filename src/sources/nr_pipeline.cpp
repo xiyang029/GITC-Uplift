@@ -41,7 +41,8 @@ void UavBarrier(ID3D12GraphicsCommandList* list, ID3D12Resource* resource) {
 // A recording at `output` runs at: an empty image is the output itself, an empty canvas the image.
 WorkLayout Resolve(const WorkLayout& layout, nr::Size output) {
   const nr::Size image = (layout.image.Empty() ? output : layout.image);
-  return {.image = image, .canvas = (layout.canvas.Empty() ? image : layout.canvas), .upsampling = layout.upsampling};
+  return {.image = image, .canvas = (layout.canvas.Empty() ? image : layout.canvas), .upsampling = layout.upsampling,
+          .foveation = layout.foveation};
 }
 
 // A float SRV format for the game's motion-vector texture, or nullopt when Uplift cannot read it.
@@ -310,7 +311,17 @@ NrPipeline::Texture NrPipeline::CreateTexture(nr::Size size, DXGI_FORMAT format,
 }
 
 std::string_view NrPipeline::EnsureIntermediates(const SetPlan& plan) {
-  if (set_->intermediates.model_a && set_->intermediates.plan == plan) return {};
+  if (set_->intermediates.model_a) {
+    // The foveated grid can move under surfaces that still fit (a shorter fall-off, a denser edge, a smaller centre): NR's
+    // history and the stabiliser's then describe the old mapping of the same pixels, so both start afresh. The field is
+    // copied first, so the plan comparison below still sees a set that needs no reallocation for a moved grid alone.
+    if (set_->intermediates.plan.foveation != plan.foveation) {
+      set_->intermediates.plan.foveation = plan.foveation;
+      set_->intermediates.reset_pending = true;
+      set_->look.history_valid = false;
+    }
+    if (set_->intermediates.plan == plan) return {};
+  }
   RetireSet(set_);
   constexpr D3D12_RESOURCE_FLAGS UAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   const bool pre_sr = (plan.kind == TargetKind::PRE_SR);
@@ -783,6 +794,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
           .copy_format = format->copy_format,
           .source_bytes_per_pixel = format->bytes_per_pixel,
           .kind = TargetKind::PRESENT,
+          .foveation = work.foveation,
       });
       !problem.empty()) {
     return {.reason = problem};
@@ -889,6 +901,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
       .region = copied,
       .canvas = work.canvas,
       .options = options,
+      .foveation = work.foveation,  // the foveated work grid: identity axes leave every mapping uniform
   };
   if (!Encode(list, slot, encode)) return {.recorded = true, .reason = "encode failed", .motion_source = motion_source};
   // 3. NR.
@@ -916,7 +929,8 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
        .encoding = target.encoding, .input_scale = input_scale, .transfer_strength = target.transfer_strength,
        .color_strength = target.color_strength, .exposure = exposure.texture, .exposure_factor = exposure.factor,
        .upsampling = after.upsampling, .options = options, .chroma_clamp = config_.fixes.chroma_clamp,
-       .mask = BoundMask(slot), .mask_view_format = mask_.view_format});
+       .mask = BoundMask(slot), .mask_view_format = mask_.view_format,
+       .foveation = work.foveation});  // the foveated work grid: identity axes leave every mapping uniform
   Transition(list, target.resource, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
   Transition(list, after.texture, PIXEL_AND_COMPUTE_READ, COMPUTE_READ);
   if (!decoded) return {.recorded = true, .reason = "no pipeline for the target format", .motion_source = motion_source};
@@ -953,6 +967,7 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
           .copy_format = format->copy_format,
           .source_bytes_per_pixel = format->bytes_per_pixel,
           .kind = TargetKind::UAV,
+          .foveation = work.foveation,
       });
       !problem.empty()) {
     return {.reason = problem};
@@ -1000,6 +1015,7 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
       .region = copied,
       .canvas = work.canvas,
       .options = options,
+      .foveation = work.foveation,  // the foveated work grid: identity axes leave every mapping uniform
   };
   if (!Encode(list, slot, encode)) return {.recorded = true, .reason = "encode failed", .motion_source = motion_source};
   // 3. The NR passes, with the game's motion vectors bound in place.
@@ -1025,7 +1041,8 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
        .transfer_strength = target.transfer_strength, .color_strength = target.color_strength,
        .exposure = exposure.texture, .exposure_factor = exposure.factor, .source_x = 0u, .source_y = 0u,
        .upsampling = after.upsampling, .options = options, .chroma_clamp = config_.fixes.chroma_clamp,
-       .mask = BoundMask(slot), .mask_view_format = mask_.view_format});
+       .mask = BoundMask(slot), .mask_view_format = mask_.view_format,
+       .foveation = work.foveation});  // the foveated work grid: identity axes leave every mapping uniform
   UavBarrier(list, target.resource);
   if (!decoded) {
     return {.recorded = true, .reason = "decode failed", .motion_source = motion_source,
@@ -1073,6 +1090,7 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
           .kind = TargetKind::PRE_SR,
           .private_color = {static_cast<uint32_t>(description.Width), description.Height},
           .canvas_motion = motion_format.has_value(),
+          .foveation = work.foveation,
       });
       !problem.empty()) {
     return {.reason = problem};
@@ -1104,6 +1122,7 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
       .region = region,
       .canvas = work.canvas,
       .options = options,
+      .foveation = work.foveation,  // the foveated work grid: identity axes leave every mapping uniform
   };
   if (!Encode(list, slot, encode)) return {.recorded = true, .reason = "encode failed"};
   // 2. v2 design §3.9 step 4: in a canvas the motion vectors move into canvas pixels, mirrored like the
@@ -1127,6 +1146,7 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
                             .canvas = work.canvas,
                             .scale_x = inputs.motion_scale_x * static_cast<float>(work.image.width) / static_cast<float>(motion_region.width),
                             .scale_y = inputs.motion_scale_y * static_cast<float>(work.image.height) / static_cast<float>(motion_region.height),
+                            .foveation = work.foveation,  // the foveated work grid: identity axes leave every mapping uniform
                         });
     Transition(list, canvas_motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
     nr_inputs.motion = {.resource = canvas_motion};
@@ -1181,6 +1201,7 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
           .chroma_clamp = config_.fixes.chroma_clamp,
           .mask = BoundMask(slot),
           .mask_view_format = mask_.view_format,
+          .foveation = work.foveation,  // the foveated work grid: identity axes leave every mapping uniform
       });
   // DLSS reads it next, in NON_PIXEL_SHADER_RESOURCE; leaving UNORDERED_ACCESS also finishes the writes.
   Transition(list, private_color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
@@ -1344,6 +1365,7 @@ nr::BoundResource NrPipeline::ConvertLaunchpadMotion(ID3D12GraphicsCommandList* 
                                                 .canvas = work.canvas,
                                                 .scale_x = scale_x * static_cast<float>(work.image.width) / static_cast<float>(region.width),
                                                 .scale_y = scale_y * static_cast<float>(work.image.height) / static_cast<float>(region.height),
+                                                .foveation = work.foveation,  // the foveated work grid: identity axes leave every mapping uniform
                                             });
   Transition(list, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   launchpad_motion_.last_use = slot_marks_[slot];

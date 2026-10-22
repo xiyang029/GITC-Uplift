@@ -84,7 +84,8 @@ struct OverlayState {
   bool confirm_restore = false;  // G2: the first click of Restore all defaults
   bool retry_now = false;        // D11: the add-on calls DeviceContext::RetryNow after DrawOverlay and clears it
   // An APPLY_ON_RELEASE slider being held: the value it shows. The setting keeps the applied one until release.
-  std::optional<int> pending_release;
+  // double: the four foveation rows are FLOAT ("% .0f %%") and Pass Count is UINT, so one slot holds both.
+  std::optional<double> pending_release;
   std::string_view pending_key;  // the held row's key (schema keys are static)
   // Plan 14 (R89): the Setup highlights' settle, for the device they belong to (a change of device starts it afresh).
   SetupSettle setup_settle;

@@ -74,6 +74,13 @@ struct FrameConfig {
   float resolution_scale = 100.f;                            // Resolution = Custom: % of the output
   bool resolution_slider_held = false;                       // the Custom slider is being dragged: the work size waits
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
+  // Foveated edge scaling (2026-10-21): NR works a grid that keeps the output's centre at full density and falls off toward the edges, so the edges cost fewer
+  // NR pixels than the centre. The sizes are the output's own pixels per axis. Before upscaling it is ignored: NR there works at the game's render size.
+  bool foveation = false;
+  uint32_t foveation_width = 1400;   // the full-density centre's width
+  uint32_t foveation_height = 800;   // and its height
+  uint32_t foveation_falloff = 400;  // output pixels of smooth fall-off on each side of the centre
+  float foveation_edge = 50.f;       // the density the fall-off reaches at the edge, in percent (25 to 100, where 100 is off)
   bool pre_upscale = false;  // v2 design §3.9: NR before DLSS-SR upscales
   sources::LookConfig look;  // Plan 5: the look stage, the colour fixes, Mask, UI correction, passes 2..10
   bool launchpad_motion = true;       // Plan 6: MotionVectors Auto, Launchpad or (2026-10-08) Lumenite: the Present path may bind UPLIFT_MV

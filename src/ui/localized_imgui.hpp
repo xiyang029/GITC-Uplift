@@ -56,6 +56,8 @@ inline void BulletText(const char* format, ...) {
 }
 inline void SetTooltip(const char* format, ...) {
   va_list args; va_start(args, format); const auto text = Formatted(format, args); va_end(args);
+  // Nothing to say, no bubble: ImGui draws an empty one for an empty string, which reads as a glitch.
+  if (text.empty()) return;
   ImGui::SetTooltip("%s", text.c_str());
 }
 inline ImVec2 CalcTextSize(const char* text, const char* end = nullptr, bool hide = false, float wrap = -1.f) {

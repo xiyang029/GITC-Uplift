@@ -772,7 +772,16 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
       break;
   }
   StageState& state = stages_[static_cast<size_t>(stage)];
-  const nr::Size image = state.settle.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, slider_held);
+  const nr::Size uniform = state.settle.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, slider_held);
+  // Foveated edge scaling (2026-10-21): the output keeps its detail in the centre and NR works a grid that shrinks toward the edges. Only after upscaling, where
+  // NR's output really is the screen: Before upscaling works at the game's own render size. The player's numbers are in output pixels and MapToWork carries them
+  // onto `uniform`, the grid the warp is actually applied to, so the centre keeps its share of the screen when the Resolution mode shrinks it. MakeGrid hands back
+  // the identity grid when the centre already covers that grid or the saving is too small to pay for the guide resample, so an unsupported screen behaves as before.
+  const nr::foveation::Params foveation_params =
+      nr::foveation::MapToWork({config_.foveation_width, config_.foveation_height, config_.foveation_falloff, config_.foveation_edge / 100.f},
+                               output.width, output.height, uniform.width, uniform.height);
+  const nr::foveation::Grid grid = nr::foveation::MakeGrid(config_.foveation && !before_upscaling, foveation_params, uniform.width, uniform.height);
+  const nr::Size image = {nr::foveation::WarpedExtent(uniform.width, grid.x), nr::foveation::WarpedExtent(uniform.height, grid.y)};
   const nr::Size canvas = ((before_upscaling && !nr::MeetsNrFloor(image)) ? sources::CanvasSize(image) : image);
   state.work = image;
   state.canvas = canvas;
@@ -781,7 +790,7 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
     canvas_size_ = canvas;
   }
   session_->NoteFrameSize(static_cast<uint8_t>(stage), canvas);
-  return {.image = image, .canvas = canvas, .upsampling = config_.upsampling};
+  return {.image = image, .canvas = canvas, .upsampling = config_.upsampling, .foveation = grid};
 }
 
 sources::AfterDlssConfig DeviceContext::DlssConfig(const sources::WorkLayout& layout, uint32_t group) const {

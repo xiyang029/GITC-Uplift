@@ -99,7 +99,8 @@ constexpr std::array<MaskFormat, 10> MASK_FORMATS = {{
 // A recording at `output` runs at: an empty image is the output itself, an empty canvas the image (Direct3D 12's Resolve).
 WorkLayout Resolve(const WorkLayout& layout, nr::Size output) {
   const nr::Size image = (layout.image.Empty() ? output : layout.image);
-  return {.image = image, .canvas = (layout.canvas.Empty() ? image : layout.canvas), .upsampling = layout.upsampling};
+  return {.image = image, .canvas = (layout.canvas.Empty() ? image : layout.canvas), .upsampling = layout.upsampling,
+          .foveation = layout.foveation};
 }
 
 // Plan 17: the readback ring's buffer and memory (either may be null). Device idle for them, or the GPU past their last copy.
@@ -852,6 +853,14 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
   const bool reduced = (work.image != size);
   // The set: A and B at the canvas, and the required change field at the work image. A different layout (or the other placement's set)
   // reallocates it (the old one retires at its mark).
+  // The foveated grid can move under surfaces that still fit (a shorter fall-off, a denser edge, a smaller centre): NR's
+  // history and the stabiliser's then describe the old mapping of the same pixels, so both start afresh. The field is
+  // copied first, so the size comparison below still sees a set that needs no reallocation for a moved grid alone.
+  if (set_->intermediates.a.image != VK_NULL_HANDLE && set_->intermediates.foveation != work.foveation) {
+    set_->intermediates.foveation = work.foveation;
+    set_->intermediates.reset_pending = true;
+    set_->look.history_valid = false;
+  }
   if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr || set_->intermediates.size != work.canvas || set_->intermediates.image != work.image
       || set_->intermediates.output != size) {
     RetireSet(set_);
@@ -859,6 +868,7 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
         .size = work.canvas,
         .image = work.image,
         .output = size,
+        .foveation = work.foveation,
         .bytes = (work.canvas.Pixels() * 2u + work.image.Pixels()) * MODEL_BYTES_PER_PIXEL,
         .motion_bytes = work.canvas.Pixels() * MOTION_BYTES_PER_PIXEL,
     };
@@ -929,6 +939,7 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
       .region = region,
       .canvas = work.canvas,
       .options = options,
+      .foveation = work.foveation,  // the foveated work grid: identity axes leave every mapping uniform
   };
   // InputExposure = Metered: the meter reads the region the encode reads, in place, and the encode and the decode read its state as their exposure. Plan 17:
   // it also runs for Auto's check, where a failed dispatch only skips that sample.
@@ -1010,7 +1021,7 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
                             .upsampling = after.upsampling,
                             .options = options,
                             .chroma_clamp = config_.fixes.chroma_clamp,
-                            .mask = BoundMask(slot)})) {
+                            .mask = BoundMask(slot), .foveation = work.foveation})) {  // the foveated work grid: identity axes leave every mapping uniform
     return {.recorded = true, .reason = "decode failed", .motion_source = motion_source, .motion_scale_x = frame_inputs.motion_scale_x, .motion_scale_y = frame_inputs.motion_scale_y};
   }
   Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -1066,6 +1077,12 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
   if (!timeline_.IsComplete(slot_marks_[slot])) return {.reason = "descriptors busy"};
   const nr::Size color_size = {game.Width, game.Height};
   // The change field always exists here (I-1): whether a frame needs it depends on its render region, which the set is not keyed on.
+  // See RecordUav: a grid that moves under surfaces that still fit restarts the histories, not the set.
+  if (set_->intermediates.a.image != VK_NULL_HANDLE && set_->intermediates.foveation != work.foveation) {
+    set_->intermediates.foveation = work.foveation;
+    set_->intermediates.reset_pending = true;
+    set_->look.history_valid = false;
+  }
   if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr || set_->intermediates.size != canvas || set_->intermediates.image != image
       || set_->intermediates.color_size != color_size) {
     RetireSet(set_);
@@ -1075,6 +1092,7 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
         .output = image,
         .color_size = color_size,
         .pre_sr = true,
+        .foveation = work.foveation,
         .bytes = (canvas.Pixels() * 2u + color_size.Pixels() + image.Pixels()) * MODEL_BYTES_PER_PIXEL,
         .motion_bytes = canvas.Pixels() * MOTION_BYTES_PER_PIXEL,
     };
@@ -1151,6 +1169,7 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
       .region = region,
       .canvas = canvas,
       .options = options,
+      .foveation = work.foveation,  // the foveated work grid: identity axes leave every mapping uniform
   };
   if (exposure.metered || exposure.probe) {
     const bool recorded = RecordMeter(buffer, slot,
@@ -1178,7 +1197,8 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
                          .image = image,
                          .canvas = canvas,
                          .scale_x = inputs.motion_scale_x * static_cast<float>(image.width) / static_cast<float>(motion_region.width),
-                         .scale_y = inputs.motion_scale_y * static_cast<float>(image.height) / static_cast<float>(motion_region.height)});
+                         .scale_y = inputs.motion_scale_y * static_cast<float>(image.height) / static_cast<float>(motion_region.height),
+                         .foveation = work.foveation});
     HandToNgx(buffer, set_->intermediates.canvas_motion);
     frame_inputs.motion = {.resource = nr::AsResource(&set_->intermediates.canvas_motion.ngx)};
     frame_inputs.motion_scale_x = 1.f;
@@ -1241,7 +1261,7 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
                             .upsampling = after.upsampling,
                             .options = options,
                             .chroma_clamp = config_.fixes.chroma_clamp,
-                            .mask = BoundMask(slot)})) {
+                            .mask = BoundMask(slot), .foveation = work.foveation})) {  // the foveated work grid: identity axes leave every mapping uniform
     return {.recorded = true, .reason = "decode failed", .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
   }
   HandToNgx(buffer, set_->intermediates.private_color);
@@ -1379,7 +1399,8 @@ bool VkNrPipeline::ConvertLaunchpadMotion(VkCommandBuffer buffer, const VkPresen
                                              .image = work.image,
                                              .canvas = work.canvas,
                                              .scale_x = target.motion_scale_x * static_cast<float>(work.image.width) / static_cast<float>(region.width),
-                                             .scale_y = target.motion_scale_y * static_cast<float>(work.image.height) / static_cast<float>(region.height)});
+                                             .scale_y = target.motion_scale_y * static_cast<float>(work.image.height) / static_cast<float>(region.height),
+                                             .foveation = work.foveation});
   HandToNgx(buffer, present_.launchpad);
   return recorded;
 }

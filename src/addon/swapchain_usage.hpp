@@ -5,15 +5,13 @@
 namespace uplift::addon {
 
 // Plan 11 (Vulkan design §3.5, R51): ReShade's Vulkan layer gives a swap chain's images COLOR_ATTACHMENT and TRANSFER_SRC, not TRANSFER_DST, which
-// NR's copy back needs. create_swapchain is event 97 in ReShade 6.8, with (device_api, swapchain_desc&, void* hwnd) (reshade_events.hpp:164-169,
-// 1842). The pinned 6.0.0 headers know it only as enum value 7 with (desc, hwnd), a signature with no API: a handler could not tell a DXGI swap
-// chain from a Vulkan one. 6.8 leaves 7 unused and never raises it, and a ReShade without 97 ignores the id (addon_manager.cpp:558), so Uplift
-// registers 97 raw and never 7.
-inline constexpr uint32_t CREATE_SWAPCHAIN_EVENT = 97u;
+// NR's copy back needs. create_swapchain is event 97 in ReShade 6.8, with (device_api, swapchain_desc&, void* hwnd) (reshade_events.hpp:169, 1843),
+// which is what the pinned v6.8.0 headers declare, so the handler is registered through reshade::register_event like every other. A ReShade older
+// than 6.8 leaves 97 unused and never raises it (event 7 was its unnamed predecessor), so nothing fires there and no copy access is added.
 
 // AddonInit, beside RegisterCreateDeviceEvent. The handler returns before doing anything for every API but Vulkan, takes no lock at all, and
-// touches only desc.back_buffer.usage and, when `desc_has_fullscreen_state`, reads desc.fullscreen_state (their offsets are the same in both layouts
-// of swapchain_desc, which is longer in 6.8; desc is never copied).
+// touches only desc.back_buffer.usage and, when `desc_has_fullscreen_state`, reads desc.fullscreen_state (the pinned 6.8 header's own field; an
+// older runtime's shorter swapchain_desc never gets here; desc is never copied).
 //
 // Final review I-2: for a swap chain that asks for exclusive fullscreen (the app chained VkSurfaceFullScreenExclusiveInfoEXT with ALLOWED, which 6.8
 // reports as desc.fullscreen_state) the handler returns false and adds nothing. Returning true would make ReShade rebuild the create info from its

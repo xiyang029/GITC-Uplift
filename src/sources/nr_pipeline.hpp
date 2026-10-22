@@ -13,6 +13,7 @@
 #include "color/color_pipeline.hpp"
 #include "color/encoding.hpp"
 #include "look/look_math.hpp"
+#include "nr/foveation.hpp"
 #include "nr/session.hpp"
 #include "nr/timeline.hpp"
 #include "nr/types.hpp"
@@ -73,6 +74,9 @@ struct WorkLayout {
   nr::Size image;   // the output region resampled to this size; empty = the output size (Full)
   nr::Size canvas;  // NR's network size: `image` plus mirrored padding (pre-SR below the floor); empty = `image`
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;  // how NR's change returns to the output size
+  // Foveated edge scaling (2026-10-21): `image` and `canvas` above are already the warped grid's sizes (WorkSize times each axis' gmax), so the shaders only need
+  // the grid to map between them and the output. Identity axes (a default Grid) leave every mapping exactly as it was.
+  nr::foveation::Grid foveation;
 };
 
 // Split chain (design 3.3): the part of the NR chain one recording runs. The default is every pass on the first set: the single chain of before the split.
@@ -279,6 +283,9 @@ class NrPipeline final : private nr::PassResolver {
     TargetKind kind = TargetKind::PRESENT;
     nr::Size private_color;                         // pre-SR: the game's Color dimensions
     bool canvas_motion = false;                     // pre-SR in a canvas, with motion vectors to copy into it
+    // The warped work grid the set was made for (nr/foveation.hpp). A grid that moves while the surfaces still fit restarts
+    // the histories instead of reallocating: see EnsureIntermediates.
+    nr::foveation::Grid foveation;
     friend bool operator==(const SetPlan&, const SetPlan&) = default;
   };
   struct Intermediates {

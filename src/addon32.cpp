@@ -42,6 +42,7 @@
 #include "ui/settings.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/status_text.hpp"
+#include "ui/style.hpp"
 #include "vk/device_hook.hpp"
 
 // The name ReShade shows in its Add-ons list. The log lines keep their "[Uplift]" prefix (addon/log_bridge.cpp).
@@ -556,6 +557,7 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon_module, HMODULE 
   if (g_state == nullptr) return;
   g_state->front->Quit();  // QUIT, a capped wait for the exit, then the job closes: the helper never outlives the game
   addon::RemoveLogBridge();
+  ui::style::Restore();
   reshade::unregister_addon(addon_module, reshade_module);
 }
 

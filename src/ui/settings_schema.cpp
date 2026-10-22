@@ -562,6 +562,73 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.resolution_scale_present = static_cast<float>(v); },
     },
     {
+        // Foveated edge scaling (2026-10-21): the work grid keeps the output's centre at full density and falls off toward the edges, so the edges cost fewer
+        // NR pixels than the centre (and the guide resample they need). Only after upscaling: Before upscaling works at the game's own render size.
+        .key = "Foveation",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::PLACEMENT,
+        .label = "Foveated edges",
+        .tooltip = "NR works a grid that keeps the centre of the output at full density and falls off toward the edges: the edges cost fewer NR pixels, the centre "
+                   "is unchanged. After DLSS and Present only. A screen that cannot save at least 5 % of them stays uniform, and the four controls below are kept "
+                   "to that share of the screen when the Resolution mode shrinks the grid.",
+        .flags = RESTARTS_HISTORY,
+        .get = [](const Settings& s) { return Flag(s.foveation); },
+        .set = [](Settings& s, double v) { s.foveation = (v != 0.0); },
+    },
+    {
+        // The four foveation rows apply on release (APPLY_ON_RELEASE): each edit re-plans and rebuilds the guide and the mappings, so a drag would reset NR's
+        // history every frame. As Pass Count's.
+        .key = "FoveationWidth",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Full-density centre width",
+        .tooltip = "The centre's width as a share of the screen: this part of the image keeps NR's full density at any resolution. A centre wider than the grid is "
+                   "clamped to it, which switches the scaling off. Only after upscaling.",
+        .min = 320.0,
+        .max = 7680.0,
+        .flags = RESTARTS_HISTORY | APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.foveation_width); },
+        .set = [](Settings& s, double v) { s.foveation_width = static_cast<uint32_t>(v); },
+    },
+    {
+        .key = "FoveationHeight",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Full-density centre height",
+        .tooltip = "The centre's height as a share of the screen, as the width above. On a wide screen the height is usually what the centre can still span. Only after upscaling.",
+        .min = 240.0,
+        .max = 4320.0,
+        .flags = RESTARTS_HISTORY | APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.foveation_height); },
+        .set = [](Settings& s, double v) { s.foveation_height = static_cast<uint32_t>(v); },
+    },
+    {
+        .key = "FoveationFalloff",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Fall-off length",
+        .tooltip = "How far the density takes to fall from the centre to the edge value, as a share of the screen. Longer is gentler and leaves the edges sharper; "
+                   "shorter saves more. A fall-off longer than the distance to the edge simply reaches the edge later. Only after upscaling.",
+        .min = 0.0,
+        .max = 2000.0,
+        .flags = RESTARTS_HISTORY | APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.foveation_falloff); },
+        .set = [](Settings& s, double v) { s.foveation_falloff = static_cast<uint32_t>(v); },
+    },
+    {
+        .key = "FoveationEdge",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Edge density (%)",
+        .tooltip = "The NR density the fall-off reaches at the outermost edge (and Edge x Edge in the corners). 100 % is off. 4K and ultrawide screens are "
+                   "happiest well below it. Only after upscaling.",
+        .min = 25.0,
+        .max = 100.0,
+        .flags = SLIDER_RANGE_ONLY | RESTARTS_HISTORY | APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.foveation_edge); },
+        .set = [](Settings& s, double v) { s.foveation_edge = static_cast<float>(v); },
+    },
+    {
         // Split chain, owner's decision Q5a: a later stage group's own Keep faces, default off. Pass 1's group follows Keep faces itself.
         .key = "KeepFacesAfterDlss",
         .kind = SettingKind::BOOL,

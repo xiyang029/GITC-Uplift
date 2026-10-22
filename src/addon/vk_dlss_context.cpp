@@ -658,7 +658,14 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
       break;
   }
   StageState& state = stages_[static_cast<size_t>(stage)];
-  const nr::Size image = state.settle.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, slider_held);
+  const nr::Size uniform = state.settle.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, slider_held);
+  // Foveated edge scaling (2026-10-21), as DeviceContext::SettleLayout: only after upscaling, the player's output pixels carried onto the settled grid
+  // (MapToWork), and the identity grid whenever that grid cannot pay for the warp.
+  const nr::foveation::Params foveation_params =
+      nr::foveation::MapToWork({config_.foveation_width, config_.foveation_height, config_.foveation_falloff, config_.foveation_edge / 100.f},
+                               output.width, output.height, uniform.width, uniform.height);
+  const nr::foveation::Grid grid = nr::foveation::MakeGrid(config_.foveation && !before_upscaling, foveation_params, uniform.width, uniform.height);
+  const nr::Size image = {nr::foveation::WarpedExtent(uniform.width, grid.x), nr::foveation::WarpedExtent(uniform.height, grid.y)};
   const nr::Size canvas = ((before_upscaling && !nr::MeetsNrFloor(image)) ? sources::CanvasSize(image) : image);
   state.work = image;
   state.canvas = canvas;
@@ -667,7 +674,7 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
     canvas_size_ = canvas;
   }
   session_->NoteFrameSize(static_cast<uint8_t>(stage), canvas);
-  return {.image = image, .canvas = canvas, .upsampling = config_.upsampling};
+  return {.image = image, .canvas = canvas, .upsampling = config_.upsampling, .foveation = grid};
 }
 
 void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {

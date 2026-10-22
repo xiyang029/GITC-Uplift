@@ -192,7 +192,7 @@ struct PassSettings {
 // Every setting persisted in ReShade.ini [Uplift] (spec §12, v2 design §5), with their defaults.
 // ui/settings_schema.cpp describes each field once; load, save, sanitising and the overlay read it.
 struct Settings {
-  Language language = Language::ENGLISH;
+  Language language = Language::SIMPLIFIED_CHINESE;
   bool enabled = false;
   uint32_t enable_key = 0u;  // Win32 virtual-key code; 0 = no hotkey
   float intensity = 1.f;     // slider 0-1; typed values up to 10 pass through
@@ -242,6 +242,13 @@ struct Settings {
   ResolutionMode resolution_mode = ResolutionMode::FULL;  // user ruling: Full by default
   float resolution_scale = 100.f;                         // Custom: % of the output, 25-100
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
+  // Foveated edge scaling (2026-10-21): NR's work grid keeps the centre of the output at full density and falls off toward the edges. The centre and the
+  // fall-off are in the output's own pixels; `edge` is the density the fall-off reaches (a tenth of a percent, 25-100).
+  bool foveation = false;
+  uint32_t foveation_width = 1400;
+  uint32_t foveation_height = 800;
+  uint32_t foveation_falloff = 400;
+  float foveation_edge = 50.f;
   // Split chain (2026-10-10): a later stage group's size (its first pass is not pass 1), keyed by stage; pass 1's group uses Resolution above. Before
   // upscaling is always the first stage, so it has none.
   ResolutionMode resolution_mode_after_dlss = ResolutionMode::FULL;

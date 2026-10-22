@@ -35,7 +35,7 @@
 namespace uplift::color {
 namespace {
 
-constexpr uint32_t PASS_CONSTANTS = 16u;  // the encode's, the decode's, the motion copy's and the stabiliser's constant buffers: 16 dwords each
+constexpr uint32_t PASS_CONSTANTS = 20u;  // the encode's, the decode's, the motion copy's and the stabiliser's constant buffers: 16 dwords, plus the foveated grid's four
 // Ring slots per recording (Plan 14): one per dispatch, as each dispatch reads its own constants. The encode, the decode, the motion copy, the change
 // pass, the stabiliser's scene cut, levels and detail, the shape, the meter, one resolve per later pass, then one per pyramid level (look::MakeAtlas makes at
 // most 16).
@@ -165,6 +165,10 @@ std::array<uint32_t, PASS_CONSTANTS> EncodeConstants(const VkEncodePass& pass, u
       change_mode,
       pass.options,
       0u,
+      pass.foveation.x.packed,
+      pass.foveation.y.packed,
+      Bits(pass.foveation.x.gmax),
+      Bits(pass.foveation.y.gmax),
   };
 }
 
@@ -547,6 +551,10 @@ bool VkColorPipeline::RecordDecode(VkCommandBuffer buffer, uint32_t slot, const 
       pass.source_y,
       pass.options | (pass.mask.view != VK_NULL_HANDLE ? shader_options::MASK : 0u),
       Bits(pass.chroma_clamp),
+      pass.foveation.x.packed,
+      pass.foveation.y.packed,
+      Bits(pass.foveation.x.gmax),
+      Bits(pass.foveation.y.gmax),
   };
   Bindings bindings;
   bindings.sampled = {pass.source, Own(pass.nr_output), pass.exposure, pass.mask, VkSampledView{}};
@@ -576,6 +584,10 @@ bool VkColorPipeline::RecordMotion(VkCommandBuffer buffer, uint32_t slot, const 
       0u,
       0u,
       0u,
+      pass.foveation.x.packed,
+      pass.foveation.y.packed,
+      Bits(pass.foveation.x.gmax),
+      Bits(pass.foveation.y.gmax),
   };
   Bindings bindings;
   bindings.sampled[1] = pass.source;

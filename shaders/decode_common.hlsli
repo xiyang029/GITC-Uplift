@@ -2,6 +2,7 @@
 #define UPLIFT_DECODE_COMMON_HLSLI
 
 #include "change_common.hlsli"
+#include "foveation.hlsli"
 #include "vk_common.hlsli"
 
 // Shared by decode_ps.hlsl (the Present path, through an RTV) and decode_cs.hlsl (UAV targets).
@@ -22,6 +23,10 @@ cbuffer DecodeConstants : register(b0) {
   uint source_y;
   uint options;        // Plan 5: OPTION_* (the primaries, Consistent transfer, the mask)
   float chroma_clamp;  // Plan 5 (F14): stops; 0 = off
+  uint foveation_x;    // foveated grid: the packed per-axis warp (0 = identity) and G(1), its mean density
+  uint foveation_y;
+  float foveation_gmax_x;
+  float foveation_gmax_y;
 };
 
 // Plan 13: on Vulkan's After DLSS the decode works in place: the target (DLSS's output, u0) is also where the original pixel is read.
@@ -100,7 +105,8 @@ float4 DecodePixel(uint2 pixel) {
   } else {
     uint2 size;
     change_texture.GetDimensions(size.x, size.y);
-    const float2 position = (float2(pixel) + 0.5f) * (float2(size) / float2(width, height)) - 0.5f;
+    const float2 position = FovFullToWorkPos(pixel, uint2(width, height), size, uint2(foveation_x, foveation_y),
+                                             float2(foveation_gmax_x, foveation_gmax_y));
     if (upsampling == 2u) {
       const float3 model = EncodeModel(encoding, primaries, source.rgb, scale);
       change = ChangeEdgeAware(position, size, log2(max(Luminance(SrgbDecode(model)), 0.f) + ChangeEpsilon(encoding)));

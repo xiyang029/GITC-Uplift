@@ -12,6 +12,7 @@
 
 #include "color/encoding.hpp"
 #include "look/look_math.hpp"
+#include "nr/foveation.hpp"
 #include "nr/types.hpp"
 
 namespace uplift::color {
@@ -38,6 +39,7 @@ struct EncodePass {
   nr::Rect region;  // the part of `source` resampled to the image; all zero = width x height at (0, 0)
   nr::Size canvas;  // the model texture: the image plus mirrored padding; empty = the image
   uint32_t options = 0u;  // Plan 5: shader_options (the primaries, the near-black guard)
+  nr::foveation::Grid foveation;  // the foveated work grid: identity axes leave every mapping uniform
 };
 
 struct DecodePass {
@@ -60,6 +62,7 @@ struct DecodePass {
   float chroma_clamp = 0.f;                           // Plan 5 (F14): stops; 0 = off
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
+  nr::foveation::Grid foveation;  // the foveated work grid: identity axes leave every mapping uniform
 };
 
 // The After-DLSS decode (v2 design §3.4 step 5): compute, into a region of a UAV target.
@@ -86,6 +89,7 @@ struct ComputeDecodePass {
   float chroma_clamp = 0.f;                           // Plan 5 (F14): stops; 0 = off
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
+  nr::foveation::Grid foveation;  // the foveated work grid: identity axes leave every mapping uniform
 };
 
 // v2 design §3.7: NR's change field at the work image size, from the model input recomputed exactly
@@ -111,6 +115,7 @@ struct MotionPass {
   float offset_x = 0.f;  // added in destination pixels, before any vertical flip
   float offset_y = 0.f;
   bool flip_y = false;               // 1.1.6: `source` is upside down against `target` (motion_cs.hlsl)
+  nr::foveation::Grid foveation;  // the foveated work grid: identity axes leave every mapping uniform
 };
 
 // Plan 5 (v2 design §3.14): the exposure meter and governor, one thread group, before the encode.

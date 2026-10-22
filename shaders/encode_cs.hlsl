@@ -1,4 +1,5 @@
 #include "change_common.hlsli"
+#include "foveation.hlsli"
 #include "vk_common.hlsli"
 
 cbuffer EncodeConstants : register(b0) {
@@ -18,6 +19,10 @@ cbuffer EncodeConstants : register(b0) {
   uint change_mode;    // 0: encode; 1: extract changes with recomputed input; 2: extract changes with preserved FP16 input
   uint options;        // Plan 5: OPTION_* (the primaries, the near-black guard)
   uint reserved0;
+  uint foveation_x;    // foveated grid: the packed per-axis warp (0 = identity) and G(1), its mean density
+  uint foveation_y;
+  float foveation_gmax_x;
+  float foveation_gmax_y;
 };
 
 // Plan 13: on Vulkan's After DLSS the source is DLSS's output, read in place from its storage view (u2).
@@ -40,8 +45,12 @@ static const int MAX_TAPS = 8;  // per side of one footprint: the floor keeps ev
 // light, each source pixel weighted by the share of it the footprint covers.
 float3 AreaAverage(uint2 pixel, float scale) {
   const float2 ratio = float2(source_width, source_height) / float2(width, height);
-  const float2 low = float2(pixel) * ratio;
-  const float2 high = low + ratio;
+  float2 low = float2(pixel) * ratio;
+  float2 high = low + ratio;
+  // Foveated grid: this work texel covers the unwarped span of the full image, so the centre keeps the
+  // uniform density exactly and the fall-off and edge zones average fewer source pixels.
+  FovWorkFootprint(pixel, uint2(width, height), uint2(source_width, source_height), uint2(foveation_x, foveation_y),
+                   float2(foveation_gmax_x, foveation_gmax_y), low, high);
   const int2 first = int2(floor(low));
   const int2 last = min(int2(ceil(high)) - 1, int2(source_width, source_height) - 1);
   float3 sum = float3(0.f, 0.f, 0.f);

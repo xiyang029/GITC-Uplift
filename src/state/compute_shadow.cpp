@@ -7,8 +7,7 @@ namespace uplift::state {
 std::optional<RootViewType> RootViewTypeOf(uint32_t descriptor_type) {
   switch (descriptor_type) {
     case DESCRIPTOR_BUFFER_SRV:
-    case DESCRIPTOR_ACCELERATION_STRUCTURE_6_1:
-    case DESCRIPTOR_ACCELERATION_STRUCTURE_6_8: return RootViewType::SRV;
+    case DESCRIPTOR_ACCELERATION_STRUCTURE: return RootViewType::SRV;
     case DESCRIPTOR_BUFFER_UAV:                 return RootViewType::UAV;
     case DESCRIPTOR_CONSTANT_BUFFER:            return RootViewType::CBV;
     default:                                    return std::nullopt;

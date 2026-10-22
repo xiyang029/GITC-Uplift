@@ -182,7 +182,8 @@ foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0"
             -Fh "${shader_header}" -Vn g_${shader_name} "${CMAKE_SOURCE_DIR}/shaders/${shader_name}.hlsl"
     DEPENDS "${CMAKE_SOURCE_DIR}/shaders/${shader_name}.hlsl" "${CMAKE_SOURCE_DIR}/shaders/color_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/change_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/decode_common.hlsli"
-            "${CMAKE_SOURCE_DIR}/shaders/look_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/vk_common.hlsli"
+            "${CMAKE_SOURCE_DIR}/shaders/foveation.hlsli" "${CMAKE_SOURCE_DIR}/shaders/look_common.hlsli"
+            "${CMAKE_SOURCE_DIR}/shaders/vk_common.hlsli"
     COMMENT "dxc ${shader_name}.hlsl (${shader_profile})"
     VERBATIM)
   list(APPEND UPLIFT_SHADER_HEADERS "${shader_header}")
@@ -205,7 +206,8 @@ function(uplift_add_spirv name source)
     COMMAND "${UPLIFT_DXC_SPIRV}" ${UPLIFT_SPIRV_FLAGS} ${ARGN} -Fh "${header}" -Vn g_${name} "${CMAKE_SOURCE_DIR}/shaders/${source}.hlsl"
     DEPENDS "${CMAKE_SOURCE_DIR}/shaders/${source}.hlsl" "${CMAKE_SOURCE_DIR}/shaders/vk_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/color_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/change_common.hlsli"
-            "${CMAKE_SOURCE_DIR}/shaders/decode_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/look_common.hlsli"
+            "${CMAKE_SOURCE_DIR}/shaders/decode_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/foveation.hlsli"
+            "${CMAKE_SOURCE_DIR}/shaders/look_common.hlsli"
     COMMENT "dxc (SPIR-V) ${name}"
     VERBATIM)
   set(UPLIFT_SHADER_HEADERS ${UPLIFT_SHADER_HEADERS} "${header}" PARENT_SCOPE)
@@ -331,7 +333,8 @@ add_library(uplift_addon SHARED
   src/addon/reshade_vk_host.cpp
   src/addon/reshade_gl_host.cpp
   src/addon/reshade_d3d12_host.cpp
-  src/ui/overlay.cpp)
+  src/ui/overlay.cpp
+  src/ui/style.cpp)
 set_target_properties(uplift_addon PROPERTIES OUTPUT_NAME "gitc-uplift" SUFFIX ".addon64")
 target_include_directories(uplift_addon SYSTEM PRIVATE "${UPLIFT_RESHADE_INCLUDE}" "${UPLIFT_IMGUI_INCLUDE}")
 target_include_directories(uplift_addon PRIVATE "${UPLIFT_GENERATED}")
@@ -400,7 +403,8 @@ add_library(uplift_addon32 SHARED
   src/addon/reshade_vk_host.cpp
   src/addon/reshade_gl_host.cpp
   src/addon/reshade_d3d12_host.cpp
-  src/ui/overlay.cpp)
+  src/ui/overlay.cpp
+  src/ui/style.cpp)
 set_target_properties(uplift_addon32 PROPERTIES OUTPUT_NAME "gitc-uplift" SUFFIX ".addon32")
 target_include_directories(uplift_addon32 SYSTEM PRIVATE "${UPLIFT_RESHADE_INCLUDE}" "${UPLIFT_IMGUI_INCLUDE}")
 target_include_directories(uplift_addon32 PRIVATE "${UPLIFT_GENERATED}")

@@ -13,6 +13,8 @@
 #include "addon/reshade_api.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/localized_imgui.hpp"
+#include "ui/style.hpp"
+#include "ui/widgets.hpp"
 
 namespace uplift::ui {
 namespace {
@@ -20,56 +22,15 @@ namespace {
 // ui-review.md §3 (user decision) and §4.3: every row with three or fewer short choices -- Source,
 // Motion vectors, Compare, Model, Upsampling, Stabilise, NR mask, UI correction and any other CHOICE row
 // this short -- draws as a segmented control instead of RadioButton (which sizes to its text) or a
-// Combo, so every option is equally sized and the row's total width matches CalcItemWidth(), lining up
+// Combo, so every option is equally sized and the row's total width matches the control column, lining up
 // with the sliders and combos above and below it. `why[i]` non-empty greys option `i`; its tooltip
-// starts "Unavailable here: <why[i]>", then `tips[i]`. The row label sits on the right, at the same x a
-// slider's label would sit at (ui-review.md §4.3's RadioRow sketch, adapted to draw buttons). Returns
-// the clicked option, or -1.
+// starts "Unavailable here: <why[i]>", then `tips[i]`. The label goes into the row's label column, as
+// every other row's does (widgets::RowLabel). Returns the clicked option, or -1.
 int RadioRow(const char* label, std::span<const char* const> options, std::span<const std::string_view> why,
              std::span<const std::string_view> tips, int selected) {
-  const ImGuiStyle& style = gui::GetStyle();
-  const float total_width = gui::CalcItemWidth();
-  const float gap = style.ItemInnerSpacing.x;
-  const size_t count = options.size();
-  const float button_width = (total_width - static_cast<float>(count - 1u) * gap) / static_cast<float>(count);
-  const float label_x = gui::GetCursorPosX() + total_width + gap;
-  int clicked = -1;
-  for (size_t index = 0u; index < count; ++index) {
-    if (index > 0u) {
-      gui::SameLine(0.f, gap);
-    }
-    gui::PushID(static_cast<int>(index));
-    const bool selected_option = (selected == static_cast<int>(index));
-    if (selected_option) {
-      gui::PushStyleColor(ImGuiCol_Button, gui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-    }
-    gui::BeginDisabled(!why[index].empty());
-    if (gui::Button(options[index], ImVec2(button_width, 0.f))) {
-      clicked = static_cast<int>(index);
-    }
-    gui::EndDisabled();
-    if (selected_option) {
-      gui::PopStyleColor();
-    }
-    if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      std::string tooltip;
-      if (!why[index].empty()) {
-        tooltip = std::format("Unavailable here: {}", why[index]);
-        if (!tips[index].empty()) {
-          tooltip += "\n";
-        }
-      }
-      tooltip += tips[index];
-      if (!tooltip.empty()) {
-        gui::SetTooltip("%s", tooltip.c_str());
-      }
-    }
-    gui::PopID();
-  }
-  gui::SameLine();
-  gui::SetCursorPosX(std::max(gui::GetCursorPosX(), label_x));
-  gui::TextUnformatted(label);
-  return clicked;
+  widgets::RowLabel(label);
+  return widgets::Segmented(label, options.data(), static_cast<int>(options.size()), selected,
+                            why.empty() ? nullptr : why.data(), tips.empty() ? nullptr : tips.data());
 }
 
 // Plan 14 (R90): the tooltip line of a highlighted option while the highlight is not the stored preference (what runs differs from what ReShade.ini holds).
@@ -78,8 +39,12 @@ std::string SavedNote(std::string_view preference) {
 }
 
 // One schema row. Returns true when the value changed. Called both from DrawOverlay (the Enable
-// row) and from its own draw_rows lambda (every other row), so it stays a free function.
-bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state) {
+// row) and from its own draw_rows lambda (every other row), so it stays a free function. `inline_label`
+// asks for the row's label to sit right against its control instead of in the panel's label column: only
+// the Enable row does, since its switch and hotkey button are the whole row and a column would leave a gap
+// between the label and the switch.
+bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state,
+             bool inline_label = false) {
   const std::string label(descriptor.label);
   // Plan 6 (D6): with Compare = Built-in, a look-group row shows its built-in value, read-only: edits never reach `settings`.
   const bool read_only = (state->defaults_view && InDefaultsView(descriptor));
@@ -141,34 +106,43 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       : (keep_faces_row && !view.keep_faces_unavailable.empty())               ? std::string_view(view.keep_faces_unavailable)
       : (descriptor.key == "ShowFaceMask" && !settings->keep_faces)            ? std::string_view("Turn on Keep faces (Look) first")
                                                                                : std::string_view();
+  // Every row's label goes into the label column and its control into the control column with no text of
+  // its own (`##key` keeps the id), so labels, controls and the reset arrows line up down the whole panel.
+  const std::string hidden = std::format("##{}", descriptor.key);
+  const std::string tip(descriptor.tooltip);
+  const char* const tip_text = (tip.empty() ? nullptr : tip.c_str());
   gui::BeginDisabled(!disabled_reason.empty() || read_only);
   bool changed = false;
   std::string saved_note;  // Plan 14 (R90): the Resolution combo's tooltip, while the mode that runs is not the stored one
   if (descriptor.key == "SkinStructure") {
     bool follows = (settings->skin_structure < 0.f);
-    if (gui::Checkbox("Skin follows Structure", &follows)) {
+    // The row's own label is its control's, so the two-step row (follow, or set a value) reads as two rows.
+    widgets::RowLabel("Skin follows Structure");
+    if (widgets::Switch("##SkinFollows", &follows)) {
       settings->skin_structure = (follows ? SKIN_SAME_AS_STRUCTURE : settings->local_structure);
       changed = true;
     }
     gui::BeginDisabled(follows);
     float skin = (follows ? settings->local_structure : settings->skin_structure);
-    if (gui::SliderFloat(label.c_str(), &skin, 0.f, 1.f)) {
+    widgets::RowLabel(label.c_str(), tip_text);
+    if (widgets::Slider(hidden.c_str(), &skin, 0.f, 1.f, "%.2f", nullptr, &state->drag.skin_structure)) {
       settings->skin_structure = skin;
       changed = true;
     }
-    state->drag.skin_structure = gui::IsItemActive();
     gui::EndDisabled();
   } else if (descriptor.key == "DiffuseWhiteNits") {
-    // ui-review.md §3 rule 2 (the Skin pattern): an Automatic checkbox, the control greyed at the value
+    // ui-review.md §3 rule 2 (the Skin pattern): an Automatic switch, the control greyed at the value
     // in use -- shown, not hidden, so the effective value always reads even while it is automatic.
     bool automatic = (settings->diffuse_white_nits <= 0.f);
-    if (gui::Checkbox("Automatic diffuse white", &automatic)) {
+    widgets::RowLabel("Automatic diffuse white");
+    if (widgets::Switch("##DiffuseWhiteAutomatic", &automatic)) {
       settings->diffuse_white_nits = (automatic ? 0.f : std::clamp(view.effective_diffuse_white_nits, 48.f, 500.f));
       changed = true;
     }
     gui::BeginDisabled(automatic);
     float nits = (automatic ? view.effective_diffuse_white_nits : settings->diffuse_white_nits);
-    if (gui::SliderFloat(label.c_str(), &nits, 48.f, 500.f, "%.0f") && !automatic) {
+    widgets::RowLabel(label.c_str(), tip_text);
+    if (widgets::Slider(hidden.c_str(), &nits, 48.f, 500.f, "%.0f", nullptr, nullptr) && !automatic) {
       settings->diffuse_white_nits = nits;
       changed = true;
     }
@@ -177,7 +151,12 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     switch (descriptor.kind) {
       case SettingKind::BOOL: {
         bool value = (descriptor.get(*settings) != 0.0);
-        if (gui::Checkbox(label.c_str(), &value)) {
+        if (inline_label) {
+          widgets::InlineLabel(label.c_str(), tip_text);
+        } else {
+          widgets::RowLabel(label.c_str(), tip_text);
+        }
+        if (widgets::Switch(hidden.c_str(), &value)) {
           if (value && !descriptor.enable_warning.empty()) {
             state->enable_warning_key = descriptor.key;
           } else {
@@ -191,9 +170,10 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         const int applied = static_cast<int>(descriptor.get(*settings));
         const bool on_release = ((descriptor.flags & setting_flags::APPLY_ON_RELEASE) != 0u);
         const bool held_here = (on_release && state->pending_release.has_value() && state->pending_key == descriptor.key);
-        int value = (held_here ? *state->pending_release : applied);
-        const bool edited = (descriptor.max > 100.0 ? gui::InputInt(label.c_str(), &value, 64, 512)
-                                                    : gui::SliderInt(label.c_str(), &value, static_cast<int>(descriptor.min),
+        int value = (held_here ? static_cast<int>(*state->pending_release) : applied);
+        widgets::RowLabel(label.c_str(), tip_text);
+        const bool edited = (descriptor.max > 100.0 ? gui::InputInt(hidden.c_str(), &value, 64, 512)
+                                                    : gui::SliderInt(hidden.c_str(), &value, static_cast<int>(descriptor.min),
                                                                        static_cast<int>(descriptor.max)));
         if (!on_release) {
           if (edited) {
@@ -208,7 +188,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
             state->pending_key = descriptor.key;
           }
           if (gui::IsItemDeactivatedAfterEdit() && state->pending_key == descriptor.key && state->pending_release) {
-            const int released = *std::exchange(state->pending_release, std::nullopt);
+            const int released = static_cast<int>(*std::exchange(state->pending_release, std::nullopt));
             if (released != applied) {
               descriptor.set(*settings, std::clamp(static_cast<double>(released), descriptor.min, descriptor.max));
               changed = true;
@@ -225,20 +205,39 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       case SettingKind::FLOAT: {
         // 2026-10-09: AutoExposureBlend is stored 0..1 and shown as 0-100 %.
         const float shown_scale = (descriptor.key == "AutoExposureBlend" ? 100.f : 1.f);
-        float value = static_cast<float>(descriptor.get(*settings)) * shown_scale;
+        float value = static_cast<float>(descriptor.get(*settings));
         const float high = static_cast<float>(SliderMax(descriptor)) * shown_scale;  // Ctrl+click may type past it (DescriptorMax)
         const bool resolution_scale = (descriptor.key == "ResolutionScale" || descriptor.key == "ResolutionScaleAfterDlss"
                                        || descriptor.key == "ResolutionScalePresent");
         const char* const format = (descriptor.key == "GraceSeconds" ? "%.1f"
                                     : resolution_scale                      ? "%.0f %%"
                                     : descriptor.key == "AutoExposureBlend" ? "%.0f %%"
+                                    : descriptor.key == "FoveationEdge"     ? "%.0f %%"
                                     : descriptor.key == "StabilizeMs"       ? "%.0f ms"
                                                                             : "%.2f");
-        if (gui::SliderFloat(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format)) {
-          descriptor.set(*settings, static_cast<double>(value / shown_scale));
+        widgets::RowLabel(label.c_str(), tip_text);
+        bool active = false;
+        const bool dragged = widgets::Slider(hidden.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format, nullptr, &active,
+                            shown_scale);
+        if ((descriptor.flags & setting_flags::APPLY_ON_RELEASE) != 0u) {
+          // Foveation's four controls re-plan the guide and the mappings, so they apply on release (as Pass Count): the slider shows the value under the mouse,
+          // the setting and this frame's grid change once, when the mouse lets go or a Ctrl+click typed value is confirmed.
+          if (dragged) {
+            state->pending_release = value / shown_scale;
+            state->pending_key = descriptor.key;
+          }
+          if (!dragged && state->pending_key == descriptor.key && state->pending_release) {
+            const double applied = descriptor.get(*settings);
+            const double released = *std::exchange(state->pending_release, std::nullopt);
+            if (released != applied) {
+              descriptor.set(*settings, static_cast<float>(released));
+              changed = true;
+            }
+          }
+        } else if (dragged) {
+          descriptor.set(*settings, static_cast<double>(value));
           changed = true;
         }
-        const bool active = gui::IsItemActive();
         if (descriptor.key == "LocalStructure") {
           state->drag.local_structure = active;
         } else if (descriptor.key == "LocalTone") {
@@ -260,86 +259,68 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       case SettingKind::CHOICE: {
         int value = static_cast<int>(descriptor.get(*settings));
         if ((descriptor.flags & setting_flags::NETWORK_PRESET) != 0u && view.legacy_runtime) value = 1;
-        if (descriptor.choices.size() <= 3u) {
-          // User decision: at most three short choices draws as the RadioRow segmented control above,
-          // never a Combo (Model, Upsampling, Stabilise, NR mask, UI correction and the like).
-          std::array<const char*, 3> labels = {};
-          std::array<std::string_view, 3> why = {};
-          if (!disabled_reason.empty()) {
-            why.fill(disabled_reason);  // e.g. Game state after NR, greyed while no DLSS placement can run
-          }
-          if (descriptor.key == "VulkanNr" && disabled_reason.empty()) {
-            // Plan 19 (the owner's UI rules): Native greyed where it cannot run, with why; the highlight is the route that runs. T5: Direct3D 12 too.
-            why[static_cast<size_t>(VulkanNrMode::NATIVE)] = view.vulkan_native_unavailable;
-            why[static_cast<size_t>(VulkanNrMode::DIRECT3D_12)] = view.vulkan_d3d12_unavailable;
-            if (view.vulkan_nr_running) {
-              value = static_cast<int>(*view.vulkan_nr_running);
-            }
-          }
-          std::array<std::string_view, 3> tips = {};
-          tips.fill(descriptor.tooltip);
-          for (size_t index = 0u; index < descriptor.choices.size(); ++index) {
-            labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
-          }
-          const std::span<const char* const> options(labels.data(), descriptor.choices.size());
-          const std::span<const std::string_view> why_span(why.data(), descriptor.choices.size());
-          const std::span<const std::string_view> tips_span(tips.data(), descriptor.choices.size());
-          if (const int clicked = RadioRow(label.c_str(), options, why_span, tips_span, value); clicked >= 0) {
-            descriptor.set(*settings, static_cast<double>(clicked));
-            changed = true;
-          }
-        } else if (descriptor.key == "ResolutionMode" || descriptor.key == "ResolutionAfterDlss" || descriptor.key == "ResolutionPresent") {
-          // Plan 14 (the user's decision 1): the entries that cannot run now are greyed, each with its reason, and the preview is the mode that runs.
-          // Split chain (Task 3): a later stage group's Resolution greys the same entries (Match game reads the same DLSS render size); its preview is its
-          // stored mode, since Setup's highlight is pass 1's.
+        // Every choice row draws through the panel's own control (widgets::Segmented): equal-width buttons,
+        // or a dropdown of the same choices where the row is too narrow for its longest label (ReShade docks
+        // the panel at ~450 px). An option that cannot run now is greyed with its reason on hover, and the
+        // highlight is the option that runs -- the stored one, except on Setup's rows, whose highlights are
+        // Plan 14's settle.
+        const bool resolution_row = (descriptor.key == "ResolutionMode" || descriptor.key == "ResolutionAfterDlss"
+                                     || descriptor.key == "ResolutionPresent");
+        const size_t count = (std::min)(descriptor.choices.size(), static_cast<size_t>(8));
+        std::array<const char*, 8> labels = {};
+        for (size_t index = 0u; index < count; ++index) {
+          labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
+        }
+        std::array<std::string_view, 8> why = {};
+        std::array<std::string_view, 8> tips = {};
+        tips.fill(descriptor.tooltip);
+        int shown = value;
+        if (!disabled_reason.empty()) {
+          why.fill(disabled_reason);  // e.g. Game state after NR, greyed while no DLSS placement can run
+        } else if (resolution_row) {
+          // Plan 14 (the user's decision 1): the preview is the mode that runs. Split chain (Task 3): a later
+          // stage group's preview is its stored mode, since Setup's highlight is pass 1's.
           const bool setup_row = (descriptor.key == "ResolutionMode");
-          std::array<const char*, 6> labels = {};
-          for (size_t index = 0u; index < labels.size(); ++index) {
-            labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
-          }
-          const size_t stored_index = std::min(static_cast<size_t>(value), labels.size() - 1u);
-          const size_t shown = (setup_row ? static_cast<size_t>(view.setup.resolution) : stored_index);
-          const OptionState& stored = view.setup.resolution_options[stored_index];
-          if (shown != stored_index && (stored.why.empty() || stored.temporary)) {  // a fixed cause never clears: no promise
-            saved_note = SavedNote(labels[stored_index]);
-          }
-          if (gui::BeginCombo(label.c_str(), labels[shown])) {
-            for (size_t index = 0u; index < labels.size(); ++index) {
-              const OptionState& option = view.setup.resolution_options[index];
-              // Fix round 1 (M5): Setup's row greys every entry that cannot run, its highlight included (as before the split chain); a later stage's row
-              // keeps its stored mode selectable, since its preview is that mode and not what runs.
-              gui::BeginDisabled(!option.why.empty() && (setup_row || index != shown));
-              if (gui::Selectable(labels[index], shown == index)) {
-                descriptor.set(*settings, static_cast<double>(index));
-                if (setup_row) {
-                  state->setup_settle.Clicked(SetupRow::RESOLUTION, static_cast<uint32_t>(index));
-                }
-                changed = true;
-              }
-              gui::EndDisabled();
-              if (!option.why.empty() && gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                gui::SetTooltip("Unavailable here: %s", std::string(option.why).c_str());
-              }
-            }
-            gui::EndCombo();
-          }
-        } else {
-          std::array<const char*, 8> labels = {};
-          const size_t count = std::min(descriptor.choices.size(), labels.size());
+          const size_t stored = (std::min)(static_cast<size_t>(value), count - 1u);
+          shown = static_cast<int>(setup_row ? static_cast<size_t>(view.setup.resolution) : stored);
           for (size_t index = 0u; index < count; ++index) {
-            labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
+            const OptionState& option = view.setup.resolution_options[index];
+            // Fix round 1 (M5): Setup's row greys every entry that cannot run, its highlight included (as
+            // before the split chain); a later stage's row keeps its stored mode selectable, since its
+            // preview is that mode and not what runs.
+            if (!option.why.empty() && (setup_row || index != static_cast<size_t>(shown))) {
+              why[index] = option.why;
+            }
           }
-          if (gui::Combo(label.c_str(), &value, labels.data(), static_cast<int>(count))) {
-            descriptor.set(*settings, static_cast<double>(value));
-            changed = true;
+          const OptionState& option = view.setup.resolution_options[stored];
+          if (static_cast<size_t>(shown) != stored && (option.why.empty() || option.temporary)) {  // a fixed cause never clears: no promise
+            saved_note = SavedNote(labels[stored]);
           }
+        } else if (descriptor.key == "VulkanNr") {
+          // Plan 19 (the owner's UI rules): Native greyed where it cannot run, with why; the highlight is the route that runs. T5: Direct3D 12 too.
+          why[static_cast<size_t>(VulkanNrMode::NATIVE)] = view.vulkan_native_unavailable;
+          why[static_cast<size_t>(VulkanNrMode::DIRECT3D_12)] = view.vulkan_d3d12_unavailable;
+          if (view.vulkan_nr_running) {
+            shown = static_cast<int>(*view.vulkan_nr_running);
+          }
+        }
+        widgets::RowLabel(label.c_str(), tip_text);
+        const int clicked = widgets::Segmented(hidden.c_str(), labels.data(), static_cast<int>(count), shown,
+                                               why.data(), tips.data());
+        if (clicked >= 0) {
+          descriptor.set(*settings, static_cast<double>(clicked));
+          if (descriptor.key == "ResolutionMode") {
+            state->setup_settle.Clicked(SetupRow::RESOLUTION, static_cast<uint32_t>(clicked));
+          }
+          changed = true;
         }
         break;
       }
       case SettingKind::TEXT: {
         std::array<char, 1024> text = {};
         descriptor.get_text(*settings).copy(text.data(), text.size() - 1u);
-        if (gui::InputText(label.c_str(), text.data(), text.size())) {
+        widgets::RowLabel(label.c_str(), tip_text);
+        if (gui::InputText(hidden.c_str(), text.data(), text.size())) {
           descriptor.set_text(*settings, text.data());
           changed = true;
         }
@@ -380,11 +361,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   // The reset arrow after a row that differs from its default (design §3.16, G1). The Enable
   // switch itself is the one row without an arrow: "reset" would only mean "switch NR off".
   if (descriptor.section != SettingSection::TOP && !IsDefault(*settings, descriptor)) {
-    gui::SameLine();
-    const bool reset_clicked = gui::SmallButton("<");
-    if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      gui::SetTooltip("Reset to default (%s)", FormatSettingValue(descriptor, DefaultSettings()).c_str());
-    }
+    const bool reset_clicked = widgets::ResetButton(descriptor.key.data(), FormatSettingValue(descriptor, DefaultSettings()).c_str());
     if (reset_clicked) {
       ResetSetting(settings, descriptor);
       if (descriptor.key == "ResolutionMode") {
@@ -410,11 +387,23 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
   bool open = true;
   if (!gui::BeginPopupModal(title.c_str(), &open, ImGuiWindowFlags_AlwaysAutoResize)) return false;
   gui::TextWrapped("%s", descriptor.enable_warning.data());
+  // [style] a hair of space around the divider
+  ImGui::Dummy(ImVec2(0.f, style::tokens::kRowGap * 0.5f));
   gui::Separator();
+  ImGui::Dummy(ImVec2(0.f, style::tokens::kRowGap * 0.5f));
   const bool cancel = gui::Button("Keep disabled");
   gui::SetItemDefaultFocus();
   gui::SameLine();
-  const bool enable = gui::Button("Enable anyway");
+  bool enable = false;
+  {
+    // [style] the confirming action carries the accent, as the card's own button does
+    style::StyleScope buttons;
+    buttons.Color(ImGuiCol_Button, style::tokens::kAccent)
+           .Color(ImGuiCol_ButtonHovered, style::tokens::kAccentHover)
+           .Color(ImGuiCol_ButtonActive, style::tokens::kAccentActive)
+           .Color(ImGuiCol_Text, style::tokens::kBgWindow);
+    enable = gui::Button("Enable anyway");
+  }
   if (cancel || enable || gui::IsKeyPressed(ImGuiKey_Escape)) {
     gui::CloseCurrentPopup();
   }
@@ -472,11 +461,7 @@ bool DrawSourceRow(const OverlayView& view, Settings* settings, OverlayState* st
     changed = true;
   }
   if (!IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"))) {
-    gui::SameLine();
-    const bool reset_clicked = gui::SmallButton("<");
-    if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      gui::SetTooltip(view.dlss_explicit ? "Reset to default (Present on Vulkan)" : "Reset to default (After DLSS)");
-    }
+    const bool reset_clicked = widgets::ResetButton("Source", view.dlss_explicit ? "Present on Vulkan" : "After DLSS");
     if (reset_clicked) {
       // The defaults themselves (Auto, PreUpscale off): After DLSS on Direct3D 12, Present on Vulkan.
       const SourcePick default_pick = (view.dlss_explicit ? SourcePick::PRESENT : SourcePick::AFTER_DLSS);
@@ -498,8 +483,9 @@ bool DrawSourceRow(const OverlayView& view, Settings* settings, OverlayState* st
   return changed;
 }
 
-// Split chain (Task 3, design 6.2): pass n's Runs at row, as the NR stage row but a combo (four long choices): a choice that cannot run is greyed with why,
-// the preview is where the pass runs, and the stored pick is named while it runs elsewhere. Where every pass runs at one stage the whole row is greyed.
+// Split chain (Task 3, design 6.2): pass n's Runs at row, as the NR stage row (widgets::Segmented, which itself falls back to a combo where the four long
+// choices do not fit): a choice that cannot run is greyed with why, the highlight is where the pass runs, and the stored pick is named while it runs
+// elsewhere. Where every pass runs at one stage the whole row is greyed.
 // Not folded into DrawRow: its choices' states come from Setup's pass rows, not from the schema.
 bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings) {
   const size_t later = descriptor.pass - 2u;
@@ -510,20 +496,19 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
   const auto stored = static_cast<size_t>(settings->passes[later].stage);
   const auto shown = static_cast<size_t>(row.shown);
   bool changed = false;
-  if (gui::BeginCombo(label.c_str(), descriptor.choices[shown].data())) {  // literals and static strings: NUL-terminated
-    for (size_t index = 0u; index < row.options.size(); ++index) {
-      const PassStageOption& option = row.options[index];
-      gui::BeginDisabled(!option.why.empty());
-      if (gui::Selectable(descriptor.choices[index].data(), shown == index) && index != stored) {
-        descriptor.set(*settings, static_cast<double>(index));
-        changed = true;
-      }
-      gui::EndDisabled();
-      if (!option.why.empty() && gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        gui::SetTooltip("Unavailable here: %s", option.why.c_str());
-      }
-    }
-    gui::EndCombo();
+  const std::string tip(descriptor.tooltip);
+  std::array<const char*, 4> labels = {};
+  std::array<std::string_view, 4> why = {};
+  for (size_t index = 0u; index < row.options.size(); ++index) {
+    labels[index] = descriptor.choices[index].data();  // literals and static strings: NUL-terminated
+    why[index] = row.options[index].why;
+  }
+  widgets::RowLabel(label.c_str(), tip.empty() ? nullptr : tip.c_str());
+  const int clicked = widgets::Segmented(std::format("##{}", descriptor.key).c_str(), labels.data(),
+                                         static_cast<int>(row.options.size()), static_cast<int>(shown), why.data());
+  if (clicked >= 0 && static_cast<size_t>(clicked) != stored) {
+    descriptor.set(*settings, static_cast<double>(clicked));
+    changed = true;
   }
   if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
     std::string tooltip(descriptor.tooltip);
@@ -535,11 +520,7 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
     gui::SetTooltip("%s", tooltip.c_str());
   }
   if (!IsDefault(*settings, descriptor)) {
-    gui::SameLine();
-    const bool reset_clicked = gui::SmallButton("<");
-    if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      gui::SetTooltip("Reset to default (%s)", descriptor.choices[0].data());
-    }
+    const bool reset_clicked = widgets::ResetButton(descriptor.key.data(), descriptor.choices[0].data());
     if (reset_clicked) {
       ResetSetting(settings, descriptor);
       changed = true;
@@ -581,11 +562,7 @@ bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* st
     changed = true;
   }
   if (!IsDefault(*settings, *FindSetting("MotionVectors"))) {
-    gui::SameLine();
-    const bool reset_clicked = gui::SmallButton("<");
-    if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-      gui::SetTooltip("Reset to default (DLSS)");
-    }
+    const bool reset_clicked = widgets::ResetButton("MotionVectors", "DLSS");
     if (reset_clicked) {
       SetMotionPick(settings, MotionPick::DLSS);
       state->setup_settle.ClickedBest(SetupRow::MOTION, static_cast<uint32_t>(MotionPick::DLSS), view.setup, true);  // DLSS is stored as Auto
@@ -606,59 +583,6 @@ std::string VramLine(const OverlayView& view) {
   return std::format("VRAM: Uplift intermediates {:.0f} MiB", static_cast<double>(view.intermediate_bytes) / MIB);
 }
 
-// Cut UTF-8 text at a character boundary and append ASCII "..." to fit `width`.
-std::string EllipsisToWidth(const std::string& text, float width) {
-  if (gui::CalcTextSize(text.c_str()).x <= width) {
-    return text;
-  }
-  constexpr std::string_view DOTS = "...";
-  const float dots_width = gui::CalcTextSize(DOTS.data()).x;
-  size_t fits = 0u;  // the longest prefix that fits together with the dots
-  for (size_t low = 0u, high = text.size(); low < high;) {
-    const size_t middle = (low + high + 1u) / 2u;
-    if (gui::CalcTextSize(text.c_str(), text.c_str() + middle).x + dots_width <= width) {
-      low = middle;
-      fits = middle;
-    } else {
-      high = middle - 1u;
-    }
-  }
-  while (fits > 0u && (static_cast<unsigned char>(text[fits]) & 0xC0u) == 0x80u) {
-    --fits;  // never cut inside a UTF-8 sequence
-  }
-  while (fits > 0u && text[fits - 1u] == ' ') {
-    --fits;
-  }
-  return text.substr(0u, fits) + std::string(DOTS);
-}
-
-// One line of the working status card, in one piece (cut with "..." at the card's right edge, the full text as a tooltip). `muted`: TextDisabled.
-void CardLine(const std::string& source, bool muted) {
-  const std::string text = gui::Display(source);
-  const std::string shown = EllipsisToWidth(text, gui::GetContentRegionAvail().x);
-  if (muted) {
-    gui::TextDisabled("%s", shown.c_str());
-  } else {
-    gui::TextUnformatted(shown.c_str());
-  }
-  if (shown.size() != text.size() && gui::IsItemHovered()) {
-    gui::BeginTooltip();
-    gui::PushTextWrapPos(gui::GetFontSize() * 30.f);
-    gui::TextUnformatted(text.c_str());
-    gui::PopTextWrapPos();
-    gui::EndTooltip();
-  }
-}
-
-// One detail line of the working status card: muted so the title and rows stay prominent, and left out when the card's fixed height has no room left
-// for it -- the card never grows or scrolls.
-void CardDetailLine(const std::string& text) {
-  if (text.empty() || gui::GetContentRegionAvail().y < gui::GetTextLineHeight()) {
-    return;
-  }
-  CardLine(text, true);
-}
-
 }  // namespace
 
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now) {
@@ -672,29 +596,79 @@ void FinishSetup(OverlayView* view, OverlayState* state, const void* device, con
   }
 }
 
+// The status card as widgets::CardView, the piece of chrome widgets::DrawStatusCard draws: the tone (green
+// while NR works, red for a fault the player must repair, amber while it needs the player, grey when nothing
+// is wrong), the glyph beside the title, and either why it is not working or what is running.
+widgets::CardView BuildCardView(const StatusCard& card, const OverlayView& view) {
+  widgets::CardView shown;
+  switch (card.stage) {
+    case CardStage::DEVICE:
+    case CardStage::CONFLICTS:
+    case CardStage::RUNTIME: shown.tone = widgets::CardTone::BAD; break;
+    case CardStage::SWITCH: shown.tone = widgets::CardTone::IDLE; break;
+    case CardStage::WORKING: shown.tone = widgets::CardTone::GOOD; break;
+    case CardStage::SESSION:
+    case CardStage::PLACEMENT:
+    case CardStage::BUDGET:
+    case CardStage::FRAME:
+    case CardStage::EVALUATE: shown.tone = widgets::CardTone::WARN; break;
+  }
+  switch (shown.tone) {
+    case widgets::CardTone::GOOD: shown.glyph = widgets::CardGlyph::CHECK; break;
+    case widgets::CardTone::WARN: shown.glyph = widgets::CardGlyph::WARNING; break;
+    case widgets::CardTone::BAD: shown.glyph = widgets::CardGlyph::CROSS; break;
+    case widgets::CardTone::IDLE: shown.glyph = widgets::CardGlyph::CIRCLE; break;
+  }
+  shown.title = card.title;
+  shown.showing_work = card.working;
+  if (!card.working) {
+    shown.reason = card.reason;
+    shown.fixes = card.fixes;
+    return shown;
+  }
+  // Plan 14 (design §1): the three rows that say what Setup highlights (keys muted on the left, values in
+  // normal text from one column), one muted Why line for a temporary fallback (else the note), and the
+  // footer. The card's height is unchanged; whatever does not fit is left out.
+  shown.lines.push_back({"Running at", view.live.stage});
+  shown.lines.push_back({"Motion vectors", view.live.motion});
+  shown.lines.push_back({"Resolution", view.live.resolution});
+  // Muted and wrapped: two lines in the card's spare height; the child clips anything longer, and the full
+  // text is the tooltip.
+  shown.note = (view.setup.why.empty() ? view.live.note : std::format("Why: {}", view.setup.why));
+  shown.footer = view.live.footer;
+  return shown;
+}
+
 bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state) {
+  // The panel draws at BaseFontSize(), one push for the whole overlay: every row measures itself in font
+  // sizes, so the layout scales with the text. StyleScope pops it on every return path.
+  style::StyleScope panel_font;
+  panel_font.FontSize(style::BaseFontSize());
+  // The panel draws and colours itself out of style.hpp's tokens; without this the global style stays
+  // ReShade's (square corners, ReShade's blues). Every frame, not once: ReShade writes its own style back
+  // whenever its settings are touched (see RefreshForDpi).
+  style::RefreshForDpi();
   state->drag.pass_slider = false;  // the rows OR into it
   state->language_changed = false;
-  const ImVec2 top = ImGui::GetCursorPos();
-  const float language_width = ImGui::GetFontSize() * 12.f;
-  ImGui::SetCursorPosX(top.x + std::max(0.f, ImGui::GetContentRegionAvail().x - language_width));
-  ImGui::SetNextItemWidth(language_width);
-  int selected_language = static_cast<int>(settings->language);
   const char* languages[] = {"English", "简体中文 / Chinese"};
-  if (ImGui::Combo("##UpliftLanguage", &selected_language, languages, 2)) {
-    FindSetting("Language")->set(*settings, selected_language);
+  const int picked_language = widgets::LanguageCombo(
+      "##UpliftLanguage", languages, 2, static_cast<int>(settings->language),
+      "English / Simplified Chinese. If Chinese appears as boxes, choose a Chinese-capable Global font in ReShade Settings (for example C:\\Windows\\Fonts\\msyh.ttc). No extra Uplift files are needed.");
+  if (picked_language >= 0) {
+    FindSetting("Language")->set(*settings, picked_language);
     state->language_changed = true;
   }
-  if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("English / Simplified Chinese. If Chinese appears as boxes, choose a Chinese-capable Global font in ReShade Settings (for example C:\\Windows\\Fonts\\msyh.ttc). No extra Uplift files are needed.");
-  }
-  ImGui::SetCursorPos(top);
   const gui::LanguageScope language_scope(settings->language);
   bool changed = false;
 
-  changed |= DrawRow(*FindSetting(ENABLED_KEY), view, settings, state);
+  // 2026-10-22 (owner): the Enable row is one run at the panel's left edge -- its label, its switch and the
+  // hotkey button, with the language combo at the right end of that same line -- where it used to be the
+  // label in the column and the switch a hand's width to its right. The card below no longer offers its own
+  // "Turn on" button either; this switch is the only one.
+  changed |= DrawRow(*FindSetting(ENABLED_KEY), view, settings, state, /*inline_label=*/true);
   gui::SameLine();
-  const float hotkey_width = std::max(1.f, gui::GetContentRegionAvail().x - language_width - gui::GetStyle().ItemSpacing.x);
+  const float hotkey_width =
+      std::max(1.f, gui::GetContentRegionAvail().x - gui::GetFontSize() * widgets::kLanguageEm - gui::GetStyle().ItemSpacing.x);
   // 1.1.0 (a player's report): Esc also closes ReShade's overlay, so it cannot be the way to clear the hotkey. A right-click on the button clears it
   // (capturing or not); Esc only cancels a capture. A capture whose overlay closed ends by itself (ExpireKeyCapture), so the hotkey never stays off.
   if (state->capturing_key) {
@@ -748,53 +722,12 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   // shifts the rows below it. Same in D3D12 and D3D11 (bridged): this is ordinary ImGui, backend-agnostic.
   constexpr float CARD_TEXT_LINES = 5.f;  // title + up to 2 reason lines + up to 2 fix bullets
   const StatusCard& card = view.card;
-  gui::BeginChild("##status_card", ImVec2(0.f, gui::GetTextLineHeightWithSpacing() * CARD_TEXT_LINES + gui::GetFrameHeightWithSpacing()),
-                    ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-  if (card.working) {
-    // Plan 14 (design §1): green while NR works, three rows that say what Setup highlights (keys muted on the left, values in normal text from one column),
-    // one muted Why line for a temporary fallback (else the note), and the footer. The height above is unchanged; whatever does not fit is left out.
-    gui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.f), "%s", card.title.c_str());
-    const float value_x = gui::GetCursorPosX() + gui::CalcTextSize("Motion vectors").x + 2.f * gui::GetStyle().ItemSpacing.x;
-    const auto row = [value_x](const char* key, const std::string& value) {
-      gui::TextDisabled("%s", key);
-      gui::SameLine(value_x);
-      CardLine(value, false);
-    };
-    row("Running at", view.live.stage);
-    row("Motion vectors", view.live.motion);
-    row("Resolution", view.live.resolution);
-    if (!view.setup.why.empty()) {
-      // Muted and wrapped: two lines in the card's spare height; the child clips anything longer, and the full text is the tooltip.
-      const std::string why = "Why: " + view.setup.why;
-      gui::PushStyleColor(ImGuiCol_Text, gui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-      gui::TextWrapped("%s", why.c_str());
-      gui::PopStyleColor();
-      if (gui::IsItemHovered()) {
-        gui::SetTooltip("%s", why.c_str());
-      }
-    } else {
-      CardDetailLine(view.live.note);
-    }
-    CardDetailLine(view.live.footer);
-  } else {
-    gui::TextColored(ImVec4(1.f, 0.75f, 0.3f, 1.f), "%s", card.title.c_str());
-    if (!card.reason.empty()) {
-      gui::TextWrapped("%s", card.reason.c_str());
-    }
-    for (const std::string& fix : card.fixes) {
-      gui::BulletText("%s", fix.c_str());
-    }
-  }
+  widgets::BeginCard("##status_card", CARD_TEXT_LINES);
+  widgets::DrawStatusCard(BuildCardView(card, view));
   switch (card.button) {
     case CardButton::NONE: break;
-    case CardButton::TURN_ON:
-      if (gui::Button("Turn on")) {
-        settings->enabled = true;
-        changed = true;
-      }
-      break;
     case CardButton::RETRY_NOW:
-      if (gui::Button(view.dlss_latched ? "Retry now and clear the latch" : "Retry now")) {
+      if (widgets::CardActionButton(view.dlss_latched ? "Retry now and clear the latch" : "Retry now")) {
         state->retry_now = true;
         if (view.dlss_latched) {
           settings->dlss_placement_blocked = false;
@@ -804,14 +737,14 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
       }
       break;
     case CardButton::CLEAR_LATCH:
-      if (gui::Button("Clear latch##card")) {
+      if (widgets::CardActionButton("Clear latch##card")) {
         settings->dlss_placement_blocked = false;
         settings->vulkan_native_nr = true;
         changed = true;
       }
       break;
   }
-  gui::EndChild();
+  widgets::EndCard();
 
   // Every row of one section. All its call sites are here in DrawOverlay, so it stays a local
   // lambda rather than a file-scope helper.
@@ -824,22 +757,15 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     }
     return section_changed;
   };
-  // A section title's Reset button (L1, P1, F1), shown only once the section has changed. All its
-  // call sites are here in DrawOverlay too, so it is also a local lambda. Plan 17: on a CollapsingHeader's
-  // line the header must carry HEADER_FLAGS, or it keeps the hover and the click (Reset opened or closed the section).
-  const auto section_reset = [state](const char* id, bool section_has_changed) {
-    // Plan 6 (D6): with Compare = Built-in, every row already reads read-only at its built-in value; a hidden
-    // section reset must not rewrite Mine's own settings while they are not even shown.
-    if (!section_has_changed || state->defaults_view) return false;
-    gui::SameLine();
-    return gui::SmallButton(std::format("Reset##{}", id).c_str());
-  };
+  // A section title's Reset (L1, P1, F1), shown only once the section has changed. Plan 6 (D6): with
+  // Compare = Built-in, every row already reads read-only at its built-in value, so a reset must not
+  // rewrite Mine's own settings while they are not even shown -- the callers drop it with that flag.
 
   // ui-review.md §2 finding 1 / §3: the NR stage and Motion vectors toggles, in pipeline order, at the top
   // of the panel -- the decisions that shape everything else, instead of about the 45th line. Plan 14: Setup.
   const bool placement_changed = SectionChanged(*settings, SettingSection::PLACEMENT);
-  gui::SeparatorText(placement_changed ? "Setup (changed)" : "Setup");
-  if (section_reset("placement", placement_changed)) {
+  if (widgets::SectionCaption(placement_changed ? "Setup (changed)" : "Setup", "Reset",
+                              placement_changed && !state->defaults_view)) {
     ResetSection(settings, SettingSection::PLACEMENT);
     const Settings defaults = DefaultSettings();  // the three highlights follow at once, each to the best option that can run (the stage first)
     state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(SourcePickOf(defaults, view.dlss_explicit)), view.setup);
@@ -854,11 +780,19 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state);
   changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state);
   changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state);
+  // Foveated edge scaling (2026-10-21): the four rows below are the centre, its fall-off and the density it reaches; they only matter while it is on.
+  changed |= DrawRow(*FindSetting("Foveation"), view, settings, state);
+  if (settings->foveation) {
+    changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state);
+    changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state);
+    changed |= DrawRow(*FindSetting("FoveationFalloff"), view, settings, state);
+    changed |= DrawRow(*FindSetting("FoveationEdge"), view, settings, state);
+  }
 
   // ui-review.md §2 finding 7: Compare (Mine/Built-in) moves here, the first row of Look.
   const bool look_changed = SectionChanged(*settings, SettingSection::LOOK);
-  gui::SeparatorText(look_changed ? "Look (changed)" : "Look");
-  if (section_reset("look", look_changed)) {
+  widgets::SectionGap();
+  if (widgets::SectionCaption(look_changed ? "Look (changed)" : "Look", "Reset", look_changed && !state->defaults_view)) {
     ResetSection(settings, SettingSection::LOOK);
     changed = true;
   }
@@ -917,55 +851,68 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
 
   // ui-review.md §2 finding 4: Result and Limits merge under one header, opened at start only for a
   // user who already shapes (SetNextItemOpen(look.enabled, ImGuiCond_Once) keeps the "stay usable" intent).
-  // Plan 17: the headers below let their title's Reset button (drawn on the same line) take the hover and the click.
-  constexpr ImGuiTreeNodeFlags HEADER_FLAGS = ImGuiTreeNodeFlags_AllowOverlap;
   const bool shaping_changed = SectionChanged(*settings, SettingSection::RESULT) || SectionChanged(*settings, SettingSection::LIMITS);
   gui::SetNextItemOpen(settings->look.enabled, ImGuiCond_Once);
-  if (gui::CollapsingHeader(shaping_changed ? "Result shaping (changed)###shaping" : "Result shaping###shaping", HEADER_FLAGS)) {
-    if (section_reset("shaping", shaping_changed)) {
-      ResetSection(settings, SettingSection::RESULT);
-      ResetSection(settings, SettingSection::LIMITS);
-      changed = true;
-    }
+  widgets::SectionGap();
+  bool shaping_reset = false;
+  const bool shaping_open =
+      widgets::SectionHeader("Result shaping", "changed", "Reset", shaping_changed && !state->defaults_view, &shaping_reset);
+  if (shaping_reset) {
+    ResetSection(settings, SettingSection::RESULT);
+    ResetSection(settings, SettingSection::LIMITS);
+    changed = true;
+  }
+  if (shaping_open) {
     changed |= draw_rows(SettingSection::RESULT);
     if (settings->look.enabled) {
-      gui::SeparatorText("Limits and stability");
+      widgets::SubCaption("Limits and stability");
     }
     changed |= draw_rows(SettingSection::LIMITS);
   }
 
   // ui-review.md §2 finding 5: Mask and UI correction, which handle the HUD, get their own section.
   const bool mask_changed = SectionChanged(*settings, SettingSection::MASK);
-  if (gui::CollapsingHeader(mask_changed ? "Mask and HUD (changed)###mask" : "Mask and HUD###mask", HEADER_FLAGS)) {
-    if (section_reset("mask", mask_changed)) {
-      ResetSection(settings, SettingSection::MASK);
-      changed = true;
-    }
+  bool mask_reset = false;
+  const bool mask_open =
+      widgets::SectionHeader("Mask and HUD", "changed", "Reset", mask_changed && !state->defaults_view, &mask_reset);
+  if (mask_reset) {
+    ResetSection(settings, SettingSection::MASK);
+    changed = true;
+  }
+  if (mask_open) {
     changed |= draw_rows(SettingSection::MASK);
   }
 
   const bool fixes_changed = SectionChanged(*settings, SettingSection::FIXES_COLOR)
                              || SectionChanged(*settings, SettingSection::FIXES_GUIDES);
-  if (gui::CollapsingHeader(fixes_changed ? "Fixes (changed)###fixes" : "Fixes###fixes", HEADER_FLAGS)) {
-    if (section_reset("fixes", fixes_changed)) {  // Plan 17: on the title's line, as Result shaping's and Mask and HUD's
-      ResetSection(settings, SettingSection::FIXES_COLOR);
-      ResetSection(settings, SettingSection::FIXES_GUIDES);
-      changed = true;
-    }
+  bool fixes_reset = false;
+  const bool fixes_open =
+      widgets::SectionHeader("Fixes", "changed", "Reset", fixes_changed && !state->defaults_view, &fixes_reset);
+  if (fixes_reset) {
+    ResetSection(settings, SettingSection::FIXES_COLOR);
+    ResetSection(settings, SettingSection::FIXES_GUIDES);
+    changed = true;
+  }
+  if (fixes_open) {
     gui::TextDisabled("Only change these if you know what you are doing.");
-    gui::SeparatorText("Colour");
+    widgets::SubCaption("Colour");
     changed |= draw_rows(SettingSection::FIXES_COLOR);
-    gui::SeparatorText("Motion and game state");
+    widgets::SubCaption("Motion and game state");
     changed |= draw_rows(SettingSection::FIXES_GUIDES);
   }
 
-  if (gui::CollapsingHeader("Advanced")) {
+  widgets::SectionGap();
+  if (widgets::SectionHeader("Advanced", nullptr, nullptr, false, nullptr)) {
     changed |= draw_rows(SettingSection::ADVANCED);
   }
 
   // ui-review.md §2 finding 2: the wall of status text moves into one closed Details header. It always lists
   // everything, so its content does not depend on the card's state; a working card repeats its details lines.
-  if (gui::CollapsingHeader("Details")) {
+  if (widgets::SectionHeader("Details", nullptr, nullptr, false, nullptr)) {
+    // [style] the wall of diagnostic text reads better with a slightly tighter leading
+    style::StyleScope details;
+    details.Var(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x,
+                                                  ImGui::GetStyle().ItemSpacing.y * 0.75f));
     gui::TextUnformatted(view.status_line.c_str());
     if (!view.network_diagnostic.empty()) {
       gui::TextWrapped("%s", view.network_diagnostic.c_str());
@@ -989,13 +936,25 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   }
 
   // G2: Restore all defaults, confirmed once before it takes effect.
+  // [style] a section gap above the divider, so the destructive area is visually separated
+  widgets::SectionGap();
   gui::Separator();
   if (gui::Button("Restore all defaults")) {
     state->confirm_restore = true;
   }
   if (state->confirm_restore) {
     gui::TextWrapped("Every setting returns to its default, the hotkey included; Enable stays as it is.");
-    if (gui::Button("Restore all")) {
+    bool restore_all = false;
+    {
+      // [style] the confirming action is a danger-tinted primary; the cancel stays neutral
+      style::StyleScope confirm;
+      confirm.Color(ImGuiCol_Button, style::tokens::kBad)
+             .Color(ImGuiCol_ButtonHovered, ImVec4(style::tokens::kBad.x * 1.1f, style::tokens::kBad.y * 1.1f, style::tokens::kBad.z * 1.1f, 1.f))
+             .Color(ImGuiCol_ButtonActive, ImVec4(style::tokens::kBad.x * 0.9f, style::tokens::kBad.y * 0.9f, style::tokens::kBad.z * 0.9f, 1.f))
+             .Color(ImGuiCol_Text, style::tokens::kBgWindow);
+      restore_all = gui::Button("Restore all");
+    }
+    if (restore_all) {
       RestoreAllDefaults(settings);
       changed = true;
       state->confirm_restore = false;

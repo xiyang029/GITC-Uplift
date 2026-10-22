@@ -1,7 +1,8 @@
 @echo off
 setlocal EnableDelayedExpansion
 set "DEPS=%~dp0..\third_party\_deps"
-set "RESHADE_TAG=v6.0.0"
+set "RESHADE_TAG=v6.8.0"
+set "IMGUI_TAG=v1.92.5-docking"
 if not exist "%DEPS%" mkdir "%DEPS%"
 
 rem NVIDIA NGX SDK headers (never committed) at a pinned commit: the DLSS 310.9.1 SDK that Uplift is built and tested against.
@@ -16,27 +17,24 @@ git -C "%DEPS%\dlss" fetch --quiet --depth 1 --filter=blob:none https://github.c
 git -C "%DEPS%\dlss" checkout --quiet FETCH_HEAD || exit /b 1
 :dlss_done
 
-rem ReShade add-on API headers at the pinned tag, plus the Dear ImGui commit that tag's
-rem deps/imgui submodule pins (reshade_overlay.hpp only compiles against that exact version).
+rem ReShade add-on API and ImGui bridge headers from %RESHADE_TAG%, and Dear ImGui at %IMGUI_TAG%. ReShade exports
+rem the ImGui function table only for its own ImGui revision, so the overlay header and imgui.h must
+rem be the pair that revision expects; a mismatched imgui.h still compiles and draws, but every
+rem ImGuiStyle field lands on a different offset, so writes to it silently do nothing.
+set "RESHADE_PIN=%RESHADE_TAG%"
 set "FETCHED_TAG="
 if exist "%DEPS%\reshade-tag.txt" set /p FETCHED_TAG=<"%DEPS%\reshade-tag.txt"
-if "!FETCHED_TAG!"=="%RESHADE_TAG%" if exist "%DEPS%\reshade\include\reshade.hpp" if exist "%DEPS%\imgui\imgui.h" goto reshade_done
+if "!FETCHED_TAG!"=="%RESHADE_PIN%" if exist "%DEPS%\reshade\include\reshade.hpp" if exist "%DEPS%\imgui\imgui.h" goto reshade_done
 if exist "%DEPS%\reshade" rmdir /s /q "%DEPS%\reshade"
 if exist "%DEPS%\imgui" rmdir /s /q "%DEPS%\imgui"
 if exist "%DEPS%\reshade-tag.txt" del "%DEPS%\reshade-tag.txt"
 git clone --depth 1 --branch %RESHADE_TAG% --filter=blob:none --sparse https://github.com/crosire/reshade.git "%DEPS%\reshade" || exit /b 1
 git -C "%DEPS%\reshade" sparse-checkout set include || exit /b 1
-set "IMGUI_COMMIT="
-for /f "tokens=3" %%c in ('git -C "%DEPS%\reshade" ls-tree HEAD deps/imgui') do set "IMGUI_COMMIT=%%c"
-if not defined IMGUI_COMMIT (
-  echo fetch_deps: cannot read the deps/imgui commit of ReShade %RESHADE_TAG%
-  exit /b 1
-)
 git init --quiet "%DEPS%\imgui" || exit /b 1
 git -C "%DEPS%\imgui" sparse-checkout set --no-cone /imgui.h /imconfig.h /LICENSE.txt || exit /b 1
-git -C "%DEPS%\imgui" fetch --quiet --depth 1 --filter=blob:none https://github.com/ocornut/imgui.git !IMGUI_COMMIT! || exit /b 1
+git -C "%DEPS%\imgui" fetch --quiet --depth 1 --filter=blob:none https://github.com/ocornut/imgui.git %IMGUI_TAG% || exit /b 1
 git -C "%DEPS%\imgui" checkout --quiet FETCH_HEAD || exit /b 1
->"%DEPS%\reshade-tag.txt" echo %RESHADE_TAG%
+>"%DEPS%\reshade-tag.txt" echo %RESHADE_PIN%
 :reshade_done
 
 rem MinHook (BSD-2-Clause) at the commit the pinned ReShade tag's deps/minhook submodule records.
@@ -59,7 +57,7 @@ git -C "%DEPS%\minhook" checkout --quiet FETCH_HEAD || exit /b 1
 :minhook_done
 
 echo NGX SDK headers (%DLSS_COMMIT%): %DEPS%\dlss\include
-echo ReShade %RESHADE_TAG% headers: %DEPS%\reshade\include
-echo Dear ImGui: %DEPS%\imgui
+echo ReShade %RESHADE_PIN% headers: %DEPS%\reshade\include
+echo Dear ImGui %IMGUI_TAG%: %DEPS%\imgui
 echo MinHook: %DEPS%\minhook
 exit /b 0

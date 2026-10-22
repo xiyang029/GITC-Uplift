@@ -44,6 +44,11 @@ FrameConfig BuildFrameConfig(const FrameConfigInputs& inputs, ui::ControlsCoales
       .resolution_scale = settings.resolution_scale,
       .resolution_slider_held = inputs.drag.resolution_scale,
       .upsampling = settings.upsampling,
+      .foveation = settings.foveation,
+      .foveation_width = settings.foveation_width,
+      .foveation_height = settings.foveation_height,
+      .foveation_falloff = settings.foveation_falloff,
+      .foveation_edge = settings.foveation_edge,
       .pre_upscale = settings.pre_upscale,
       .look = LookConfigFrom(look_settings, coalescer->LaterPasses(look_settings, inputs.drag.pass_slider, now)),
       .launchpad_motion = (settings.motion_vectors == ui::MotionVectorSource::AUTO || settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD
