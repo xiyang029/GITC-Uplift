@@ -397,10 +397,7 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
   {
     // [style] the confirming action carries the accent, as the card's own button does
     style::StyleScope buttons;
-    buttons.Color(ImGuiCol_Button, style::tokens::kAccent)
-           .Color(ImGuiCol_ButtonHovered, style::tokens::kAccentHover)
-           .Color(ImGuiCol_ButtonActive, style::tokens::kAccentActive)
-           .Color(ImGuiCol_Text, style::tokens::kBgWindow);
+    buttons.AccentButton();
     enable = gui::Button("Enable anyway");
   }
   if (cancel || enable || gui::IsKeyPressed(ImGuiKey_Escape)) {

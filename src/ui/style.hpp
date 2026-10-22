@@ -44,8 +44,8 @@ constexpr ImVec4 kBgControlHover = Hex(0x2F343C);
 constexpr ImVec4 kStroke = Hex(0x2A2E36);
 constexpr ImVec4 kTextPrimary = Hex(0xE8EAED);
 constexpr ImVec4 kTextSecondary = Hex(0x9AA0A8);
-constexpr ImVec4 kWarn = Hex(0xF5A623);          // the status card while it needs the player
-constexpr ImVec4 kBad = Hex(0xEB5757);           // the status card while something must be installed or replaced
+constexpr ImVec4 kWarn = Hex(0xF5A623);          // ReShade's unsaved-changes marker
+constexpr ImVec4 kBad = Hex(0xEB5757);           // a destructive action ("Restore all")
 constexpr ImVec4 kAccent = Hex(0x4CA6A0);        // the one saturated colour in the panel
 constexpr ImVec4 kAccentHover = Hex(0x5BB8B2);
 constexpr ImVec4 kAccentActive = Hex(0x3E8C87);  // a control held down
@@ -63,10 +63,14 @@ constexpr float kRadiusSmall = 4.f;
 constexpr float kRowGap = 8.f;
 constexpr float kSectionGap = 16.f;
 constexpr float kCardPadding = 12.f;
-// Row geometry, in units of the font size so it follows the player's ReShade font. A label is as wide as
-// its own words; a panel narrower than kStackEm has no room for a label beside a usable control (ReShade
-// docks it at ~450 px), so each label goes on its own line over a control as wide as the panel. A slider's
-// value has its own column (kValueEm) instead of sitting under the knob.
+// Row geometry, in units of the font size so it follows the player's ReShade font. The label column is a
+// fixed width, never more than kLabelShare of a narrow panel, so every control on the panel starts at the
+// same x; a label wider than the column extends into it, its right edge against the control. A panel
+// narrower than kStackEm has no room for a label column beside a usable control (ReShade docks it at
+// ~450 px), so there each label goes on its own line over a control as wide as the panel. A slider's value
+// has its own column (kValueEm) instead of sitting under the knob.
+constexpr float kLabelEm = 12.f;
+constexpr float kLabelShare = 0.42f;
 constexpr float kValueEm = 3.5f;
 constexpr float kStackEm = 24.f;
 constexpr float kTooltipEm = 35.f;
@@ -123,6 +127,14 @@ class StyleScope {
     ImGui::PushFont(nullptr, size);
     ++fonts_;
     return *this;
+  }
+  // The accent as a control's fill and the window's colour as its words: the panel's primary action, in one
+  // call instead of the same four colours at every call site.
+  StyleScope& AccentButton() {
+    return Color(ImGuiCol_Button, tokens::kAccent)
+        .Color(ImGuiCol_ButtonHovered, tokens::kAccentHover)
+        .Color(ImGuiCol_ButtonActive, tokens::kAccentActive)
+        .Color(ImGuiCol_Text, tokens::kBgWindow);
   }
 
  private:

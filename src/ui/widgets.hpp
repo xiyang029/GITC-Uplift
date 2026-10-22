@@ -29,18 +29,24 @@ namespace uplift::ui::widgets {
 
 using namespace style;
 
-// A tooltip that wraps after kTooltipEm font sizes, as the panel's own tooltips do.
+// A tooltip that wraps after kTooltipEm font sizes, as the panel's own tooltips do. The message is drawn
+// from what the format came out as; nothing to say, no bubble: ImGui draws an empty one for an empty
+// string, which reads as a glitch.
 inline void ItemTooltip(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  const std::string text = gui::Formatted(fmt, args);
+  va_end(args);
+  if (text.empty()) {
+    return;
+  }
   if (!ImGui::BeginItemTooltip()) {
     return;
   }
   // [style] a little breathing room inside the tooltip window
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f, 6.f));
   ImGui::PushTextWrapPos(ImGui::GetFontSize() * tokens::kTooltipEm);
-  va_list args;
-  va_start(args, fmt);
-  gui::Formatted(fmt, args);
-  va_end(args);
+  ImGui::TextUnformatted(text.c_str());
   ImGui::PopTextWrapPos();
   ImGui::PopStyleVar();
   ImGui::EndTooltip();
@@ -70,12 +76,15 @@ inline float row_slot_x = 0.f;
 // The language combo's width, in font sizes: enough for "简体中文 / Chinese".
 constexpr float kLanguageEm = 12.f;
 
-// A settings row: the label in the secondary colour at its own width -- never cut, never wrapped --, then
-// the control right after it, then the reset slot one frame high at the end. The slot is reserved whether
-// or not the row shows its reset button, so every control ends at the same x. A row's `tooltip` shows over
-// its label as well as its control. On a panel narrower than kStackEm the label takes its own line and the
-// control the panel's width under it. Call right before a control whose own label is hidden ("##id"): the
-// next item's width is the control column.
+// A settings row: the label in the secondary colour in a fixed-width left column, then the control, then
+// the reset slot one frame high at the end. The slot is reserved whether or not the row shows its reset
+// button, so every control on the panel starts and ends at the same x. A label wider than its column is
+// never cut and never wrapped: it stays on its line in full and pushes the control right, so a row whose
+// control is right-aligned anyway (a switch) simply reads as two ends of one line. A row's `tooltip` shows
+// over its label as well as its control. On a panel narrower than kStackEm there is no room for a label
+// beside a usable control, so the label takes its own line and the control the panel's width under it.
+// Call right before a control whose own label is hidden ("##id"): the next item's width is the control
+// column.
 inline void RowLabel(const char* label, const char* tooltip = nullptr) {
   const std::string text = gui::Display(label);
   const std::string tip = (tooltip != nullptr ? gui::Display(tooltip) : std::string());
@@ -88,6 +97,8 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
   }
   const ImVec2 at = ImGui::GetCursorScreenPos();
   row_slot_x = at.x + avail - ImGui::GetFrameHeight();
+  const float column = (std::min)(font * tokens::kLabelEm, avail * tokens::kLabelShare);
+  const float control_x = (std::max)(at.x + column, at.x + ImGui::CalcTextSize(text.c_str()).x + style.ItemSpacing.x);
   if (!stacked) {
     ImGui::AlignTextToFramePadding();
   }
@@ -101,11 +112,12 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
       ItemTooltip("%s", tip.c_str());
     }
   }
-  if (!stacked) {
-    gui::SameLine();
-    gui::SetNextItemWidth(row_slot_x - style.ItemSpacing.x - ImGui::GetCursorScreenPos().x);
-  } else {
+  if (stacked) {
     gui::SetNextItemWidth(row_slot_x - style.ItemSpacing.x - at.x);
+  } else {
+    gui::SameLine();
+    gui::SetCursorScreenPos(ImVec2(control_x, gui::GetCursorScreenPos().y));
+    gui::SetNextItemWidth((std::max)(1.f, row_slot_x - style.ItemSpacing.x - control_x));
   }
 }
 
@@ -262,12 +274,8 @@ inline bool SectionCaption(const char* caption, const char* reset_label, bool mo
   bool clicked = false;
   {
     StyleScope caption_text;
-    caption_text.FontSize(SmallFontSize());
-    {
-      StyleScope secondary;
-      secondary.Color(ImGuiCol_Text, tokens::kTextSecondary);
-      gui::TextUnformatted(caption);
-    }
+    caption_text.FontSize(SmallFontSize()).Color(ImGuiCol_Text, tokens::kTextSecondary);
+    gui::TextUnformatted(caption);
     if (modified) {
       ImGui::PushID(caption);  // the link's id is its own words: two sections both say "Reset"
       clicked = RightLink(gui::Display(reset_label).c_str(), right);
@@ -447,9 +455,7 @@ inline int Segmented(const char* id, const char* const* english, int count, int 
     {
       StyleScope segment;
       if (i == current) {
-        segment.Color(ImGuiCol_Button, tokens::kAccent)
-            .Color(ImGuiCol_ButtonHovered, tokens::kAccentHover)
-            .Color(ImGuiCol_Text, tokens::kBgWindow);
+        segment.AccentButton();
       } else {
         // [style] unselected segments get a faint fill so the row groups visually
         segment.Color(ImGuiCol_Button, tokens::kBgControl)
@@ -492,13 +498,6 @@ inline int LanguageCombo(const char* id, const char* const* names, int count, in
 // The status card: the add-on's state in a fixed-height region, sized for the card's worst case so a
 // transient reason or line never shifts the rows below it, and never scrolled. A card is a title, some
 // lines, and the caller's own buttons.
-
-// The card's title, at the panel's base size: the card's first line.
-inline void CardHeading(const std::string& title) {
-  StyleScope heading;
-  heading.FontSize(BaseFontSize());
-  gui::TextUnformatted(title.c_str());
-}
 
 // The x the card's values start at, from its longest key, so its keys and its values line up in two
 // columns.
@@ -565,12 +564,8 @@ inline void EndCard() { gui::EndChild(); }
 inline bool CardActionButton(const char* label) {
   StyleScope accent;
   // [style] a wider button so the card's primary action reads as the card's primary action
-  accent.Color(ImGuiCol_Button, tokens::kAccent)
-      .Color(ImGuiCol_ButtonHovered, tokens::kAccentHover)
-      .Color(ImGuiCol_ButtonActive, tokens::kAccentActive)
-      .Color(ImGuiCol_Text, tokens::kBgWindow)
-      .Var(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x * 1.5f,
-                                             ImGui::GetStyle().FramePadding.y));
+  accent.AccentButton().Var(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x * 1.5f,
+                                                                 ImGui::GetStyle().FramePadding.y));
   return gui::Button(label);
 }
 
@@ -597,7 +592,7 @@ struct CardView {
 // note and its footer) or why it is not (the reason, then the fix's steps numbered). The caller draws the
 // card's own CardActionButton after this.
 inline void DrawStatusCard(const CardView& card) {
-  CardHeading(card.title);
+  gui::TextUnformatted(card.title.c_str());  // the card's first line, at the panel's own size
   if (!card.showing_work) {
     if (!card.reason.empty()) {
       CardWrapped(card.reason);
