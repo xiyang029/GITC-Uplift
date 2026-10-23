@@ -52,7 +52,8 @@ void OnBindPipeline(api::command_list* cmd_list, api::pipeline_stage stages, api
 }
 
 void OnBindDescriptorTables(api::command_list* cmd_list, api::shader_stage stages, api::pipeline_layout layout,
-                            uint32_t first, uint32_t count, const api::descriptor_table* tables) {
+                            uint32_t first, uint32_t count, const api::descriptor_table* tables, uint32_t /*dynamic_offset_count*/,
+                            const uint32_t* /*dynamic_offsets*/) {
   if (!g_tracking.load(std::memory_order_relaxed)) return;
   if ((static_cast<uint32_t>(stages) & state::SHADER_STAGE_COMPUTE) == 0u) return;
   try {
@@ -145,12 +146,11 @@ class ReshadeReplayTarget final : public state::ReplayTarget {
 }  // namespace
 
 void CreateListState(api::command_list* list) {
-  ListState& state = list->create_private_data<ListState>();
-  state.list = list;
-  state.device = list->get_device();
-  state.shadow.OnReset(TrackingEpoch());  // a new list is open and empty
-  ListState* const address = &state;
-  NativeOf(list)->SetPrivateData(LIST_STATE_GUID, sizeof(address), &address);
+  ListState* const state = list->create_private_data<ListState>();
+  state->list = list;
+  state->device = list->get_device();
+  state->shadow.OnReset(TrackingEpoch());  // a new list is open and empty
+  NativeOf(list)->SetPrivateData(LIST_STATE_GUID, sizeof(state), &state);
 }
 
 std::vector<uint64_t> DestroyListState(api::command_list* list) {

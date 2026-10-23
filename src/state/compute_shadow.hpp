@@ -6,15 +6,15 @@
 
 namespace uplift::state {
 
-// ReShade's enum values, compared as numbers: Uplift's pinned v6.0.0 headers predate some names.
+// ReShade's enum values, compared as numbers: the state shadow reads root arguments through ReShade's
+// command_list API by value, so the pinned headers may lag the runtime (Uplift pins v6.8.0).
 // Checked in d3d12_command_list.cpp of ReShade 6.1.0 to 6.8.0 (this plan's Key decisions).
 inline constexpr uint32_t SHADER_STAGE_COMPUTE = 0x20u;                 // api::shader_stage::compute
 inline constexpr uint32_t PIPELINE_STAGE_COMPUTE = 0x800u;              // api::pipeline_stage::compute_shader
 inline constexpr uint32_t DESCRIPTOR_BUFFER_SRV = 4u;                   // a root SRV: a raw GPU address (6.1+)
 inline constexpr uint32_t DESCRIPTOR_BUFFER_UAV = 5u;                   // a root UAV: a raw GPU address (6.1+)
 inline constexpr uint32_t DESCRIPTOR_CONSTANT_BUFFER = 6u;              // a root CBV: a resolved buffer_range
-inline constexpr uint32_t DESCRIPTOR_ACCELERATION_STRUCTURE_6_1 = 8u;   // a root SRV holding one (6.1-6.7)
-inline constexpr uint32_t DESCRIPTOR_ACCELERATION_STRUCTURE_6_8 = 10u;  // the same from 6.8
+inline constexpr uint32_t DESCRIPTOR_ACCELERATION_STRUCTURE = 10u;      // a root SRV holding one (6.8: 8 before)
 
 // A D3D12 root signature holds at most 64 DWORDs, so no parameter index or constant offset reaches 64.
 inline constexpr uint32_t MAX_ROOT_PARAMETERS = 64u;

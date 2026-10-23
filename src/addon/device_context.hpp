@@ -74,6 +74,15 @@ struct FrameConfig {
   float resolution_scale = 100.f;                            // Resolution = Custom: % of the output
   bool resolution_slider_held = false;                       // the Custom slider is being dragged: the work size waits
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
+  // Foveated edge scaling (2026-10-21): NR works a grid that keeps the output's centre at full density and falls off toward the edges, so the edges cost fewer
+  // NR pixels than the centre. The centre's width is a share of the output's width, its height and both fall-offs shares of the output's height (per cent;
+  // FromPercent turns them into output pixels). Applied at every NR stage: MapToWork carries them onto that stage's working grid.
+  bool foveation = false;
+  uint32_t foveation_width = 55;      // the full-density centre's width, % of the output's width
+  uint32_t foveation_height = 55;     // and its height, % of the output's height
+  uint32_t foveation_falloff_x = 28;  // fall-off on the left/right sides, % of the output's height
+  uint32_t foveation_falloff_y = 15;  // fall-off on the top/bottom sides: short enough that the vertical ramp reaches the edge density
+  uint32_t foveation_edge = 50;       // the density the fall-off reaches at the edge, in percent (25 to 100, where 100 is off)
   bool pre_upscale = false;  // v2 design §3.9: NR before DLSS-SR upscales
   sources::LookConfig look;  // Plan 5: the look stage, the colour fixes, Mask, UI correction, passes 2..10
   bool launchpad_motion = true;       // Plan 6: MotionVectors Auto, Launchpad or (2026-10-08) Lumenite: the Present path may bind UPLIFT_MV

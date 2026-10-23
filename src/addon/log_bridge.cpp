@@ -8,10 +8,10 @@
 namespace uplift::addon {
 namespace {
 
-static_assert(ToReshadeLogLevel(nr::LogLevel::ERR) == static_cast<int>(reshade::log_level::error));
-static_assert(ToReshadeLogLevel(nr::LogLevel::WARN) == static_cast<int>(reshade::log_level::warning));
-static_assert(ToReshadeLogLevel(nr::LogLevel::INFO) == static_cast<int>(reshade::log_level::info));
-static_assert(ToReshadeLogLevel(nr::LogLevel::TRACE) == static_cast<int>(reshade::log_level::debug));
+static_assert(ToReshadeLogLevel(nr::LogLevel::ERR) == static_cast<int>(reshade::log::level::error));
+static_assert(ToReshadeLogLevel(nr::LogLevel::WARN) == static_cast<int>(reshade::log::level::warning));
+static_assert(ToReshadeLogLevel(nr::LogLevel::INFO) == static_cast<int>(reshade::log::level::info));
+static_assert(ToReshadeLogLevel(nr::LogLevel::TRACE) == static_cast<int>(reshade::log::level::debug));
 
 // ReShade puts an add-on's registered NAME ("GITC Uplift") before each line the add-on logs. Uplift's lines keep their own "[Uplift]"
 // prefix instead (what users and the tests search ReShade.log for): the line goes to ReShadeLogMessage with no

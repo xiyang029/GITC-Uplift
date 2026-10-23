@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableDelayedExpansion
 set "DEPS=%~dp0..\third_party\_deps"
-set "RESHADE_TAG=v6.0.0"
+set "RESHADE_TAG=v6.8.0"
 if not exist "%DEPS%" mkdir "%DEPS%"
 
 rem NVIDIA NGX SDK headers (never committed) at a pinned commit: the DLSS 310.9.1 SDK that Uplift is built and tested against.

@@ -121,7 +121,6 @@ std::string_view ApiName(api::device_api device_api) {
 }
 
 // Design §2.9: ReShade's create_device event.
-constexpr uint32_t CREATE_DEVICE_EVENT = 96u;
 constexpr uint32_t D3D9EX_API_VERSION = 0x9100u;
 
 }  // namespace
@@ -863,11 +862,7 @@ void HelperFront::Quit() {
 }
 
 void RegisterCreateDeviceEvent(bool (*callback)(api::device_api device_api, uint32_t& api_version)) {
-  const auto register_event = reinterpret_cast<void (*)(reshade::addon_event, void*)>(
-      GetProcAddress(reshade::internal::get_reshade_module_handle(), "ReShadeRegisterEvent"));
-  if (register_event != nullptr) {
-    register_event(static_cast<reshade::addon_event>(CREATE_DEVICE_EVENT), reinterpret_cast<void*>(callback));
-  }
+  reshade::register_event<reshade::addon_event::create_device>(callback);
 }
 
 }  // namespace uplift::addon

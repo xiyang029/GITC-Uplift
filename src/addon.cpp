@@ -73,6 +73,7 @@
 #include "ui/settings.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/status_text.hpp"
+#include "ui/style.hpp"
 #include "vk/device_hook.hpp"
 #include "vk/format.hpp"
 #include "vk/loader.hpp"
@@ -111,11 +112,11 @@ static_assert(static_cast<uint32_t>(api::color_space::srgb_nonlinear) == static_
 static_assert(static_cast<uint32_t>(api::color_space::extended_srgb_linear) == static_cast<uint32_t>(color::ColorSpace::EXTENDED_SRGB_LINEAR));
 static_assert(static_cast<uint32_t>(api::color_space::hdr10_st2084) == static_cast<uint32_t>(color::ColorSpace::HDR10_ST2084));
 static_assert(static_cast<uint32_t>(api::color_space::hdr10_hlg) == static_cast<uint32_t>(color::ColorSpace::HDR10_HLG));
-// The compute shadow compares ReShade's values as numbers (Task 6); these are the ones v6.0.0 names.
+// The compute shadow compares ReShade's values as numbers (Task 6); these are the pinned v6.8.0 ones.
 static_assert(static_cast<uint32_t>(api::shader_stage::compute) == state::SHADER_STAGE_COMPUTE);
 static_assert(static_cast<uint32_t>(api::pipeline_stage::compute_shader) == state::PIPELINE_STAGE_COMPUTE);
 static_assert(static_cast<uint32_t>(api::descriptor_type::constant_buffer) == state::DESCRIPTOR_CONSTANT_BUFFER);
-static_assert(static_cast<uint32_t>(api::descriptor_type::acceleration_structure) == state::DESCRIPTOR_ACCELERATION_STRUCTURE_6_1);
+static_assert(static_cast<uint32_t>(api::descriptor_type::acceleration_structure) == state::DESCRIPTOR_ACCELERATION_STRUCTURE);
 
 // Plan 17: DiagnosticRemoveDevice presses Retry now itself about a second (at 60 Hz) after a stop that may still be retried.
 constexpr uint32_t DIAGNOSTIC_RETRY_PRESENTS = 60u;
@@ -3473,6 +3474,7 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon_module, HMODULE 
   // kill-on-close job when the game exits do it (design §2.1).
   g_state->front->Quit();
   addon::RemoveLogBridge();
+  ui::style::Restore();
   reshade::unregister_addon(addon_module, reshade_module);
 }
 

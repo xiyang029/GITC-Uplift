@@ -18,11 +18,11 @@ headers are fetched; no NVIDIA library or binary is linked, committed or redistr
 runtime (`nvngx_dlssnr.dll`) is supplied by the user and loaded at run time.
 
 ## ReShade add-on API headers (BSD-3-Clause) — Copyright (C) 2014 Patrick Mours
-`include/` of https://github.com/crosire/reshade at tag v6.0.0, fetched into `third_party/_deps/reshade/` at build
+`include/` of https://github.com/crosire/reshade at tag v6.8.0, fetched into `third_party/_deps/reshade/` at build
 time. The API is header-only, so its inline code is compiled into `gitc-uplift.addon64` and `gitc-uplift.addon32`. Not redistributed as source.
 
 ## Dear ImGui (MIT) — Copyright (c) 2014-2023 Omar Cornut
-`imgui.h` and the `imconfig.h` it includes, at the revision ReShade v6.0.0 pins, sparse-fetched into
+`imgui.h` and the `imconfig.h` it includes, at the revision ReShade v6.8.0 pins, sparse-fetched into
 `third_party/_deps/imgui/` (`LICENSE.txt` fetched alongside, for this notice). Uplift compiles no ImGui source:
 every ImGui call goes through the function table ReShade exports. Source: https://github.com/ocornut/imgui
 
@@ -32,7 +32,7 @@ Source: https://bottosson.github.io/posts/oklab/
 
 ## MinHook (BSD-2-Clause) — Copyright (C) 2009-2017 Tsuda Kageyu; Hacker Disassembler Engine 32/64 C — Copyright (c) 2008-2009 Vyacheslav Patkov
 `include/` and `src/` of https://github.com/TsudaKageyu/minhook at commit 8fda4f5481fed5797dc2651cd91e238e9b3928c6 (the
-commit ReShade v6.0.0's `deps/minhook` submodule records), fetched into `third_party/_deps/minhook/` at build time and
+commit ReShade v6.8.0's `deps/minhook` submodule records), fetched into `third_party/_deps/minhook/` at build time and
 compiled into `gitc-uplift.addon64` and `gitc-uplift.addon32`. Its licence, reproduced in full:
 
 ```text

@@ -260,7 +260,6 @@ enum class CardStage : uint8_t {
 };
 enum class CardButton : uint8_t {
   NONE,
-  TURN_ON,
   RETRY_NOW,  // with the device-removal latch set, the overlay says "Retry now and clear the latch"
   CLEAR_LATCH,
 };

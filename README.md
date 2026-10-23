@@ -404,7 +404,7 @@ build.cmd release-x86
 ```
 
 - `tools\fetch_deps.cmd` downloads the headers the build needs into `third_party\_deps` (NVIDIA's NGX SDK headers, no NVIDIA binaries;
-  the ReShade 6.0.0 add-on headers and Dear ImGui; MinHook).
+  the ReShade 6.8.0 add-on headers and Dear ImGui; MinHook).
 - `build.cmd release` makes `build\release\gitc-uplift.addon64` and `build\release\gitc-uplift-helper64.exe`.
 - `build.cmd release-x86` makes `build\release-x86\gitc-uplift.addon32`.
 - The add-ons and the helper check each other's build id, so always use the ones from the same build.

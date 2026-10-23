@@ -11,6 +11,7 @@
 
 #include "color/encoding.hpp"
 #include "look/look_math.hpp"
+#include "nr/foveation.hpp"
 #include "nr/types.hpp"
 #include "vk/nr_functions.hpp"
 #include "vk/nr_image.hpp"
@@ -42,6 +43,7 @@ struct VkEncodePass {
   nr::Rect region;              // the part of `source` resampled to the image; all zero = width x height at (0, 0)
   nr::Size canvas;              // the model texture: the image plus mirrored padding; empty = the image
   uint32_t options = 0u;        // shader_options (the primaries, the near-black guard)
+  nr::foveation::Grid foveation;
 };
 
 // Compose the change field with the original pixel, using direct reads when dimensions match.
@@ -68,6 +70,7 @@ struct VkDecodePass {
   uint32_t options = 0u;                 // shader_options (the primaries, Consistent)
   float chroma_clamp = 0.f;              // Plan 14 (F14): stops; 0 = off
   VkSampledView mask;                    // Plan 14 (§3.13): the mask copy, SHADER_READ_ONLY_OPTIMAL; null = none
+  nr::foveation::Grid foveation;
 };
 
 // Amendment 7 and v2 design §3.9: the game's motion vectors into an Uplift RG16F image, in destination pixels (Before upscaling's canvas).
@@ -82,6 +85,7 @@ struct VkMotionPass {
   float offset_x = 0.f;  // added in destination pixels, before any vertical flip
   float offset_y = 0.f;
   bool flip_y = false;                  // 1.1.6: `source` is upside down against `target` (motion_cs.hlsl)
+  nr::foveation::Grid foveation;
 };
 
 // Plan 14 (v2 design §3.7): NR's change field at the work image size, from the model input recomputed exactly as `encode` computed it (a later pass may

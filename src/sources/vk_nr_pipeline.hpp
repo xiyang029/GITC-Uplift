@@ -200,6 +200,9 @@ class VkNrPipeline final : private nr::PassResolver {
     nr::Size output;            // After DLSS: the output region the set was made for; Before upscaling: the work image (I-1)
     nr::Size color_size;        // Before upscaling: the game's Color dimensions; empty for After DLSS
     bool pre_sr = false;
+    // The warped work grid the set was made for (nr/foveation.hpp). A grid that moves while the surfaces still fit restarts
+    // the histories instead of reallocating (see RecordUav and RecordPreSr below).
+    nr::foveation::Grid foveation;
     uint64_t bytes = 0u;         // what the budget is charged for A, B, the change field and the private colour
     uint64_t motion_bytes = 0u;  // and for each motion image, while it exists
     bool reset_pending = true;   // a new set, or a new encoding: NR's history starts afresh (Plan 3)

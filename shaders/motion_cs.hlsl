@@ -1,4 +1,5 @@
 #include "change_common.hlsli"
+#include "foveation.hlsli"
 #include "vk_common.hlsli"
 
 cbuffer MotionConstants : register(b0) {
@@ -18,6 +19,10 @@ cbuffer MotionConstants : register(b0) {
   uint reserved3;
   uint reserved4;
   uint reserved5;
+  uint foveation_x;    // foveated grid: the packed per-axis warp (0 = identity) and G(1), its mean density
+  uint foveation_y;
+  float foveation_gmax_x;
+  float foveation_gmax_y;
 };
 
 Texture2D<float4> motion_source : register(t1);
@@ -40,7 +45,13 @@ void main(uint3 id : SV_DispatchThreadID) {
   const bool2 mirrored = ((id.xy % (2u * image)) >= image);
   const uint2 pixel = uint2(Mirror(id.x, image_width), Mirror(id.y, image_height));
   const uint2 region = uint2(region_width, region_height);
-  uint2 read = min(uint2((float2(pixel) + 0.5f) * float2(region) / float2(image)), region - 1u);
+  const uint2 packed = uint2(foveation_x, foveation_y);
+  const float2 gmax = float2(foveation_gmax_x, foveation_gmax_y);
+  // Foveated grid: this destination texel's centre, unwarped, is the full-frame position its vector is
+  // about. Under the warp the vector's length is carried through the warp, not scaled by it (foveation.hlsli).
+  const float2 v_now = (float2(pixel) + 0.5f) / float2(image);
+  const float2 n = FovUnwarp(v_now, packed, gmax);
+  uint2 read = min(uint2(n * float2(region)), region - 1u);
   if (flip_y != 0u) {
     read.y = region.y - 1u - read.y;  // the source's rows run the other way
   }
@@ -51,6 +62,12 @@ void main(uint3 id : SV_DispatchThreadID) {
   }
   if (flip_y != 0u) {
     motion.y = -motion.y;  // and so does its vertical motion
+  }
+  if (FovAny(packed)) {
+    // The vector points at the previous position: warp that endpoint, so a vector crossing the fall-off keeps its
+    // exact warped length instead of the length the uniform grid would give it.
+    const float2 v_prev = FovWarp(n + motion / float2(image), packed, gmax);
+    motion = (v_prev - v_now) * float2(image);
   }
   motion = select(mirrored, -motion, motion);
   // Non-finite first: clamp's result for a NaN is the hardware's choice.
