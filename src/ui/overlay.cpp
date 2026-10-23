@@ -174,33 +174,34 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         const bool held_here = (on_release && state->pending_release.has_value() && state->pending_key == descriptor.key);
         int value = (held_here ? static_cast<int>(*state->pending_release) : applied);
         widgets::RowLabel(label.c_str(), tip_text);
-        const bool edited = (descriptor.max > 100.0 ? gui::InputInt(hidden.c_str(), &value, 64, 512)
-                                                    : gui::SliderInt(hidden.c_str(), &value, static_cast<int>(descriptor.min),
-                                                                       static_cast<int>(descriptor.max)));
+        // A row of whole numbers draws as the panel's own slider; only a value that may be typed past 100
+        // (the VRAM margin) keeps ImGui's input, where a slider would have no useful range.
+        bool active = false;
+        const bool edited =
+            (descriptor.max > 100.0
+                 ? gui::InputInt(hidden.c_str(), &value, 64, 512)
+                 : widgets::SliderInt(hidden.c_str(), &value, static_cast<int>(descriptor.min),
+                                      static_cast<int>(descriptor.max), nullptr, &active));
         if (!on_release) {
           if (edited) {
             descriptor.set(*settings, std::clamp(static_cast<double>(value), descriptor.min, descriptor.max));
             changed = true;
           }
         } else {
-          // Pass Count: while held the slider shows the value under the mouse; the setting, NR's features and the
-          // Pass 2+ rows below change once, on release (also after a Ctrl+click typed value is confirmed).
+          // Pass Count and the foveation rows, as a float row: while held the slider shows the value under the
+          // mouse; the setting, NR's features and the rows below change once, on release (a Ctrl+click typed
+          // value counts as one edit, when the field lets go).
           if (edited) {
             state->pending_release = value;
             state->pending_key = descriptor.key;
           }
-          if (gui::IsItemDeactivatedAfterEdit() && state->pending_key == descriptor.key && state->pending_release) {
+          if (!active && state->pending_key == descriptor.key && state->pending_release) {
             const int released = static_cast<int>(*std::exchange(state->pending_release, std::nullopt));
             if (released != applied) {
               descriptor.set(*settings, std::clamp(static_cast<double>(released), descriptor.min, descriptor.max));
               changed = true;
             }
-          } else if (gui::IsItemDeactivated() && state->pending_key == descriptor.key) {
-            state->pending_release.reset();  // released without an edit
           }
-        }
-        if (descriptor.key == "PassCount" && !view.frame_generation_warning.empty()) {
-          gui::TextDisabled("%s", view.frame_generation_warning.c_str());
         }
         break;
       }
@@ -344,23 +345,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     }
     gui::SetTooltip("%s", tooltip.c_str());
   }
-  if (descriptor.key == "Mask" && !view.mask_note.empty()) {
-    gui::TextDisabled("%s", view.mask_note.c_str());
-  }
-  if (descriptor.key == "UICorrection" && !view.ui_correction_note.empty()) {
-    gui::TextDisabled("%s", view.ui_correction_note.c_str());
-  }
-  if (descriptor.key == "UseD3D9Ex") {
-    const std::string& note = (view.d3d9ex_unavailable.empty() ? view.d3d9ex_readout : view.d3d9ex_unavailable);
-    if (!note.empty()) {
-      gui::TextDisabled("%s", note.c_str());
-    }
-  }
-  if (descriptor.key == "VulkanNr" && view.vulkan_nr_unavailable.empty() && !view.vulkan_nr_note.empty()) {
-    gui::TextDisabled("%s", view.vulkan_nr_note.c_str());
-  }
   // The reset arrow after a row that differs from its default (design §3.16, G1). The Enable
-  // switch itself is the one row without an arrow: "reset" would only mean "switch NR off".
+  // switch itself is the one row without an arrow: "reset" would only mean "switch NR off". Drawn before
+  // the row's notes, so the arrow stays on the control's own line.
   if (descriptor.section != SettingSection::TOP && !IsDefault(*settings, descriptor)) {
     const bool reset_clicked = widgets::ResetButton(descriptor.key.data(), FormatSettingValue(descriptor, DefaultSettings()).c_str());
     if (reset_clicked) {
@@ -371,6 +358,25 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       }
       changed = true;
     }
+  }
+  // A row's own footnote, under its control column: what the control is doing, or why it cannot run.
+  if (descriptor.key == "PassCount" && !view.frame_generation_warning.empty()) {
+    widgets::RowNote(view.frame_generation_warning.c_str());
+  }
+  if (descriptor.key == "Mask" && !view.mask_note.empty()) {
+    widgets::RowNote(view.mask_note.c_str());
+  }
+  if (descriptor.key == "UICorrection" && !view.ui_correction_note.empty()) {
+    widgets::RowNote(view.ui_correction_note.c_str());
+  }
+  if (descriptor.key == "UseD3D9Ex") {
+    const std::string& note = (view.d3d9ex_unavailable.empty() ? view.d3d9ex_readout : view.d3d9ex_unavailable);
+    if (!note.empty()) {
+      widgets::RowNote(note.c_str());
+    }
+  }
+  if (descriptor.key == "VulkanNr" && view.vulkan_nr_unavailable.empty() && !view.vulkan_nr_note.empty()) {
+    widgets::RowNote(view.vulkan_nr_note.c_str());
   }
   gui::EndDisabled();
   gui::PopID();
@@ -388,7 +394,6 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
   bool open = true;
   if (!gui::BeginPopupModal(title.c_str(), &open, ImGuiWindowFlags_AlwaysAutoResize)) return false;
   gui::TextWrapped("%s", descriptor.enable_warning.data());
-  // [style] a hair of space around the divider
   ImGui::Dummy(ImVec2(0.f, style::tokens::kRowGap * 0.5f));
   gui::Separator();
   ImGui::Dummy(ImVec2(0.f, style::tokens::kRowGap * 0.5f));
@@ -397,7 +402,6 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
   gui::SameLine();
   bool enable = false;
   {
-    // [style] the confirming action carries the accent, as the card's own button does
     style::StyleScope buttons;
     buttons.AccentButton();
     enable = gui::Button("Enable anyway");
@@ -733,10 +737,18 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   // lambda rather than a file-scope helper.
   const auto draw_rows = [&view, settings, state](SettingSection section) {
     bool section_changed = false;
+    bool face_heading = false;
     for (const SettingDescriptor& descriptor : SettingsSchema()) {
-      if (descriptor.section == section && descriptor.kind != SettingKind::KEY) {
-        section_changed |= DrawRow(descriptor, view, settings, state);
+      if (descriptor.section != section || descriptor.kind == SettingKind::KEY) {
+        continue;
       }
+      // Advanced's face controls start at Show the face mask; one sub-caption groups the tuning rows that
+      // follow it (they are drawn only while Keep faces is on).
+      if (section == SettingSection::ADVANCED && descriptor.key == "ShowFaceMask" && settings->keep_faces && !face_heading) {
+        widgets::SubCaption("Face tuning");
+        face_heading = true;
+      }
+      section_changed |= DrawRow(descriptor, view, settings, state);
     }
     return section_changed;
   };
@@ -747,8 +759,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   // ui-review.md §2 finding 1 / §3: the NR stage and Motion vectors toggles, in pipeline order, at the top
   // of the panel -- the decisions that shape everything else, instead of about the 45th line. Plan 14: Setup.
   const bool placement_changed = SectionChanged(*settings, SettingSection::PLACEMENT);
-  if (widgets::SectionCaption(placement_changed ? "Setup (changed)" : "Setup", "Reset",
-                              placement_changed && !state->defaults_view)) {
+  if (widgets::SectionCaption("Setup", "Reset", placement_changed && !state->defaults_view)) {
     ResetSection(settings, SettingSection::PLACEMENT);
     const Settings defaults = DefaultSettings();  // the three highlights follow at once, each to the best option that can run (the stage first)
     state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(SourcePickOf(defaults, view.dlss_explicit)), view.setup);
@@ -760,12 +771,14 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   changed |= DrawMotionRow(view, settings, state);
   changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state);
   changed |= DrawRow(*FindSetting("Preset"), view, settings, state);
+  widgets::SubCaption("Resolution");
   changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state);
   changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state);
   changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state);
   // Foveated edge scaling (2026-10-21): the five rows below are the centre, its two fall-offs and the density they reach; they only matter while it is on.
   changed |= DrawRow(*FindSetting("Foveation"), view, settings, state);
   if (settings->foveation) {
+    widgets::SubCaption("Centre and fall-off");
     changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state);
     changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state);
     changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state);
@@ -776,7 +789,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   // ui-review.md §2 finding 7: Compare (Mine/Built-in) moves here, the first row of Look.
   const bool look_changed = SectionChanged(*settings, SettingSection::LOOK);
   widgets::SectionGap();
-  if (widgets::SectionCaption(look_changed ? "Look (changed)" : "Look", "Reset", look_changed && !state->defaults_view)) {
+  if (widgets::SectionCaption("Look", "Reset", look_changed && !state->defaults_view)) {
     ResetSection(settings, SettingSection::LOOK);
     changed = true;
   }
@@ -893,7 +906,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   // ui-review.md §2 finding 2: the wall of status text moves into one closed Details header. It always lists
   // everything, so its content does not depend on the card's state; a working card repeats its details lines.
   if (widgets::SectionHeader("Details", nullptr, nullptr, false, nullptr)) {
-    // [style] the wall of diagnostic text reads better with a slightly tighter leading
+    // A tighter leading for the wall of diagnostic text.
     style::StyleScope details;
     details.Var(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x,
                                                   ImGui::GetStyle().ItemSpacing.y * 0.75f));
@@ -920,7 +933,6 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   }
 
   // G2: Restore all defaults, confirmed once before it takes effect.
-  // [style] a section gap above the divider, so the destructive area is visually separated
   widgets::SectionGap();
   gui::Separator();
   if (gui::Button("Restore all defaults")) {
@@ -930,12 +942,8 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     gui::TextWrapped("Every setting returns to its default, the hotkey included; Enable stays as it is.");
     bool restore_all = false;
     {
-      // [style] the confirming action is a danger-tinted primary; the cancel stays neutral
       style::StyleScope confirm;
-      confirm.Color(ImGuiCol_Button, style::tokens::kBad)
-             .Color(ImGuiCol_ButtonHovered, ImVec4(style::tokens::kBad.x * 1.1f, style::tokens::kBad.y * 1.1f, style::tokens::kBad.z * 1.1f, 1.f))
-             .Color(ImGuiCol_ButtonActive, ImVec4(style::tokens::kBad.x * 0.9f, style::tokens::kBad.y * 0.9f, style::tokens::kBad.z * 0.9f, 1.f))
-             .Color(ImGuiCol_Text, style::tokens::kBgWindow);
+      confirm.DangerButton();
       restore_all = gui::Button("Restore all");
     }
     if (restore_all) {

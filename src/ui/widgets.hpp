@@ -29,6 +29,28 @@ namespace uplift::ui::widgets {
 
 using namespace style;
 
+// One line of text in a colour that lasts exactly as long as the call: the panel's secondary text is drawn
+// in a dozen places, and each used to push and pop the same colour itself.
+inline void TextIn(const ImVec4& color, const char* text) {
+  StyleScope scope;
+  scope.Color(ImGuiCol_Text, color);
+  gui::TextUnformatted(text);
+}
+
+inline void SecondaryText(const char* text) { TextIn(tokens::kTextSecondary, text); }
+
+inline void SecondaryWrapped(const char* text) {
+  StyleScope scope;
+  scope.Secondary();
+  gui::TextWrapped("%s", text);
+}
+
+inline void SmallSecondaryText(const char* text) {
+  StyleScope scope;
+  scope.FontSize(SmallFontSize()).Secondary();
+  gui::TextUnformatted(text);
+}
+
 // A tooltip that wraps after kTooltipEm font sizes, as the panel's own tooltips do. The message is drawn
 // from what the format came out as; nothing to say, no bubble: ImGui draws an empty one for an empty
 // string, which reads as a glitch.
@@ -43,12 +65,13 @@ inline void ItemTooltip(const char* fmt, ...) {
   if (!ImGui::BeginItemTooltip()) {
     return;
   }
-  // [style] a little breathing room inside the tooltip window
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f, 6.f));
-  ImGui::PushTextWrapPos(ImGui::GetFontSize() * tokens::kTooltipEm);
-  ImGui::TextUnformatted(text.c_str());
-  ImGui::PopTextWrapPos();
-  ImGui::PopStyleVar();
+  {
+    StyleScope pad;
+    pad.Var(ImGuiStyleVar_WindowPadding, ImVec2(tokens::kTooltipPadX, tokens::kTooltipPadY));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * tokens::kTooltipEm);
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::PopTextWrapPos();
+  }
   ImGui::EndTooltip();
 }
 
@@ -70,8 +93,9 @@ inline std::string Ellipsize(const char* text, float width) {
   return shown + "...";
 }
 
-// The reset slot of the row RowLabel started, as a screen x.
+// The reset slot of the row RowLabel started, as a screen x, and the x its control starts at.
 inline float row_slot_x = 0.f;
+inline float row_control_x = 0.f;
 
 // The language combo's width, in font sizes: enough for "简体中文 / Chinese".
 constexpr float kLanguageEm = 12.f;
@@ -97,27 +121,27 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
   }
   const ImVec2 at = ImGui::GetCursorScreenPos();
   row_slot_x = at.x + avail - ImGui::GetFrameHeight();
+  // A little more air than the item spacing between a control and the reset slot, so a slider's value and
+  // the undo arrow do not read as one crowded pair.
+  const float slot_gap = style.ItemSpacing.x * 1.5f;
   const float column = (std::min)(font * tokens::kLabelEm, avail * tokens::kLabelShare);
   const float control_x = (std::max)(at.x + column, at.x + ImGui::CalcTextSize(text.c_str()).x + style.ItemSpacing.x);
+  row_control_x = (stacked ? at.x : control_x);
   if (!stacked) {
     ImGui::AlignTextToFramePadding();
   }
   if (!stacked || !text.empty()) {
-    {
-      StyleScope secondary;
-      secondary.Color(ImGuiCol_Text, tokens::kTextSecondary);
-      gui::TextUnformatted(text.c_str());
-    }
+    SecondaryText(text.c_str());
     if (!tip.empty()) {
       ItemTooltip("%s", tip.c_str());
     }
   }
   if (stacked) {
-    gui::SetNextItemWidth(row_slot_x - style.ItemSpacing.x - at.x);
+    gui::SetNextItemWidth(row_slot_x - slot_gap - at.x);
   } else {
     gui::SameLine();
     gui::SetCursorScreenPos(ImVec2(control_x, gui::GetCursorScreenPos().y));
-    gui::SetNextItemWidth((std::max)(1.f, row_slot_x - style.ItemSpacing.x - control_x));
+    gui::SetNextItemWidth((std::max)(1.f, row_slot_x - slot_gap - control_x));
   }
 }
 
@@ -128,12 +152,8 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
 // caller's own. Call right before the control.
 inline void InlineLabel(const char* label, const char* tooltip = nullptr) {
   const std::string text = gui::Display(label);
-  {
-    StyleScope secondary;
-    secondary.Color(ImGuiCol_Text, tokens::kTextSecondary);
-    ImGui::AlignTextToFramePadding();
-    gui::TextUnformatted(text.c_str());
-  }
+  ImGui::AlignTextToFramePadding();
+  SecondaryText(text.c_str());
   if (tooltip != nullptr) {
     ItemTooltip("%s", gui::Display(tooltip).c_str());
   }
@@ -141,28 +161,67 @@ inline void InlineLabel(const char* label, const char* tooltip = nullptr) {
 }
 
 // The reset button in the row RowLabel started: an undo arrow, drawn only for a setting that differs from
-// its default (the caller decides). `id` keeps the buttons apart; `default_text` names what a click
-// restores. Returns true when clicked.
+// its default (the caller decides). At rest the arrow is dim and turns the accent while the pointer is over
+// its cell, so a panel with many changed rows does not turn its whole right edge into a column of arrows.
+// `id` keeps the buttons apart; `default_text` names what a click restores. Returns true when clicked.
 inline bool ResetButton(const char* id, const char* default_text) {
   ImGui::SameLine();
-  ImGui::SetCursorScreenPos(ImVec2(row_slot_x, ImGui::GetCursorScreenPos().y));
+  const float height = ImGui::GetFrameHeight();
+  const ImVec2 slot(row_slot_x, ImGui::GetCursorScreenPos().y);
+  const bool over = ImGui::IsWindowHovered()
+                    && ImGui::IsMouseHoveringRect(slot, ImVec2(slot.x + height, slot.y + height));
+  ImGui::SetCursorScreenPos(slot);
   bool clicked = false;
   {
     StyleScope flat;
-    // [style] shared wash/halo tokens; the slot now reads as a control at rest, not a hole
-    flat.Color(ImGuiCol_Button, ImVec4(0.f, 0.f, 0.f, 0.f))
-        .Color(ImGuiCol_ButtonHovered, tokens::kAccentWash)
-        .Color(ImGuiCol_ButtonActive, tokens::kAccentHalo)
-        .Color(ImGuiCol_Text, tokens::kTextSecondary)
+    flat.FlatButton()
+        .Color(ImGuiCol_Text, over ? tokens::kAccent : tokens::Fade(tokens::kTextSecondary, 0.55f))
         .Var(ImGuiStyleVar_FramePadding, ImVec2(0.f, ImGui::GetStyle().FramePadding.y));
     ImGui::PushID(id);
-    clicked = gui::Button(icons::kUndo, ImVec2(ImGui::GetFrameHeight(), 0.f));
+    clicked = gui::Button(icons::kUndo, ImVec2(height, 0.f));
     ImGui::PopID();
   }
   if (ImGui::IsItemHovered(ImGuiHoveredFlags_None)) {
     ItemTooltip(gui::Display("Reset to default (%s)").c_str(), gui::Display(default_text).c_str());
   }
   return clicked;
+}
+
+// A muted note under the row RowLabel started, starting at that row's control column and in the small size:
+// the note belongs to the control above it rather than reading as a line of its own at the panel's edge.
+inline void RowNote(const char* text) {
+  const std::string shown = gui::Display(text);
+  if (shown.empty()) {
+    return;
+  }
+  StyleScope note;
+  note.FontSize(SmallFontSize()).Color(ImGuiCol_Text, tokens::kTextSecondary);
+  gui::SetCursorScreenPos(ImVec2(row_control_x, gui::GetCursorScreenPos().y));
+  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+  ImGui::TextWrapped("%s", shown.c_str());
+  ImGui::PopTextWrapPos();
+}
+
+// The rail of a slider over its item's rect: the track, the filled part up to the knob, and the knob, at
+// `t` in [0, 1]. `hot` draws the halo while the pointer is on the control or it is held. Both sliders draw
+// through this, so an integer row and a float row cannot drift apart.
+inline void SliderRail(const ImVec2& lo, const ImVec2& hi, float t, bool hot) {
+  const float height = hi.y - lo.y;
+  const float knob = height * 0.30f;
+  // ImGui's own grab geometry: 2 px of padding, then half the grab.
+  const float x0 = lo.x + 2.f + knob;
+  const float x1 = hi.x - 2.f - knob;
+  const float x = x0 + t * (x1 - x0);
+  const float y = (lo.y + hi.y) * 0.5f;
+  const float rail = (std::max)(2.f, height * 0.12f);
+  ImDrawList* draw = ImGui::GetWindowDrawList();
+  draw->AddRectFilled(ImVec2(x0, y - rail * 0.5f), ImVec2(x1, y + rail * 0.5f), ToU32(tokens::kBgControlHover), rail * 0.5f);
+  draw->AddRectFilled(ImVec2(x0, y - rail * 0.5f), ImVec2(x, y + rail * 0.5f), ToU32(tokens::kAccent), rail * 0.5f);
+  if (hot) {
+    draw->AddCircleFilled(ImVec2(x, y), knob + 2.f, ToU32(tokens::kAccentHalo));
+  }
+  draw->AddCircleFilled(ImVec2(x, y), knob, ToU32(tokens::kTextPrimary));
+  draw->AddCircle(ImVec2(x, y), knob, ToU32(tokens::kHairline), 0, 1.0f);
 }
 
 // A slider drawn the modern way: a thin rail filled up to the value, a round knob, and the value in its
@@ -178,12 +237,15 @@ inline bool Slider(const char* id, float* value, float min, float max, const cha
   const ImGuiID item = ImGui::GetID(id);
   const bool was_typing = (typing == item);
   const float height = ImGui::GetFrameHeight();
-  const float knob = height * 0.32f;
+  const float knob = height * 0.30f;
   float shown = *value * display_scale;
   char text[32];
   std::snprintf(text, sizeof(text), gui::Display(format).c_str(), shown);
   const float text_width = ImGui::CalcTextSize(text).x;
-  const float value_width = (std::max)(ImGui::GetFontSize() * tokens::kValueEm, text_width + ImGui::GetStyle().ItemSpacing.x);
+  // The number sits a small gap after its rail, not in a panel-wide column: a column wide enough for the widest
+  // value ("500 ms") leaves a short one ("50") most of an em of empty rail. Its right edge still lands on the
+  // control column's, so the values line up down the panel.
+  const float value_width = text_width + ImGui::GetStyle().ItemSpacing.x * 0.5f;
   const float width = ImGui::CalcItemWidth();
   bool changed = false;
   {
@@ -192,13 +254,12 @@ inline bool Slider(const char* id, float* value, float min, float max, const cha
     // where the mouse drags it.
     hidden.Var(ImGuiStyleVar_GrabMinSize, knob * 2.f);
     if (!was_typing) {
-      const ImVec4 clear(0.f, 0.f, 0.f, 0.f);
-      hidden.Color(ImGuiCol_FrameBg, clear)
-          .Color(ImGuiCol_FrameBgHovered, clear)
-          .Color(ImGuiCol_FrameBgActive, clear)
-          .Color(ImGuiCol_SliderGrab, clear)
-          .Color(ImGuiCol_SliderGrabActive, clear)
-          .Color(ImGuiCol_Text, clear);
+      hidden.Color(ImGuiCol_FrameBg, tokens::kTransparent)
+          .Color(ImGuiCol_FrameBgHovered, tokens::kTransparent)
+          .Color(ImGuiCol_FrameBgActive, tokens::kTransparent)
+          .Color(ImGuiCol_SliderGrab, tokens::kTransparent)
+          .Color(ImGuiCol_SliderGrabActive, tokens::kTransparent)
+          .Color(ImGuiCol_Text, tokens::kTransparent);
     }
     ImGui::SetNextItemWidth(was_typing ? width : (std::max)(width - value_width, height * 2.f));
     changed = ImGui::SliderFloat(id, &shown, min, max, format);
@@ -226,22 +287,8 @@ inline bool Slider(const char* id, float* value, float min, float max, const cha
 
   const ImVec2 lo = ImGui::GetItemRectMin();
   const ImVec2 hi = ImGui::GetItemRectMax();
-  // ImGui's own grab geometry: 2 px of padding, then half the grab.
-  const float x0 = lo.x + 2.f + knob;
-  const float x1 = hi.x - 2.f - knob;
   const float t = (max > min) ? std::clamp((shown - min) / (max - min), 0.f, 1.f) : 0.f;
-  const float x = x0 + t * (x1 - x0);
-  const float y = (lo.y + hi.y) * 0.5f;
-  const float rail = (std::max)(2.f, height * 0.14f);
-  ImDrawList* draw = ImGui::GetWindowDrawList();
-  // [style] rounded rail ends, shared hover halo, a hairline knob outline that survives on cards
-  draw->AddRectFilled(ImVec2(x0, y - rail * 0.5f), ImVec2(x1, y + rail * 0.5f), ToU32(tokens::kBgControlHover), rail * 0.5f);
-  draw->AddRectFilled(ImVec2(x0, y - rail * 0.5f), ImVec2(x, y + rail * 0.5f), ToU32(tokens::kAccent), rail * 0.5f);
-  if (active || ImGui::IsItemHovered()) {
-    draw->AddCircleFilled(ImVec2(x, y), knob + 2.f, ToU32(tokens::kAccentHalo));
-  }
-  draw->AddCircleFilled(ImVec2(x, y), knob, ToU32(tokens::kTextPrimary));
-  draw->AddCircle(ImVec2(x, y), knob, ToU32(tokens::kHairline), 0, 1.0f);
+  SliderRail(lo, hi, t, active || ImGui::IsItemHovered());
 
   gui::SameLine(0.f, 0.f);
   gui::SetCursorScreenPos(ImVec2(hi.x + value_width - text_width, gui::GetCursorScreenPos().y));
@@ -249,13 +296,71 @@ inline bool Slider(const char* id, float* value, float min, float max, const cha
   return changed;
 }
 
-// A group's name inside a section ("Colour", "Motion and game state"): small text in the secondary colour.
+// The integer slider, drawn as Slider: the same rail, knob and value column over ImGui's SliderInt, so a row
+// of whole numbers (a percentage, a mode, the pass count) sits in the same visual system as the rest. Call
+// after RowLabel. Ctrl+click typing works as on Slider: while the value is typed, ImGui's own slider draws.
+// *dragging, when asked for, is ImGui's held state for this frame.
+inline bool SliderInt(const char* id, int* value, int min, int max, const char* tooltip, bool* dragging = nullptr) {
+  static ImGuiID typing = 0;
+  const ImGuiID item = ImGui::GetID(id);
+  const bool was_typing = (typing == item);
+  const float height = ImGui::GetFrameHeight();
+  const float knob = height * 0.30f;
+  char text[32];
+  std::snprintf(text, sizeof(text), "%d", *value);
+  const float text_width = ImGui::CalcTextSize(text).x;
+  // The number sits a small gap after its rail, not in a panel-wide column: a column wide enough for the widest
+  // value ("500 ms") leaves a short one ("50") most of an em of empty rail. Its right edge still lands on the
+  // control column's, so the values line up down the panel.
+  const float value_width = text_width + ImGui::GetStyle().ItemSpacing.x * 0.5f;
+  const float width = ImGui::CalcItemWidth();
+  bool changed = false;
+  {
+    StyleScope hidden;
+    hidden.Var(ImGuiStyleVar_GrabMinSize, knob * 2.f);
+    if (!was_typing) {
+      hidden.Color(ImGuiCol_FrameBg, tokens::kTransparent)
+          .Color(ImGuiCol_FrameBgHovered, tokens::kTransparent)
+          .Color(ImGuiCol_FrameBgActive, tokens::kTransparent)
+          .Color(ImGuiCol_SliderGrab, tokens::kTransparent)
+          .Color(ImGuiCol_SliderGrabActive, tokens::kTransparent)
+          .Color(ImGuiCol_Text, tokens::kTransparent);
+    }
+    ImGui::SetNextItemWidth(was_typing ? width : (std::max)(width - value_width, height * 2.f));
+    changed = ImGui::SliderInt(id, value, min, max, "%d");
+  }
+  if (tooltip != nullptr) {
+    ItemTooltip("%s", tooltip);
+  }
+  const bool active = ImGui::IsItemActive();
+  if (dragging != nullptr) {
+    *dragging = active;
+  }
+  if (active && ImGui::GetIO().WantTextInput) {
+    typing = item;
+  } else if (was_typing && !active) {
+    typing = 0;
+  }
+  if (was_typing) {
+    return changed;
+  }
+
+  const ImVec2 lo = ImGui::GetItemRectMin();
+  const ImVec2 hi = ImGui::GetItemRectMax();
+  const float t = (max > min) ? std::clamp(static_cast<float>(*value - min) / static_cast<float>(max - min), 0.f, 1.f) : 0.f;
+  SliderRail(lo, hi, t, active || ImGui::IsItemHovered());
+
+  gui::SameLine(0.f, 0.f);
+  gui::SetCursorScreenPos(ImVec2(hi.x + value_width - text_width, gui::GetCursorScreenPos().y));
+  gui::TextUnformatted(text);
+  return changed;
+}
+
+// A group's name inside a section ("Colour", "Motion and game state"): small text in the secondary colour,
+// with a little more air above it than a row has, so the rows under it read as its group.
 inline void SubCaption(const char* caption) {
-  // [style] a hair of space above a group caption so it does not cling to the previous control
-  ImGui::Dummy(ImVec2(0.f, tokens::kRowGap * 0.25f));
-  StyleScope caption_text;
-  caption_text.FontSize(SmallFontSize()).Color(ImGuiCol_Text, tokens::kTextSecondary);
-  gui::TextUnformatted(caption);
+  ImGui::Dummy(ImVec2(0.f, tokens::kRowGap * 0.5f));
+  SmallSecondaryText(caption);
 }
 
 // A link at the right end of the current line (screen x `right`). Returns true when clicked.
@@ -265,24 +370,29 @@ inline bool RightLink(const char* label, float right) {
   return ImGui::TextLink(label);
 }
 
-// An always-open section's caption: small capitals in the secondary colour over a hairline, and at the
-// right end a link that resets the section, shown while `modified`. Returns true on the frame the link was
-// clicked.
+// An always-open section's title: at the panel's own size in the primary colour, on more air than a
+// collapsible header gets, since unlike a header it has no row of its own to say where the section starts.
+// A changed section carries a small accent dot after the title, and at the right end a link that resets it.
+// Returns true on the frame the link was clicked.
 inline bool SectionCaption(const char* caption, const char* reset_label, bool modified) {
-  ImGui::Dummy(ImVec2(0.f, tokens::kRowGap * 0.5f));
+  ImGui::Dummy(ImVec2(0.f, tokens::kSectionGap * 0.55f));
   const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
   bool clicked = false;
   {
     StyleScope caption_text;
-    caption_text.FontSize(SmallFontSize()).Color(ImGuiCol_Text, tokens::kTextSecondary);
+    caption_text.Color(ImGuiCol_Text, tokens::kTextPrimary);
     gui::TextUnformatted(caption);
     if (modified) {
+      const ImVec2 lo = ImGui::GetItemRectMin();
+      const ImVec2 hi = ImGui::GetItemRectMax();
+      const float dot = ImGui::GetFontSize() * 0.13f;
+      ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(hi.x + dot * 2.5f, (lo.y + hi.y) * 0.5f), dot,
+                                                 ToU32(tokens::kAccent));
       ImGui::PushID(caption);  // the link's id is its own words: two sections both say "Reset"
       clicked = RightLink(gui::Display(reset_label).c_str(), right);
       ImGui::PopID();
     }
   }
-  gui::Separator();
   return clicked;
 }
 
@@ -313,8 +423,13 @@ inline bool SectionHeader(const char* english, const char* hint, const char* res
   const float title_end = at.x + font + pad * 3.f + ImGui::CalcTextSize(title.c_str()).x;
   bool open = false;
   {
+    // A flat header: no filled bar of its own, only a faint wash under the pointer and the accent while
+    // held. The title and the section gap already say where a section begins.
     StyleScope tall;
-    tall.Var(ImGuiStyleVar_FramePadding, ImVec2(pad, kPadY));
+    tall.Var(ImGuiStyleVar_FramePadding, ImVec2(pad, kPadY))
+        .Color(ImGuiCol_Header, tokens::kTransparent)
+        .Color(ImGuiCol_HeaderHovered, tokens::kSurfaceHover)
+        .Color(ImGuiCol_HeaderActive, tokens::kAccentWash);
     open = gui::CollapsingHeader((title + "###" + english).c_str(), ImGuiTreeNodeFlags_AllowOverlap);
   }
   const ImVec2 lo = ImGui::GetItemRectMin();
@@ -334,7 +449,6 @@ inline bool SectionHeader(const char* english, const char* hint, const char* res
     }
   }
   if (!hint_text.empty()) {
-    // [style] a little more separation between the title and its hint
     const ImVec2 hint_at(title_end + font * 1.25f, lo.y + kPadY);
     const float room = hint_end - font * 1.25f - hint_at.x;
     if (room >= (std::min)(ImGui::CalcTextSize(hint_text.c_str()).x, font * 6.f)) {
@@ -345,18 +459,18 @@ inline bool SectionHeader(const char* english, const char* hint, const char* res
   return open;
 }
 
-// An on/off switch: a rounded track in the accent colour when on, the knob at the end it points to. By
+// An on/off switch: a rounded track in a quiet accent when on, the knob at the end it points to. By
 // default the switch sits at the row's far end, just before the reset slot, whatever the label's width, so
 // all rows' switches line up down the panel. A row that already ends in something else (Enable, whose
 // hotkey button and whose language combo share the line) passes at_row_end = false: the switch then draws
 // where the cursor is, right after the label. Returns true on the frame it flipped *value.
 inline bool Switch(const char* id, bool* value, bool at_row_end = true) {
   const float height = ImGui::GetFrameHeight();
-  const float width = height * 1.9f;
+  const float width = height * 1.8f;
   const float radius = height * 0.5f;
   if (at_row_end) {
     ImGui::SetCursorScreenPos(
-        ImVec2(row_slot_x - ImGui::GetStyle().ItemSpacing.x - width, ImGui::GetCursorScreenPos().y));
+        ImVec2(row_slot_x - ImGui::GetStyle().ItemSpacing.x * 1.5f - width, ImGui::GetCursorScreenPos().y));
   }
   const ImVec2 at = ImGui::GetCursorScreenPos();
   const bool pressed = ImGui::InvisibleButton(id, ImVec2(width, height));
@@ -364,17 +478,12 @@ inline bool Switch(const char* id, bool* value, bool at_row_end = true) {
     *value = !*value;
   }
   const bool hovered = ImGui::IsItemHovered();
-  const ImVec4 track = (*value ? (hovered ? tokens::kAccentHover : tokens::kAccent)
+  const ImVec4 track = (*value ? (hovered ? tokens::kAccentQuietHover : tokens::kAccentQuiet)
                                : (hovered ? tokens::kBgControlHover : tokens::kBgControl));
   ImDrawList* draw = ImGui::GetWindowDrawList();
   draw->AddRectFilled(at, ImVec2(at.x + width, at.y + height), ToU32(track), radius);
-  // [style] knob sits a touch further in from the track edge
-  draw->AddCircleFilled(ImVec2(*value ? at.x + width - radius : at.x + radius, at.y + radius), radius - 4.f,
+  draw->AddCircleFilled(ImVec2(*value ? at.x + width - radius : at.x + radius, at.y + radius), radius - 3.5f,
                         ToU32(tokens::kTextPrimary));
-  // [style] shared halo token around the track makes the control read as clickable
-  if (hovered) {
-    draw->AddRect(at, ImVec2(at.x + width, at.y + height), ToU32(tokens::kAccentHalo), radius, 0, 1.0f);
-  }
   return pressed;
 }
 
@@ -397,15 +506,16 @@ inline void SegmentTip(const std::string_view& why, const std::string_view& tip)
   }
 }
 
-// Equal-width buttons in one row, the selected one in the accent colour. `current` is -1 when no segment
-// matches the setting; `tips` is per segment and shows on hover, an empty entry showing nothing. A segment
-// whose `why` is non-empty is greyed and says why on hover. The row is the next item's width, which
-// RowLabel sets. Returns the index clicked this frame, or -1. A row too narrow for its longest label
-// (ReShade docks the panel at ~450 px) draws a dropdown of the same choices instead of clipped words.
+// Equal-width buttons in one row, the selected one in the accent colour as a wash, its words in the accent
+// and a hairline of the accent around it: the group still says which option is live without a saturated
+// block per row. `current` is -1 when no segment matches the setting; `tips` is per segment and shows on
+// hover, an empty entry showing nothing. A segment whose `why` is non-empty is greyed and says why on
+// hover. The row is the next item's width, which RowLabel sets. Returns the index clicked this frame, or
+// -1. A row too narrow for its longest label (ReShade docks the panel at ~450 px) draws a dropdown of the
+// same choices instead of clipped words.
 inline int Segmented(const char* id, const char* const* english, int count, int current,
                      const std::string_view* why = nullptr, const std::string_view* tips = nullptr) {
-  // [style] a touch more gap so the row reads as a segmented group, not a button bar
-  constexpr float kGap = 3.f;
+  constexpr float kGap = 2.f;
   constexpr int kMaxSegments = 8;
   count = (std::min)(count, kMaxSegments);
   std::string shown[kMaxSegments];  // the local text owns the pointers labels[] hands out
@@ -449,8 +559,19 @@ inline int Segmented(const char* id, const char* const* english, int count, int 
     return clicked;
   }
   gui::PushID(id);
+  // One track behind the segments: the group reads as a single control, and an unselected segment has no
+  // surface of its own -- the accent marks the live one. The track is the card's own tone with a hairline,
+  // quieter than a button, and the border is off inside the row, since a transparent segment would
+  // otherwise still draw ImGui's frame hairline.
+  const ImVec2 track_at = ImGui::GetCursorScreenPos();
+  const float track_width = width * static_cast<float>(count) + kGap * static_cast<float>(count - 1);
+  const ImVec2 track_end(track_at.x + track_width, track_at.y + ImGui::GetFrameHeight());
+  ImDrawList* track_draw = ImGui::GetWindowDrawList();
+  track_draw->AddRectFilled(track_at, track_end, ToU32(tokens::kBgCard), ImGui::GetStyle().FrameRounding);
+  track_draw->AddRect(track_at, track_end, ToU32(tokens::kStroke), ImGui::GetStyle().FrameRounding, 0, 1.f);
   StyleScope row;
-  row.Var(ImGuiStyleVar_ItemSpacing, ImVec2(kGap, ImGui::GetStyle().ItemSpacing.y));
+  row.Var(ImGuiStyleVar_ItemSpacing, ImVec2(kGap, ImGui::GetStyle().ItemSpacing.y))
+      .Color(ImGuiCol_Border, tokens::kTransparent);
   for (int i = 0; i < count; ++i) {
     if (i != 0) {
       gui::SameLine();
@@ -460,11 +581,15 @@ inline int Segmented(const char* id, const char* const* english, int count, int 
     {
       StyleScope segment;
       if (i == current) {
-        segment.AccentButton();
+        segment.Color(ImGuiCol_Button, tokens::kAccentWash)
+            .Color(ImGuiCol_ButtonHovered, tokens::kAccentHalo)
+            .Color(ImGuiCol_ButtonActive, tokens::kAccentStrong)
+            .Color(ImGuiCol_Text, tokens::kAccent)
+            .Color(ImGuiCol_Border, tokens::kAccentStrong);
       } else {
-        // [style] unselected segments get a faint fill so the row groups visually
-        segment.Color(ImGuiCol_Button, tokens::kBgControl)
-            .Color(ImGuiCol_ButtonHovered, tokens::kBgControlHover);
+        segment.Color(ImGuiCol_Button, tokens::kTransparent)
+            .Color(ImGuiCol_ButtonHovered, tokens::kSurfaceHover)
+            .Color(ImGuiCol_ButtonActive, tokens::kAccentWash);
       }
       gui::BeginDisabled(greyed);
       pressed = gui::Button(labels[i], ImVec2(width, 0.f));
@@ -516,11 +641,9 @@ inline float CardValueColumn(const char* widest_key) {
 inline void CardLine(const std::string& source, bool muted) {
   const std::string text = gui::Display(source);
   const std::string shown = Ellipsize(text.c_str(), ImGui::GetContentRegionAvail().x);
-  {
-    StyleScope scope;
-    if (muted) {
-      scope.Color(ImGuiCol_Text, tokens::kTextSecondary);
-    }
+  if (muted) {
+    SecondaryText(shown.c_str());
+  } else {
     gui::TextUnformatted(shown.c_str());
   }
   if (shown.size() != text.size() && ImGui::IsItemHovered()) {
@@ -530,11 +653,7 @@ inline void CardLine(const std::string& source, bool muted) {
 
 // One key/value row of the card: the key in the secondary colour, the value from `column`.
 inline void CardRow(const char* key, const std::string& value, float column) {
-  {
-    StyleScope scope;
-    scope.Color(ImGuiCol_Text, tokens::kTextSecondary);
-    gui::TextUnformatted(gui::Display(key).c_str());
-  }
+  SecondaryText(gui::Display(key).c_str());
   gui::SameLine(column);
   CardLine(value, false);
 }
@@ -547,20 +666,25 @@ inline void CardFixStep(unsigned number, const std::string& text) {
 
 // The card's muted, wrapped line: the card clips anything longer, and the full text is its tooltip.
 inline void CardWrapped(const std::string& text) {
-  {
-    StyleScope scope;
-    scope.Color(ImGuiCol_Text, tokens::kTextSecondary);
-    gui::TextWrapped("%s", text.c_str());
-  }
+  SecondaryWrapped(text.c_str());
   if (ImGui::IsItemHovered()) {
     ItemTooltip("%s", text.c_str());
   }
 }
 
-// The card's own region, `text_lines` lines high plus a row for its buttons.
+// The card's own region: its surface, its padding, a hairline edge a step above the panel, and `text_lines`
+// lines of room plus a row for its buttons. The padding is inside that height, so the card's contents never
+// sit against its rounded edge.
 inline void BeginCard(const char* id, float text_lines) {
-  gui::BeginChild(id, ImVec2(0.f, gui::GetTextLineHeightWithSpacing() * text_lines + gui::GetFrameHeightWithSpacing()),
-                  ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  StyleScope card;
+  card.Var(ImGuiStyleVar_WindowPadding, ImVec2(tokens::kCardPadding, tokens::kCardPadding))
+      .Var(ImGuiStyleVar_ChildBorderSize, 1.f)
+      .Color(ImGuiCol_ChildBg, tokens::kBgCard)
+      .Color(ImGuiCol_Border, tokens::kHairline);
+  gui::BeginChild(id,
+                  ImVec2(0.f, gui::GetTextLineHeightWithSpacing() * text_lines + gui::GetFrameHeightWithSpacing()
+                                      + 2.f * tokens::kCardPadding),
+                  ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 }
 inline void EndCard() { gui::EndChild(); }
 
@@ -568,7 +692,6 @@ inline void EndCard() { gui::EndChild(); }
 // asks the player to do stands out from the panel's other controls.
 inline bool CardActionButton(const char* label) {
   StyleScope accent;
-  // [style] a wider button so the card's primary action reads as the card's primary action
   accent.AccentButton().Var(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x * 1.5f,
                                                                  ImGui::GetStyle().FramePadding.y));
   return gui::Button(label);
@@ -597,7 +720,14 @@ struct CardView {
 // note and its footer) or why it is not (the reason, then the fix's steps numbered). The caller draws the
 // card's own CardActionButton after this.
 inline void DrawStatusCard(const CardView& card) {
+  const ImVec2 title_at = ImGui::GetCursorScreenPos();
   gui::TextUnformatted(card.title.c_str());  // the card's first line, at the panel's own size
+  // A hairline in the gap under the title: the headline and the card's body read as two layers without
+  // spending one of the card's fixed lines on a separator.
+  const float rule_y = ImGui::GetItemRectMax().y + ImGui::GetStyle().ItemSpacing.y * 0.5f;
+  ImGui::GetWindowDrawList()->AddLine(ImVec2(title_at.x, rule_y),
+                                      ImVec2(title_at.x + ImGui::GetContentRegionAvail().x, rule_y),
+                                      ToU32(tokens::kStroke), 1.f);
   if (!card.showing_work) {
     if (!card.reason.empty()) {
       CardWrapped(card.reason);

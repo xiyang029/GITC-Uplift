@@ -1,22 +1,98 @@
 #include "ui/style.hpp"
 
-#include <algorithm>  // [style] std::max in ApplyBorders
+#include <algorithm>
 
 #include "addon/reshade_api.hpp"
 
 namespace uplift::ui::style {
 namespace {
 
-// Two colours blended, `t` weighting `to`. The two states that are the accent showing through a surface --
-// a pressed button, an active row -- are built this way, so there is one accent and no hand-picked second
-// blue to drift away from it.
-constexpr ImVec4 Mix(const ImVec4& from, const ImVec4& to, float t) {
-  return ImVec4(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, from.z + (to.z - from.z) * t,
-                from.w + (to.w - from.w) * t);
-}
+// Every colour the panel puts into ImGui's style, as one table: a single list to read, and no call site
+// left to drift from the tokens. The tinted states are composed with tokens::Mix, so the accent is the
+// only saturated hue anywhere in the panel.
+struct SlotColor {
+  ImGuiCol slot;
+  ImVec4 color;
+};
 
-// Every colour below is style.hpp's tokens -- the same values the widget layer draws with -- so the two
-// cannot drift apart. The border is a hairline, and drawn only where a step of the ramp cannot be seen.
+constexpr SlotColor kPalette[] = {
+    {ImGuiCol_Text, tokens::kTextPrimary},
+    {ImGuiCol_TextDisabled, tokens::kTextSecondary},
+    {ImGuiCol_TextLink, tokens::kAccent},
+    {ImGuiCol_WindowBg, tokens::kBgWindow},
+    {ImGuiCol_ChildBg, tokens::kBgCard},
+    {ImGuiCol_PopupBg, tokens::kBgCard},
+    {ImGuiCol_Border, tokens::kStroke},
+    {ImGuiCol_BorderShadow, tokens::kTransparent},
+
+    // Inputs, sliders, drags, combos, checkboxes and plots all sit in the card well; only the hover and the
+    // press move them, so the panel stays quiet until touched.
+    {ImGuiCol_FrameBg, tokens::kBgCard},
+    {ImGuiCol_FrameBgHovered, tokens::kBgControlHover},
+    {ImGuiCol_FrameBgActive, tokens::Mix(tokens::kBgCard, tokens::kAccent, 0.14f)},
+
+    {ImGuiCol_Button, tokens::kBgControl},
+    {ImGuiCol_ButtonHovered, tokens::kBgControlHover},
+    {ImGuiCol_ButtonActive, tokens::kAccentActive},
+
+    // Rows, tree nodes and section headers: one step up from the panel, the accent only while held.
+    {ImGuiCol_Header, tokens::kBgCard},
+    {ImGuiCol_HeaderHovered, tokens::kSurfaceHover},
+    {ImGuiCol_HeaderActive, tokens::kAccentWash},
+
+    // Title bar and tabs keep the panel's own layer when idle, one step up when active; the selected tab
+    // also carries the accent overline.
+    {ImGuiCol_TitleBg, tokens::kBgWindow},
+    {ImGuiCol_TitleBgActive, tokens::Mix(tokens::kBgWindow, tokens::kBgControlHover, 0.35f)},
+    {ImGuiCol_TitleBgCollapsed, tokens::kBgWindow},
+    {ImGuiCol_MenuBarBg, tokens::kBgWindow},
+    {ImGuiCol_Tab, tokens::kBgWindow},
+    {ImGuiCol_TabHovered, tokens::kSurfaceHover},
+    {ImGuiCol_TabSelected, tokens::Mix(tokens::kBgWindow, tokens::kBgControlHover, 0.45f)},
+    {ImGuiCol_TabSelectedOverline, tokens::kAccent},
+    {ImGuiCol_TabDimmed, tokens::kBgCard},
+    {ImGuiCol_TabDimmedSelected, tokens::Mix(tokens::kBgWindow, tokens::kBgControlHover, 0.35f)},
+    {ImGuiCol_TabDimmedSelectedOverline, tokens::kAccentStrong},
+
+    // A thin, nearly invisible scrollbar: the panel is the content, the bar only a hint of it.
+    {ImGuiCol_ScrollbarBg, tokens::Fade(tokens::kTextPrimary, 0.03f)},
+    {ImGuiCol_ScrollbarGrab, tokens::Fade(tokens::kTextPrimary, 0.16f)},
+    {ImGuiCol_ScrollbarGrabHovered, tokens::Fade(tokens::kTextPrimary, 0.26f)},
+    {ImGuiCol_ScrollbarGrabActive, tokens::Fade(tokens::kTextPrimary, 0.36f)},
+
+    {ImGuiCol_CheckMark, tokens::kAccent},
+    {ImGuiCol_SliderGrab, tokens::kAccent},
+    {ImGuiCol_SliderGrabActive, tokens::kAccentHover},
+    {ImGuiCol_InputTextCursor, tokens::kAccent},
+    {ImGuiCol_NavCursor, tokens::kAccentHalo},
+    {ImGuiCol_TextSelectedBg, tokens::kAccentHalo},
+    {ImGuiCol_UnsavedMarker, tokens::kWarn},
+
+    {ImGuiCol_Separator, tokens::kStroke},
+    {ImGuiCol_SeparatorHovered, tokens::kAccentStrong},
+    {ImGuiCol_SeparatorActive, tokens::kAccent},
+    {ImGuiCol_ResizeGrip, tokens::Fade(tokens::kTextPrimary, 0.12f)},
+    {ImGuiCol_ResizeGripHovered, tokens::Fade(tokens::kTextPrimary, 0.24f)},
+    {ImGuiCol_ResizeGripActive, tokens::Fade(tokens::kAccent, 0.70f)},
+
+    {ImGuiCol_PlotLines, tokens::kAccent},
+    {ImGuiCol_PlotLinesHovered, tokens::kAccent},
+    {ImGuiCol_PlotHistogram, tokens::kAccent},
+    {ImGuiCol_PlotHistogramHovered, tokens::kAccent},
+
+    {ImGuiCol_TableHeaderBg, tokens::kBgCard},
+    {ImGuiCol_TableBorderStrong, tokens::kStroke},
+    {ImGuiCol_TableBorderLight, tokens::Fade(tokens::kTextPrimary, 0.035f)},
+    {ImGuiCol_TableRowBg, tokens::kTransparent},
+    {ImGuiCol_TableRowBgAlt, tokens::Fade(tokens::kTextPrimary, 0.02f)},
+
+    {ImGuiCol_TreeLines, tokens::Fade(tokens::kTextSecondary, 0.30f)},
+    {ImGuiCol_DragDropTarget, tokens::kAccent},
+    {ImGuiCol_DragDropTargetBg, tokens::kAccentWash},
+    {ImGuiCol_NavWindowingHighlight, tokens::Fade(tokens::kTextPrimary, 0.70f)},
+    {ImGuiCol_NavWindowingDimBg, tokens::Fade(tokens::Hex(0x000000), 0.35f)},
+    {ImGuiCol_ModalWindowDimBg, tokens::Fade(tokens::Hex(0x000000), 0.55f)},
+};
 
 // Taken on the panel's first frame, the earliest point with a live ImGui context. Copy-initialised on
 // purpose: ImGuiStyle's default constructor is IMGUI_API and the add-on links no ImGui, only ReShade's
@@ -40,105 +116,19 @@ void ApplyBorders(float scale) {
   ImGuiStyle& style = ImGui::GetStyle();
   style.WindowBorderSize = 0.f;
   style.ChildBorderSize = 0.f;
-  // [style] a hairline that holds at 1 device px on high-DPI too: round instead of multiply, and never 0
-  style.FrameBorderSize = (std::max)(1.f, 1.f * scale);
-  style.PopupBorderSize = (std::max)(1.f, 1.f * scale);
+  // A hairline that holds at 1 device px on high-DPI too: round instead of multiply, and never 0.
+  style.FrameBorderSize = (std::max)(1.f, scale);
+  style.PopupBorderSize = (std::max)(1.f, scale);
   style.TabBorderSize = 0.f;
   style.TabBarBorderSize = 0.f;
   style.SeparatorTextBorderSize = 0.f;
 }
 
-// The three tri-state groups step up by the same small amount from rest to hover to active, and sit at
-// different levels, so a hover is visible without a border and a slider no longer reads as the button next
-// to it. The layers carry the hierarchy the borders no longer do, and the accent is spent on the marks that
-// say "this is live": the four interactive ones, the text caret, a link, and the tab that is selected.
-void ApplyColors() {
+void ApplyPalette() {
   ImGuiStyle& style = ImGui::GetStyle();
-  ImVec4* c = style.Colors;  // a plain data member: no ImGui call, so this links against nothing
-
-  c[ImGuiCol_Text] = tokens::kTextPrimary;
-  c[ImGuiCol_TextDisabled] = tokens::kTextSecondary;
-  c[ImGuiCol_TextLink] = tokens::kAccent;
-  c[ImGuiCol_WindowBg] = tokens::kBgWindow;
-  c[ImGuiCol_ChildBg] = tokens::kBgCard;
-  c[ImGuiCol_PopupBg] = tokens::kBgCard;
-  c[ImGuiCol_Border] = tokens::kStroke;
-  c[ImGuiCol_BorderShadow] = ImVec4(0.f, 0.f, 0.f, 0.f);
-
-  // Input, slider, drag, combo, checkbox, colour edit and the plot background: all of them sit in the same
-  // well the cards do, which is the edge the frame's hairline then draws.
-  c[ImGuiCol_FrameBg] = tokens::kBgCard;
-  c[ImGuiCol_FrameBgHovered] = tokens::kBgControlHover;
-  // [style] shared accent wash instead of an inline 0.12
-  c[ImGuiCol_FrameBgActive] = Mix(tokens::kBgControlHover, tokens::kAccent, tokens::kAccentWash.w);
-
-  // Buttons and radio rows: one level above the panel, and the press shows a little of the accent, so a
-  // click answers on the surface itself where the accent is not the surface.
-  c[ImGuiCol_Button] = tokens::kBgControl;
-  c[ImGuiCol_ButtonHovered] = tokens::kBgControlHover;
-  c[ImGuiCol_ButtonActive] = tokens::kAccentActive;
-
-  // Selectable rows, tree nodes, list items -- and, since it is the framed colour, every section header:
-  // the header is a card's head, so it holds a step of the ramp of its own instead of the panel's.
-  c[ImGuiCol_Header] = tokens::kBgCard;
-  c[ImGuiCol_HeaderHovered] = tokens::kBgControlHover;
-  c[ImGuiCol_HeaderActive] = Mix(tokens::kBgControlHover, tokens::kAccent, 0.20f);  // [style] 0.18 -> 0.20
-
-  // Title bar and tabs: the panel's own layer when they are not the active one, one step up when they
-  // are -- never ReShade's default blue. The selected tab carries an underline as well as its layer, which
-  // reads at a glance whatever its width.
-  c[ImGuiCol_TitleBg] = tokens::kBgWindow;
-  c[ImGuiCol_TitleBgActive] = Mix(tokens::kBgWindow, tokens::kBgControlHover, 0.35f);
-  c[ImGuiCol_TitleBgCollapsed] = tokens::kBgWindow;
-  c[ImGuiCol_MenuBarBg] = tokens::kBgWindow;
-  c[ImGuiCol_Tab] = tokens::kBgWindow;
-  c[ImGuiCol_TabHovered] = tokens::kBgControlHover;
-  c[ImGuiCol_TabSelected] = Mix(tokens::kBgWindow, tokens::kBgControlHover, 0.45f);
-  c[ImGuiCol_TabSelectedOverline] = tokens::kAccent;
-  c[ImGuiCol_TabDimmed] = tokens::kBgCard;
-  c[ImGuiCol_TabDimmedSelected] = Mix(tokens::kBgWindow, tokens::kBgControlHover, 0.35f);
-  // [style] token instead of an inline 0.45
-  c[ImGuiCol_TabDimmedSelectedOverline] = tokens::kAccentStrong;
-
-  // Thin and quiet: a near-invisible track, a mid-grey grab.
-  c[ImGuiCol_ScrollbarBg] = ImVec4(tokens::kBgWindow.x, tokens::kBgWindow.y, tokens::kBgWindow.z, 0.20f);
-  c[ImGuiCol_ScrollbarGrab] = Mix(tokens::kBgControl, tokens::kBgControlHover, 0.35f);
-  c[ImGuiCol_ScrollbarGrabHovered] = Mix(tokens::kBgControl, tokens::kBgControlHover, 0.65f);
-  c[ImGuiCol_ScrollbarGrabActive] = tokens::kBgControlHover;
-
-  c[ImGuiCol_CheckMark] = tokens::kAccent;
-  c[ImGuiCol_SliderGrab] = tokens::kAccent;
-  c[ImGuiCol_SliderGrabActive] = tokens::kAccentHover;
-  c[ImGuiCol_InputTextCursor] = tokens::kAccent;
-  // [style] shared halo token instead of two inline 0.30
-  c[ImGuiCol_NavCursor] = tokens::kAccentHalo;
-  c[ImGuiCol_TextSelectedBg] = tokens::kAccentHalo;
-  c[ImGuiCol_UnsavedMarker] = tokens::kWarn;
-
-  c[ImGuiCol_Separator] = tokens::kStroke;
-  c[ImGuiCol_SeparatorHovered] = tokens::kAccentStrong;  // [style] inline 0.40 -> token
-  c[ImGuiCol_SeparatorActive] = tokens::kAccent;
-  c[ImGuiCol_ResizeGrip] = ImVec4(tokens::kBgControlHover.x, tokens::kBgControlHover.y, tokens::kBgControlHover.z, 0.30f);
-  c[ImGuiCol_ResizeGripHovered] = ImVec4(tokens::kBgControlHover.x, tokens::kBgControlHover.y, tokens::kBgControlHover.z, 0.55f);
-  c[ImGuiCol_ResizeGripActive] = ImVec4(tokens::kAccent.x, tokens::kAccent.y, tokens::kAccent.z, 0.70f);
-
-  c[ImGuiCol_PlotLines] = tokens::kAccent;
-  c[ImGuiCol_PlotLinesHovered] = tokens::kAccent;
-  c[ImGuiCol_PlotHistogram] = tokens::kAccent;
-  c[ImGuiCol_PlotHistogramHovered] = tokens::kAccent;
-
-  c[ImGuiCol_TableHeaderBg] = tokens::kBgCard;
-  c[ImGuiCol_TableBorderStrong] = Mix(tokens::kBgCard, tokens::kBgControlHover, 0.5f);
-  c[ImGuiCol_TableBorderLight] = tokens::kStroke;
-  c[ImGuiCol_TableRowBg] = ImVec4(0.f, 0.f, 0.f, 0.f);
-  c[ImGuiCol_TableRowBgAlt] = ImVec4(1.f, 1.f, 1.f, 0.025f);
-
-  c[ImGuiCol_TreeLines] = ImVec4(tokens::kBgControlHover.x, tokens::kBgControlHover.y, tokens::kBgControlHover.z, 0.70f);
-  c[ImGuiCol_DragDropTarget] = ImVec4(tokens::kAccent.x, tokens::kAccent.y, tokens::kAccent.z, 0.90f);
-  c[ImGuiCol_DragDropTargetBg] = tokens::kAccentWash;  // [style] inline 0.15 -> token
-  c[ImGuiCol_NavWindowingHighlight] = ImVec4(1.f, 1.f, 1.f, 0.70f);
-  c[ImGuiCol_NavWindowingDimBg] = ImVec4(0.f, 0.f, 0.f, 0.35f);
-  c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.f, 0.f, 0.f, 0.55f);
+  for (const SlotColor& entry : kPalette) {
+    style.Colors[entry.slot] = entry.color;
+  }
 }
 
 // Applies Uplift's style over ReShade's own, at `scale`. ReShade's style is the base every time, so a
@@ -159,10 +149,9 @@ void ApplyAt(float scale) {
 
   ApplyBorders(scale);
 
-  // style.hpp's radius family, carried by how high a thing sits: a panel and the popups above it take the
-  // card radius plus a step, a card or a scrollbar inside it the card radius, the controls on it the control
-  // radius, and a grab the small one -- and style.hpp's spacing rhythm, so the widgets the panel draws and
-  // the ones ImGui draws for it land on the same grid.
+  // A window and the popups above it take the card radius plus a step, a card or a scrollbar inside it the
+  // card radius, the controls on it the control radius, and a grab the small one. The spacing rhythm is
+  // shared with the panel's own widgets (widgets.hpp), so hand-drawn and ImGui-drawn rows sit on one grid.
   style.WindowRounding = (tokens::kRadiusCard + 2.f) * scale;
   style.PopupRounding = (tokens::kRadiusCard + 2.f) * scale;
   style.ChildRounding = tokens::kRadiusCard * scale;
@@ -172,7 +161,6 @@ void ApplyAt(float scale) {
   style.TabRounding = tokens::kRadiusControl * scale;
   style.DragDropTargetRounding = tokens::kRadiusControl * scale;
 
-  // [style] a touch more room: the frame padding drives every control's height, and the panel read tight
   style.WindowPadding = ImVec2(16.f * scale, 14.f * scale);
   style.FramePadding = ImVec2(9.f * scale, 6.f * scale);
   style.ItemSpacing = ImVec2(tokens::kRowGap * scale, tokens::kRowGap * scale);
@@ -204,7 +192,7 @@ void ApplyAt(float scale) {
   style.CurveTessellationTol = 1.25f;
   style.CircleTessellationMaxError = 0.30f;
 
-  ApplyColors();
+  ApplyPalette();
   AppliedDpi() = scale;
 }
 
@@ -219,7 +207,7 @@ void Restore() {
 void RefreshForDpi() {
   // Every frame, not only when the scale changes: ReShade re-reads its own style out of ReShade.ini
   // (runtime::load_config -> load_custom_style) whenever its settings are touched, which put ReShade's
-  // colours back over the panel's. Applying is one struct copy and some sixty assignments.
+  // colours back over the panel's. Applying is one struct copy and the palette table.
   //
   // The window already knows its monitor's scale, so this needs no HWND and no WM_DPICHANGED handling of
   // its own: a window dragged to another monitor re-applies here.

@@ -26,9 +26,9 @@
 
 namespace uplift::ui::style {
 
-// The panel's palette, its corner radii and the row geometry. One ramp of a few points, so elevation reads
-// on a dark panel with no shadow to spend: an input is recessed into a well, the panel holds the rows, a
-// button stands on it, and a popup floats above it.
+// The panel's palette, its corner radii and the row geometry. A short ramp: the panel, the cards and wells
+// sunk into it, and the controls standing on it. No shadows to spend, so elevation is one small step of
+// lightness and a hairline only where a step alone cannot be seen.
 namespace tokens {
 
 constexpr ImVec4 Hex(std::uint32_t rgb, float alpha = 1.f) {
@@ -37,41 +37,65 @@ constexpr ImVec4 Hex(std::uint32_t rgb, float alpha = 1.f) {
                 static_cast<float>(rgb & 0xff) / 255.f, alpha);
 }
 
-constexpr ImVec4 kBgWindow = Hex(0x14161A, 0.94f);
-constexpr ImVec4 kBgCard = Hex(0x1D2026);        // recessed: a status card, the well an input sits in
-constexpr ImVec4 kBgControl = Hex(0x262A31);     // a button at rest
-constexpr ImVec4 kBgControlHover = Hex(0x2F343C);
-constexpr ImVec4 kStroke = Hex(0x2A2E36);
+// Two colours blended, `t` weighting `to`: the pressed and active surfaces are the accent showing through
+// a control, so there is one accent and no hand-picked second colour to drift away from it.
+constexpr ImVec4 Mix(const ImVec4& from, const ImVec4& to, float t) {
+  return ImVec4(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, from.z + (to.z - from.z) * t,
+                from.w + (to.w - from.w) * t);
+}
+
+constexpr ImVec4 Fade(const ImVec4& color, float alpha) {
+  return ImVec4(color.x, color.y, color.z, alpha);
+}
+
+constexpr ImVec4 kTransparent = ImVec4(0.f, 0.f, 0.f, 0.f);
+
+constexpr ImVec4 kBgWindow = Hex(0x14161A, 0.96f);
+constexpr ImVec4 kBgCard = Hex(0x1B1E24);        // recessed: a status card, the well an input sits in
+constexpr ImVec4 kBgControl = Hex(0x24282F);     // a button at rest, a segmented control's track
+constexpr ImVec4 kBgControlHover = Hex(0x2C3139);
+constexpr ImVec4 kStroke = Hex(0x252930);
 constexpr ImVec4 kTextPrimary = Hex(0xE8EAED);
 constexpr ImVec4 kTextSecondary = Hex(0x9AA0A8);
 constexpr ImVec4 kWarn = Hex(0xF5A623);          // ReShade's unsaved-changes marker
 constexpr ImVec4 kBad = Hex(0xEB5757);           // a destructive action ("Restore all")
+constexpr ImVec4 kBadHover = Hex(0xF26B6B);
+constexpr ImVec4 kBadActive = Hex(0xD14B4B);
 constexpr ImVec4 kAccent = Hex(0x4CA6A0);        // the one saturated colour in the panel
 constexpr ImVec4 kAccentHover = Hex(0x5BB8B2);
-constexpr ImVec4 kAccentActive = Hex(0x3E8C87);  // a control held down
+constexpr ImVec4 kAccentActive = Hex(0x3E8C87);
 
-// [style] one place for the accent tints the two layers share: hover wells, press washes, focus rings.
-// Before this they were 0.12/0.18/0.22/0.25/0.30/0.35/0.36/0.40/0.45 written out per call site.
-constexpr ImVec4 kAccentWash = Hex(0x4CA6A0, 0.14f);      // a pressed well / active row
-constexpr ImVec4 kAccentHalo = Hex(0x4CA6A0, 0.28f);      // a hover ring / knob halo
-constexpr ImVec4 kAccentStrong = Hex(0x4CA6A0, 0.45f);    // a selected tab's dimmed overline
-constexpr ImVec4 kHairline = Hex(0xFFFFFF, 0.06f);        // an inner top edge on raised surfaces
+// The accent tints both layers share: hover wells, press washes, focus rings, selection.
+constexpr ImVec4 kAccentWash = Hex(0x4CA6A0, 0.14f);
+constexpr ImVec4 kAccentHalo = Hex(0x4CA6A0, 0.28f);
+constexpr ImVec4 kAccentStrong = Hex(0x4CA6A0, 0.45f);
 
-constexpr float kRadiusCard = 8.f;
-constexpr float kRadiusControl = 6.f;
-constexpr float kRadiusSmall = 4.f;
+// An on switch: the accent held back a step from a primary action's fill, so a panel with several switches
+// on does not read as a row of saturated blocks.
+constexpr ImVec4 kAccentQuiet = Mix(kAccent, kBgWindow, 0.18f);
+constexpr ImVec4 kAccentQuietHover = Mix(kAccentHover, kBgWindow, 0.12f);
+constexpr ImVec4 kHairline = Hex(0xFFFFFF, 0.06f);   // an inner top edge on raised surfaces
+constexpr ImVec4 kSurfaceHover = Hex(0xFFFFFF, 0.05f);  // a flat row's hover, without a second surface
+constexpr ImVec4 kOnAccent = Hex(0x101216);          // words on the accent or on kBad
+
+// Radii: the window and its popups, a card or a control, and a small mark (a grab, a knob).
+constexpr float kRadiusCard = 10.f;
+constexpr float kRadiusControl = 8.f;
+constexpr float kRadiusSmall = 5.f;
 constexpr float kRowGap = 8.f;
-constexpr float kSectionGap = 16.f;
+constexpr float kSectionGap = 18.f;
 constexpr float kCardPadding = 12.f;
+constexpr float kTooltipPadX = 8.f;
+constexpr float kTooltipPadY = 6.f;
+
 // Row geometry, in units of the font size so it follows the player's ReShade font. The label column is a
 // fixed width, never more than kLabelShare of a narrow panel, so every control on the panel starts at the
 // same x; a label wider than the column extends into it, its right edge against the control. A panel
 // narrower than kStackEm has no room for a label column beside a usable control (ReShade docks it at
 // ~450 px), so there each label goes on its own line over a control as wide as the panel. A slider's value
-// has its own column (kValueEm) instead of sitting under the knob.
+// sits just right of its rail, its right edge on the control column's, instead of under the knob.
 constexpr float kLabelEm = 12.f;
 constexpr float kLabelShare = 0.42f;
-constexpr float kValueEm = 3.5f;
 constexpr float kStackEm = 24.f;
 constexpr float kTooltipEm = 35.f;
 
@@ -97,7 +121,8 @@ inline float SmallFontSize() { return BaseFontSize() * (12.f / 13.f); }
 inline ImU32 ToU32(const ImVec4& color) { return ImGui::GetColorU32(color); }
 
 // Pushes and pops in one object, so a return from the middle of a panel cannot leave a colour, a variable
-// or a font on ReShade's stacks.
+// or a font on ReShade's stacks. The named pairs are the three control roles the panel draws: its primary
+// action, a quiet icon button, and the destructive confirmation.
 class StyleScope {
  public:
   StyleScope() = default;
@@ -128,13 +153,26 @@ class StyleScope {
     ++fonts_;
     return *this;
   }
-  // The accent as a control's fill and the window's colour as its words: the panel's primary action, in one
-  // call instead of the same four colours at every call site.
+  StyleScope& Secondary() { return Color(ImGuiCol_Text, tokens::kTextSecondary); }
+  // The accent as a control's fill and the window's colour as its words: the panel's primary action.
   StyleScope& AccentButton() {
     return Color(ImGuiCol_Button, tokens::kAccent)
         .Color(ImGuiCol_ButtonHovered, tokens::kAccentHover)
         .Color(ImGuiCol_ButtonActive, tokens::kAccentActive)
-        .Color(ImGuiCol_Text, tokens::kBgWindow);
+        .Color(ImGuiCol_Text, tokens::kOnAccent);
+  }
+  // A button with no surface of its own: the reset arrows and other quiet icon actions.
+  StyleScope& FlatButton() {
+    return Color(ImGuiCol_Button, tokens::kTransparent)
+        .Color(ImGuiCol_ButtonHovered, tokens::kAccentWash)
+        .Color(ImGuiCol_ButtonActive, tokens::kAccentHalo)
+        .Color(ImGuiCol_Text, tokens::kTextSecondary);
+  }
+  StyleScope& DangerButton() {
+    return Color(ImGuiCol_Button, tokens::kBad)
+        .Color(ImGuiCol_ButtonHovered, tokens::kBadHover)
+        .Color(ImGuiCol_ButtonActive, tokens::kBadActive)
+        .Color(ImGuiCol_Text, tokens::kOnAccent);
   }
 
  private:

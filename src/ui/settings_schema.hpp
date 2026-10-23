@@ -19,7 +19,7 @@ enum class SettingKind : uint8_t {
   KEY,     // a Win32 virtual-key code in [min, max]; 0 = none
 };
 
-// The overlay's sections (v2 design §5); resets and "(changed)" act per section.
+// The overlay's sections (v2 design §5); resets and the changed marker act per section.
 enum class SettingSection : uint8_t {
   TOP,
   LOOK,
@@ -81,7 +81,7 @@ struct SettingDescriptor {
 [[nodiscard]] const Settings& DefaultSettings();
 [[nodiscard]] bool IsDefault(const Settings& settings, const SettingDescriptor& descriptor);
 void ResetSetting(Settings* settings, const SettingDescriptor& descriptor);
-// True when a row of `section` differs from its default: the section header's "(changed)".
+// True when a row of `section` differs from its default: the section title's changed marker.
 [[nodiscard]] bool SectionChanged(const Settings& settings, SettingSection section);
 void ResetSection(Settings* settings, SettingSection section);
 // Plan 6 (v2 design §3.16, D6): the look group the Defaults view swaps -- the whole of LOOK (Intensity, the
