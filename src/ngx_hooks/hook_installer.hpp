@@ -89,6 +89,11 @@ class NgxObserver {
                              const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Result result) = 0;
   // Before the original ReleaseFeature.
   virtual void BeforeRelease(NVSDK_NGX_Handle* handle) = 0;
+  // After the original GetCapabilityParameters of an outermost call, when it returned a block. The
+  // core caches the DLSS capability block, so this sees it once per copy in practice -- the render
+  // scale override (addon/dlss_ratio.hpp) plants its OptimalSettings callback there. Runs on the
+  // game's calling thread, with no lock held by the detour.
+  virtual void AfterCapabilityParameters(NgxApi /*api*/, NVSDK_NGX_Parameter* /*parameters*/) {}
   // Batch 3 review I-1: before the original NVSDK_NGX_VULKAN_Shutdown1 of an outermost call (Streamline's slShutdown, before the game destroys
   // `device`, a VkDevice), with no lock held by the detour. `caller` is the call's return address (the game, an interposer, or a runtime Uplift
   // loaded itself). Every NGX call Uplift still has to make for `device` must happen here: after the original the core no longer serves it.

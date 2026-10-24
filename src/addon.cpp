@@ -476,8 +476,10 @@ void SaveAndApply(AddonState* state) {
   ApplyProcessSettings(state->settings);
   ++state->settings_generation;  // Plan 6 (D11): a settings change restarts the retry backoff
   state->front->SettingsChanged(state->settings);  // Plan 10: the helper of a Direct3D 9 game reads them too
-  // The live DLSS preset swap's gate: whether any DLSSPreset<Mode> choice is set (addon/dlss_swap.hpp).
+  // The live DLSS preset swap's gate: whether any DLSSPreset<Mode> choice is set (addon/dlss_swap.hpp),
+  // and the render scale override's per-mode percents (addon/dlss_ratio.hpp).
   state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(state->settings).Any());
+  state->bridge.NoteDlssRenderScales(state->settings.dlss_render_scale);
 }
 
 // With the add-on's lock held.
@@ -3321,8 +3323,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   }
   g_state->poller.Seen(g_state->settings.enabled);
   ApplyProcessSettings(g_state->settings);
-  // The live DLSS preset swap's gate (SaveAndApply keeps it current): the ini may carry preset choices already.
+  // The live DLSS preset swap's gate (SaveAndApply keeps both current): the ini may carry choices already.
   g_state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(g_state->settings).Any());
+  g_state->bridge.NoteDlssRenderScales(g_state->settings.dlss_render_scale);
 
   const auto module_path = [](HMODULE handle) {
     std::wstring path(32768u, L'\0');

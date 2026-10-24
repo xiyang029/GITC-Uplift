@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 
+#include "addon/dlss_ratio.hpp"
 #include "addon/dlss_swap.hpp"
 #include "addon/reshade_version.hpp"
 #include "ngx_hooks/dlss_capture.hpp"
@@ -106,6 +107,11 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
                      const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Result result) override;
   void BeforeRelease(NVSDK_NGX_Handle* handle) override;
   void BeforeCoreShutdown(ngx_hooks::NgxApi api, void* device, const void* caller) override;
+  // The render scale override's plant point (addon/dlss_ratio.hpp): the core's cached DLSS capability
+  // block, seen once per copy in practice.
+  void AfterCapabilityParameters(ngx_hooks::NgxApi api, NVSDK_NGX_Parameter* parameters) override {
+    PlantDlssRatio(api, parameters);
+  }
 
   [[nodiscard]] const ngx_hooks::FeatureRegistry& Registry() const { return registry_; }
   // The add-on's destroy_device: the registry forgets that an upscaler was created on `device`.
@@ -143,6 +149,8 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   // BeforeEvaluate reads before it costs anything. Pushed by the add-on at init and on every
   // SaveAndApply.
   void NoteDlssPresetChoices(bool any) { swap_.SetDesired(any); }
+  // The panel's per-mode render scales (addon/dlss_ratio.hpp), read lock-free by the planted callback.
+  void NoteDlssRenderScales(const std::array<float, 6>& scales_percent) { SetDlssRenderScales(scales_percent); }
 
  private:
   // The device of a hooked call's list, through the API's own routing (a VkCommandBuffer never reaches a Direct3D 12 lookup, nor a Direct3D 11 context a

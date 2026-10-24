@@ -72,6 +72,11 @@ constexpr std::string_view PRESET_TOOLTIP =
     "The DLSS render preset for this quality mode (J-M). Switches live in game: Uplift evaluates its own DLSS feature with the chosen "
     "preset, and each switch briefly hitches while DLSS loads the model. Game keeps the game's choice.";
 
+constexpr std::string_view RENDER_SCALE_TOOLTIP =
+    "This quality mode's render size as a percent of the output (e.g. Ultra Performance at 40 instead of its 33). Applied by answering the "
+    "game's DLSS size queries, so it lands when the game next re-queries: a quality-mode flip or a resolution change, a restart if it never "
+    "does. 100 keeps the game's own choice.";
+
 constexpr std::array<std::string_view, 2> LANGUAGES = {"English", "简体中文"};
 
 const auto BASE_ROWS = std::to_array<SettingDescriptor>({
@@ -792,6 +797,83 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .choices = PRESETS,
         .get = [](const Settings& s) { return Index(s.dlss_presets[5]); },
         .set = [](Settings& s, double v) { s.dlss_presets[5] = FromIndex<DlssPresetOverride>(v); },
+    },
+    // The render scale override (2026-10-25, addon/dlss_ratio.hpp): each mode's render size as a percent
+    // of the output. Applied by answering the game's DLSS size queries (the OptimalSettings callback
+    // planted into the capability block), so it lands when the game next re-queries -- a quality-mode
+    // flip or a resolution change, a restart when the game never re-queries. The game re-creates its
+    // own feature, so nothing is owned or released here.
+    {
+        .key = "DLSSRenderScaleDLAA",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "DLAA render scale",
+        .tooltip = RENDER_SCALE_TOOLTIP,
+        .min = 10.0,
+        .max = 100.0,
+        .flags = APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[0]); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[0] = static_cast<float>(v); },
+    },
+    {
+        .key = "DLSSRenderScaleUltraQuality",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Ultra Quality render scale",
+        .tooltip = RENDER_SCALE_TOOLTIP,
+        .min = 10.0,
+        .max = 100.0,
+        .flags = APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[1]); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[1] = static_cast<float>(v); },
+    },
+    {
+        .key = "DLSSRenderScaleQuality",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Quality render scale",
+        .tooltip = RENDER_SCALE_TOOLTIP,
+        .min = 10.0,
+        .max = 100.0,
+        .flags = APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[2]); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[2] = static_cast<float>(v); },
+    },
+    {
+        .key = "DLSSRenderScaleBalanced",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Balanced render scale",
+        .tooltip = RENDER_SCALE_TOOLTIP,
+        .min = 10.0,
+        .max = 100.0,
+        .flags = APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[3]); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[3] = static_cast<float>(v); },
+    },
+    {
+        .key = "DLSSRenderScalePerformance",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Performance render scale",
+        .tooltip = RENDER_SCALE_TOOLTIP,
+        .min = 10.0,
+        .max = 100.0,
+        .flags = APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[4]); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[4] = static_cast<float>(v); },
+    },
+    {
+        .key = "DLSSRenderScaleUltraPerformance",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::ADVANCED,
+        .label = "Ultra Performance render scale",
+        .tooltip = RENDER_SCALE_TOOLTIP,
+        .min = 10.0,
+        .max = 100.0,
+        .flags = APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[5]); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[5] = static_cast<float>(v); },
     },
     {
         .key = "DLSSAutoExposure",

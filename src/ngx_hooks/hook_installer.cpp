@@ -59,6 +59,9 @@ using D3D11EvaluateCFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D11DeviceContext*, con
 using D3D11Shutdown1Fn = VkShutdown1Fn;
 // Plan 18: the device-less NVSDK_NGX_D3D11_Shutdown (RVA 0x65970) takes no argument: it calls the shared routine with a null device and a count of its own.
 // Games on an SDK older than Shutdown1 (Final Fantasy XV's DLSS 1) call it.
+// The process-wide DLSS capability block (device-less, cached by the core): the render scale override
+// (addon/dlss_ratio.hpp) plants its OptimalSettings callback into it.
+using CapParamsFn = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter**);
 using D3D11ShutdownFn = NVSDK_NGX_Result(NVSDK_CONV*)();
 
 // The trampolines of one hooked module copy; stored before its detours are enabled. `poisoned`
@@ -71,11 +74,13 @@ struct SlotOriginals {
   std::atomic<EvaluateFn> evaluate{nullptr};
   std::atomic<EvaluateCFn> evaluate_c{nullptr};
   std::atomic<ReleaseFn> release{nullptr};
+  std::atomic<CapParamsFn> cap_params{nullptr};  // GetCapabilityParameters (the render scale override's plant point)
   std::atomic<D3D12Shutdown1Fn> shutdown1{nullptr};
   std::atomic<D3D11CreateFn> d3d11_create{nullptr};
   std::atomic<D3D11EvaluateFn> d3d11_evaluate{nullptr};
   std::atomic<D3D11EvaluateCFn> d3d11_evaluate_c{nullptr};
   std::atomic<ReleaseFn> d3d11_release{nullptr};
+  std::atomic<CapParamsFn> d3d11_cap_params{nullptr};
   std::atomic<D3D11Shutdown1Fn> d3d11_shutdown1{nullptr};
   std::atomic<D3D11ShutdownFn> d3d11_shutdown{nullptr};
   std::atomic<VkCreateFn> vk_create{nullptr};
@@ -83,6 +88,7 @@ struct SlotOriginals {
   std::atomic<VkEvaluateFn> vk_evaluate{nullptr};
   std::atomic<VkEvaluateCFn> vk_evaluate_c{nullptr};
   std::atomic<ReleaseFn> vk_release{nullptr};
+  std::atomic<CapParamsFn> vk_cap_params{nullptr};
   std::atomic<VkShutdown1Fn> vk_shutdown1{nullptr};
   std::atomic<bool> poisoned{false};
 
@@ -92,11 +98,13 @@ struct SlotOriginals {
     evaluate.store(nullptr, std::memory_order_release);
     evaluate_c.store(nullptr, std::memory_order_release);
     release.store(nullptr, std::memory_order_release);
+    cap_params.store(nullptr, std::memory_order_release);
     shutdown1.store(nullptr, std::memory_order_release);
     d3d11_create.store(nullptr, std::memory_order_release);
     d3d11_evaluate.store(nullptr, std::memory_order_release);
     d3d11_evaluate_c.store(nullptr, std::memory_order_release);
     d3d11_release.store(nullptr, std::memory_order_release);
+    d3d11_cap_params.store(nullptr, std::memory_order_release);
     d3d11_shutdown1.store(nullptr, std::memory_order_release);
     d3d11_shutdown.store(nullptr, std::memory_order_release);
     vk_create.store(nullptr, std::memory_order_release);
@@ -104,6 +112,7 @@ struct SlotOriginals {
     vk_evaluate.store(nullptr, std::memory_order_release);
     vk_evaluate_c.store(nullptr, std::memory_order_release);
     vk_release.store(nullptr, std::memory_order_release);
+    vk_cap_params.store(nullptr, std::memory_order_release);
     vk_shutdown1.store(nullptr, std::memory_order_release);
   }
 };
@@ -524,16 +533,52 @@ NVSDK_NGX_Result NVSDK_CONV D3D11ShutdownDetour() {
   return RunShutdownAll(g_originals[SLOT].d3d11_shutdown.load(std::memory_order_acquire), _ReturnAddress());
 }
 
+// The process-wide capability block, after the original returned it: the one render-scale-override
+// plant point. The original's result is forwarded either way; a null block or a nested call (one copy
+// forwarding to another) goes to the core's own.
+NVSDK_NGX_Result RunCapabilityParameters(NgxApi api, NVSDK_NGX_Parameter** out_parameters, CapParamsFn original) {
+  const DepthGuard depth;
+  const NVSDK_NGX_Result result = original(out_parameters);
+  if (depth.Nested() || NVSDK_NGX_FAILED(result) || out_parameters == nullptr || *out_parameters == nullptr) return result;
+  NgxObserver* const observer = g_observer.load(std::memory_order_acquire);
+  if (observer == nullptr) return result;
+  try {
+    observer->AfterCapabilityParameters(api, *out_parameters);
+  } catch (const std::exception& e) {
+    LogObserverFailure(ObserverCall::CREATE, e.what());
+  } catch (...) {
+    LogObserverFailure(ObserverCall::CREATE, nullptr);
+  }
+  return result;
+}
+
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV CapParamsDetour(NVSDK_NGX_Parameter** out_parameters) {
+  return RunCapabilityParameters(NgxApi::D3D12, out_parameters, g_originals[SLOT].cap_params.load(std::memory_order_acquire));
+}
+
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV D3D11CapParamsDetour(NVSDK_NGX_Parameter** out_parameters) {
+  return RunCapabilityParameters(NgxApi::D3D11, out_parameters, g_originals[SLOT].d3d11_cap_params.load(std::memory_order_acquire));
+}
+
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV VkCapParamsDetour(NVSDK_NGX_Parameter** out_parameters) {
+  return RunCapabilityParameters(NgxApi::VULKAN, out_parameters, g_originals[SLOT].vk_cap_params.load(std::memory_order_acquire));
+}
+
 struct DetourSet {
   CreateFn create;
   EvaluateFn evaluate;
   EvaluateCFn evaluate_c;
   ReleaseFn release;
+  CapParamsFn cap_params;
   D3D12Shutdown1Fn shutdown1;
   D3D11CreateFn d3d11_create;
   D3D11EvaluateFn d3d11_evaluate;
   D3D11EvaluateCFn d3d11_evaluate_c;
   ReleaseFn d3d11_release;
+  CapParamsFn d3d11_cap_params;
   D3D11Shutdown1Fn d3d11_shutdown1;
   D3D11ShutdownFn d3d11_shutdown;
   VkCreateFn vk_create;
@@ -541,6 +586,7 @@ struct DetourSet {
   VkEvaluateFn vk_evaluate;
   VkEvaluateCFn vk_evaluate_c;
   ReleaseFn vk_release;
+  CapParamsFn vk_cap_params;
   VkShutdown1Fn vk_shutdown1;
 };
 
@@ -553,11 +599,13 @@ constexpr std::array<DetourSet, HookInstaller::MAX_MODULES> DETOURS =
               .evaluate = &EvaluateDetour<SLOTS>,
               .evaluate_c = &EvaluateCDetour<SLOTS>,
               .release = &ReleaseDetour<SLOTS>,
+              .cap_params = &CapParamsDetour<SLOTS>,
               .shutdown1 = &Shutdown1Detour<SLOTS>,
               .d3d11_create = &D3D11CreateDetour<SLOTS>,
               .d3d11_evaluate = &D3D11EvaluateDetour<SLOTS>,
               .d3d11_evaluate_c = &D3D11EvaluateCDetour<SLOTS>,
               .d3d11_release = &D3D11ReleaseDetour<SLOTS>,
+              .d3d11_cap_params = &D3D11CapParamsDetour<SLOTS>,
               .d3d11_shutdown1 = &D3D11Shutdown1Detour<SLOTS>,
               .d3d11_shutdown = &D3D11ShutdownDetour<SLOTS>,
               .vk_create = &VkCreateDetour<SLOTS>,
@@ -565,6 +613,7 @@ constexpr std::array<DetourSet, HookInstaller::MAX_MODULES> DETOURS =
               .vk_evaluate = &VkEvaluateDetour<SLOTS>,
               .vk_evaluate_c = &VkEvaluateCDetour<SLOTS>,
               .vk_release = &VkReleaseDetour<SLOTS>,
+              .vk_cap_params = &VkCapParamsDetour<SLOTS>,
               .vk_shutdown1 = &VkShutdown1Detour<SLOTS>,
           }...,
       };
@@ -821,18 +870,21 @@ size_t HookInstaller::ScanLocked() {
     void* const evaluate_c = export_address("NVSDK_NGX_D3D12_EvaluateFeature_C");
     void* const release = export_address("NVSDK_NGX_D3D12_ReleaseFeature");
     void* const shutdown1 = export_address("NVSDK_NGX_D3D12_Shutdown1");
+    void* const cap_params = export_address("NVSDK_NGX_D3D12_GetCapabilityParameters");
     void* const d3d11_create = export_address("NVSDK_NGX_D3D11_CreateFeature");
     void* const d3d11_evaluate = export_address("NVSDK_NGX_D3D11_EvaluateFeature");
     void* const d3d11_evaluate_c = export_address("NVSDK_NGX_D3D11_EvaluateFeature_C");
     void* const d3d11_release = export_address("NVSDK_NGX_D3D11_ReleaseFeature");
     void* const d3d11_shutdown1 = export_address("NVSDK_NGX_D3D11_Shutdown1");
     void* const d3d11_shutdown = export_address("NVSDK_NGX_D3D11_Shutdown");
+    void* const d3d11_cap_params = export_address("NVSDK_NGX_D3D11_GetCapabilityParameters");
     void* const vk_create = export_address("NVSDK_NGX_VULKAN_CreateFeature");
     void* const vk_create1 = export_address("NVSDK_NGX_VULKAN_CreateFeature1");
     void* const vk_evaluate = export_address("NVSDK_NGX_VULKAN_EvaluateFeature");
     void* const vk_evaluate_c = export_address("NVSDK_NGX_VULKAN_EvaluateFeature_C");
     void* const vk_release = export_address("NVSDK_NGX_VULKAN_ReleaseFeature");
     void* const vk_shutdown1 = export_address("NVSDK_NGX_VULKAN_Shutdown1");
+    void* const vk_cap_params = export_address("NVSDK_NGX_VULKAN_GetCapabilityParameters");
     const bool d3d12_exported = (create != nullptr && evaluate != nullptr && release != nullptr);
     const bool d3d11_exported = (d3d11_create != nullptr && d3d11_evaluate != nullptr && d3d11_release != nullptr);  // Plan 18
     const bool vulkan_exported = ((vk_create != nullptr || vk_create1 != nullptr) && vk_evaluate != nullptr && vk_release != nullptr);
@@ -878,33 +930,40 @@ size_t HookInstaller::ScanLocked() {
     // (Plan 14's behaviour), and the log line says so. Plan 18: the Direct3D 11 entry points are [5..10] (create, evaluate, release required; EvaluateFeature_C,
     // Shutdown1 and the device-less Shutdown optional), the Vulkan ones [11..16].
     const DetourSet& detours = DETOURS[slot];
+    enum class EntryApi : uint8_t { D3D12, D3D11, VULKAN };
     struct EntryPoint {
       void* target = nullptr;
       void* detour = nullptr;
       bool required = false;
       void* original = nullptr;  // MinHook's trampoline, once hooked
+      EntryApi api = EntryApi::D3D12;
     };
-    std::array<EntryPoint, 17> entry_points = {{
+    std::array<EntryPoint, 20> entry_points = {{
         // [0..4] Direct3D 12
-        {(hook_d3d12 ? create : nullptr), reinterpret_cast<void*>(detours.create), true},
-        {(hook_d3d12 ? evaluate : nullptr), reinterpret_cast<void*>(detours.evaluate), true},
-        {(hook_d3d12 ? evaluate_c : nullptr), reinterpret_cast<void*>(detours.evaluate_c), false},
-        {(hook_d3d12 ? release : nullptr), reinterpret_cast<void*>(detours.release), true},
-        {(hook_d3d12 ? shutdown1 : nullptr), reinterpret_cast<void*>(detours.shutdown1), false},
+        {(hook_d3d12 ? create : nullptr), reinterpret_cast<void*>(detours.create), true, nullptr, EntryApi::D3D12},
+        {(hook_d3d12 ? evaluate : nullptr), reinterpret_cast<void*>(detours.evaluate), true, nullptr, EntryApi::D3D12},
+        {(hook_d3d12 ? evaluate_c : nullptr), reinterpret_cast<void*>(detours.evaluate_c), false, nullptr, EntryApi::D3D12},
+        {(hook_d3d12 ? release : nullptr), reinterpret_cast<void*>(detours.release), true, nullptr, EntryApi::D3D12},
+        {(hook_d3d12 ? shutdown1 : nullptr), reinterpret_cast<void*>(detours.shutdown1), false, nullptr, EntryApi::D3D12},
         // [5..10] Direct3D 11 (Plan 18)
-        {(hook_d3d11 ? d3d11_create : nullptr), reinterpret_cast<void*>(detours.d3d11_create), true},
-        {(hook_d3d11 ? d3d11_evaluate : nullptr), reinterpret_cast<void*>(detours.d3d11_evaluate), true},
-        {(hook_d3d11 ? d3d11_evaluate_c : nullptr), reinterpret_cast<void*>(detours.d3d11_evaluate_c), false},
-        {(hook_d3d11 ? d3d11_release : nullptr), reinterpret_cast<void*>(detours.d3d11_release), true},
-        {(hook_d3d11 ? d3d11_shutdown1 : nullptr), reinterpret_cast<void*>(detours.d3d11_shutdown1), false},
-        {(hook_d3d11 ? d3d11_shutdown : nullptr), reinterpret_cast<void*>(detours.d3d11_shutdown), false},
+        {(hook_d3d11 ? d3d11_create : nullptr), reinterpret_cast<void*>(detours.d3d11_create), true, nullptr, EntryApi::D3D11},
+        {(hook_d3d11 ? d3d11_evaluate : nullptr), reinterpret_cast<void*>(detours.d3d11_evaluate), true, nullptr, EntryApi::D3D11},
+        {(hook_d3d11 ? d3d11_evaluate_c : nullptr), reinterpret_cast<void*>(detours.d3d11_evaluate_c), false, nullptr, EntryApi::D3D11},
+        {(hook_d3d11 ? d3d11_release : nullptr), reinterpret_cast<void*>(detours.d3d11_release), true, nullptr, EntryApi::D3D11},
+        {(hook_d3d11 ? d3d11_shutdown1 : nullptr), reinterpret_cast<void*>(detours.d3d11_shutdown1), false, nullptr, EntryApi::D3D11},
+        {(hook_d3d11 ? d3d11_shutdown : nullptr), reinterpret_cast<void*>(detours.d3d11_shutdown), false, nullptr, EntryApi::D3D11},
         // [11..16] Vulkan
-        {(hook_vulkan ? vk_create : nullptr), reinterpret_cast<void*>(detours.vk_create), true},
-        {(hook_vulkan ? vk_create1 : nullptr), reinterpret_cast<void*>(detours.vk_create1), true},
-        {(hook_vulkan ? vk_evaluate : nullptr), reinterpret_cast<void*>(detours.vk_evaluate), true},
-        {(hook_vulkan ? vk_evaluate_c : nullptr), reinterpret_cast<void*>(detours.vk_evaluate_c), false},
-        {(hook_vulkan ? vk_release : nullptr), reinterpret_cast<void*>(detours.vk_release), true},
-        {(hook_vulkan && !hooked_already(vk_shutdown1) ? vk_shutdown1 : nullptr), reinterpret_cast<void*>(detours.vk_shutdown1), true},
+        {(hook_vulkan ? vk_create : nullptr), reinterpret_cast<void*>(detours.vk_create), true, nullptr, EntryApi::VULKAN},
+        {(hook_vulkan ? vk_create1 : nullptr), reinterpret_cast<void*>(detours.vk_create1), true, nullptr, EntryApi::VULKAN},
+        {(hook_vulkan ? vk_evaluate : nullptr), reinterpret_cast<void*>(detours.vk_evaluate), true, nullptr, EntryApi::VULKAN},
+        {(hook_vulkan ? vk_evaluate_c : nullptr), reinterpret_cast<void*>(detours.vk_evaluate_c), false, nullptr, EntryApi::VULKAN},
+        {(hook_vulkan ? vk_release : nullptr), reinterpret_cast<void*>(detours.vk_release), true, nullptr, EntryApi::VULKAN},
+        {(hook_vulkan && !hooked_already(vk_shutdown1) ? vk_shutdown1 : nullptr), reinterpret_cast<void*>(detours.vk_shutdown1), true, nullptr, EntryApi::VULKAN},
+        // [17..19] GetCapabilityParameters, where exported: the render scale override's plant point. Optional,
+        // and never a reason to hook or drop an API (its failure costs the override only).
+        {(hook_d3d12 ? cap_params : nullptr), reinterpret_cast<void*>(detours.cap_params), false, nullptr, EntryApi::D3D12},
+        {(hook_d3d11 ? d3d11_cap_params : nullptr), reinterpret_cast<void*>(detours.d3d11_cap_params), false, nullptr, EntryApi::D3D11},
+        {(hook_vulkan ? vk_cap_params : nullptr), reinterpret_cast<void*>(detours.vk_cap_params), false, nullptr, EntryApi::VULKAN},
     }};
 
     // A game's NGX shutdown may FreeLibrary the core: pinned code can never be unmapped under a
@@ -930,22 +989,19 @@ size_t HookInstaller::ScanLocked() {
     bool ok = true;
     bool d3d11_hooked = hook_d3d11;
     bool vulkan_hooked = hook_vulkan;
-    constexpr size_t FIRST_D3D11 = 5u;    // entry_points[5..10] are the Direct3D 11 ones (Plan 18)
-    constexpr size_t FIRST_VULKAN = 11u;  // entry_points[11..16] the Vulkan ones
     // Plan 13 and 18: a Direct3D 11 or Vulkan entry point that cannot be hooked costs that API's placements only, never the Direct3D 12 ones. That API's
-    // hooks made so far go now: none was enabled yet, so none can be live.
-    const auto drop_api = [&entry_points, &created](size_t first, size_t end) {
-      for (size_t made = first; made < end; ++made) {
-        if (entry_points[made].original == nullptr) continue;
-        MH_RemoveHook(entry_points[made].target);
-        std::erase(created, entry_points[made].target);
-        entry_points[made].original = nullptr;
+    // hooks made so far go now: none was enabled yet, so none can be live. The capability-parameters hooks are never a reason to drop an API.
+    const auto drop_api = [&entry_points, &created](EntryApi api) {
+      for (EntryPoint& entry_point : entry_points) {
+        if (entry_point.api != api || entry_point.original == nullptr) continue;
+        MH_RemoveHook(entry_point.target);
+        std::erase(created, entry_point.target);
+        entry_point.original = nullptr;
       }
     };
-    for (size_t index = 0u; index < entry_points.size(); ++index) {
-      EntryPoint& entry_point = entry_points[index];
-      const bool d3d11_entry = (index >= FIRST_D3D11 && index < FIRST_VULKAN);
-      const bool vulkan_entry = (index >= FIRST_VULKAN);
+    for (EntryPoint& entry_point : entry_points) {
+      const bool d3d11_entry = (entry_point.api == EntryApi::D3D11);
+      const bool vulkan_entry = (entry_point.api == EntryApi::VULKAN);
       // An optional entry point that another copy's hook already covers (a forwarding stub) is left to that hook.
       if (!ok || entry_point.target == nullptr || (d3d11_entry && !d3d11_hooked) || (vulkan_entry && !vulkan_hooked)
           || (!entry_point.required && hooked_already(entry_point.target))) {
@@ -968,10 +1024,10 @@ size_t HookInstaller::ScanLocked() {
         if (!entry_point.required) continue;
         if (d3d11_entry) {
           d3d11_hooked = false;
-          drop_api(FIRST_D3D11, FIRST_VULKAN);
+          drop_api(EntryApi::D3D11);
         } else if (vulkan_entry) {
           vulkan_hooked = false;
-          drop_api(FIRST_VULKAN, entry_points.size());
+          drop_api(EntryApi::VULKAN);
         } else {
           ok = false;
         }
@@ -988,11 +1044,13 @@ size_t HookInstaller::ScanLocked() {
       originals.evaluate.store(reinterpret_cast<EvaluateFn>(entry_points[1].original), std::memory_order_release);
       originals.evaluate_c.store(reinterpret_cast<EvaluateCFn>(entry_points[2].original), std::memory_order_release);
       originals.release.store(reinterpret_cast<ReleaseFn>(entry_points[3].original), std::memory_order_release);
+      originals.cap_params.store(reinterpret_cast<CapParamsFn>(entry_points[17].original), std::memory_order_release);
       originals.shutdown1.store(reinterpret_cast<D3D12Shutdown1Fn>(entry_points[4].original), std::memory_order_release);
       originals.d3d11_create.store(reinterpret_cast<D3D11CreateFn>(entry_points[5].original), std::memory_order_release);
       originals.d3d11_evaluate.store(reinterpret_cast<D3D11EvaluateFn>(entry_points[6].original), std::memory_order_release);
       originals.d3d11_evaluate_c.store(reinterpret_cast<D3D11EvaluateCFn>(entry_points[7].original), std::memory_order_release);
       originals.d3d11_release.store(reinterpret_cast<ReleaseFn>(entry_points[8].original), std::memory_order_release);
+      originals.d3d11_cap_params.store(reinterpret_cast<CapParamsFn>(entry_points[18].original), std::memory_order_release);
       originals.d3d11_shutdown1.store(reinterpret_cast<D3D11Shutdown1Fn>(entry_points[9].original), std::memory_order_release);
       originals.d3d11_shutdown.store(reinterpret_cast<D3D11ShutdownFn>(entry_points[10].original), std::memory_order_release);
       originals.vk_create.store(reinterpret_cast<VkCreateFn>(entry_points[11].original), std::memory_order_release);
@@ -1000,6 +1058,7 @@ size_t HookInstaller::ScanLocked() {
       originals.vk_evaluate.store(reinterpret_cast<VkEvaluateFn>(entry_points[13].original), std::memory_order_release);
       originals.vk_evaluate_c.store(reinterpret_cast<VkEvaluateCFn>(entry_points[14].original), std::memory_order_release);
       originals.vk_release.store(reinterpret_cast<ReleaseFn>(entry_points[15].original), std::memory_order_release);
+      originals.vk_cap_params.store(reinterpret_cast<CapParamsFn>(entry_points[19].original), std::memory_order_release);
       originals.vk_shutdown1.store(reinterpret_cast<VkShutdown1Fn>(entry_points[16].original), std::memory_order_release);
       for (void* const target : created) {
         if (const MH_STATUS status = MH_QueueEnableHook(target); status != MH_OK) {

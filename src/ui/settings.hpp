@@ -228,6 +228,9 @@ struct Settings {
   MotionVectorSource motion_vectors = MotionVectorSource::AUTO;
   DlssQualityOverride dlss_quality_mode = DlssQualityOverride::GAME;
   std::array<DlssPresetOverride, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_presets = {};
+  // The render scale override (2026-10-25, addon/dlss_ratio.hpp): each mode's render size as percent of
+  // the output, 100 = the game's choice. Applied at the game's next OptimalSettings query.
+  std::array<float, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_render_scale {100.f, 100.f, 100.f, 100.f, 100.f, 100.f};
   AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
   bool present_with_frame_gen = false;
   bool allow_cross_queue_passes = false;
