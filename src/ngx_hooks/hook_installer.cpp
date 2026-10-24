@@ -66,6 +66,7 @@ using D3D11ShutdownFn = NVSDK_NGX_Result(NVSDK_CONV*)();
 // live, so its slot is never reused and its originals are never nulled (a live hook must never call
 // a null original).
 struct SlotOriginals {
+  std::atomic<HMODULE> core{nullptr};  // the copy's module, for the unhooked exports the swap needs (AllocateParameters)
   std::atomic<CreateFn> create{nullptr};
   std::atomic<EvaluateFn> evaluate{nullptr};
   std::atomic<EvaluateCFn> evaluate_c{nullptr};
@@ -86,6 +87,7 @@ struct SlotOriginals {
   std::atomic<bool> poisoned{false};
 
   void Clear() {
+    core.store(nullptr, std::memory_order_release);
     create.store(nullptr, std::memory_order_release);
     evaluate.store(nullptr, std::memory_order_release);
     evaluate_c.store(nullptr, std::memory_order_release);
@@ -111,6 +113,21 @@ std::atomic<NgxObserver*> g_observer{nullptr};
 std::atomic<bool> g_installer_running{false};
 thread_local uint32_t t_depth = 0u;
 thread_local bool t_vulkan_evaluate = false;  // inside the original of an outermost Vulkan evaluate (InsideVulkanEvaluate)
+// The slot of the outermost hooked call on this thread (CurrentNgxCore, OwnCreate, OwnRelease): the
+// observer's own NGX calls go to the same module copy's originals. Restored by SlotGuard.
+thread_local size_t t_call_slot = SIZE_MAX;
+
+// Sets t_call_slot for the outermost call's observer callbacks, restoring the previous one after.
+class SlotGuard {
+ public:
+  explicit SlotGuard(size_t slot) : previous_(std::exchange(t_call_slot, slot)) {}
+  ~SlotGuard() { t_call_slot = previous_; }
+  SlotGuard(const SlotGuard&) = delete;
+  SlotGuard& operator=(const SlotGuard&) = delete;
+
+ private:
+  size_t previous_;
+};
 
 // Counts hooked calls on this thread, so one NGX copy forwarding to another is seen once.
 class DepthGuard {
@@ -153,10 +170,11 @@ void LogObserverFailure(ObserverCall kind, const char* what) noexcept {
 // Every create detour's body (Plan 13: shared by the Direct3D 12 and Vulkan entry points). `call` is the call as the observer sees it;
 // `original()` runs the hooked copy's own entry point with the game's arguments.
 template <class Original>
-NVSDK_NGX_Result RunCreate(CreateCall call, NVSDK_NGX_Handle** out_handle, Original&& original) {
+NVSDK_NGX_Result RunCreate(size_t slot, CreateCall call, NVSDK_NGX_Handle** out_handle, Original&& original) {
   const DepthGuard depth;
   NgxObserver* const observer = g_observer.load(std::memory_order_acquire);
   if (depth.Nested() || observer == nullptr) return original();
+  const SlotGuard guard(slot);
   NVSDK_NGX_Parameter* const parameters = call.parameters;
   // Restores the values BeforeCreate changed, last change first. Its own failure never says "the
   // call went to NGX unchanged": the create itself may already have gone through either way.
@@ -227,7 +245,8 @@ template <size_t SLOT>
 NVSDK_NGX_Result NVSDK_CONV CreateDetour(ID3D12GraphicsCommandList* list, NVSDK_NGX_Feature feature,
                                          NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** out_handle) {
   const CreateFn original = g_originals[SLOT].create.load(std::memory_order_acquire);
-  return RunCreate({.list = list, .feature = feature, .parameters = parameters, .caller = _ReturnAddress()}, out_handle,
+  return RunCreate(SLOT,
+                   {.list = list, .feature = feature, .parameters = parameters, .caller = _ReturnAddress()}, out_handle,
                    [&] { return original(list, feature, parameters, out_handle); });
 }
 
@@ -235,7 +254,8 @@ template <size_t SLOT>
 NVSDK_NGX_Result NVSDK_CONV VkCreateDetour(VkCommandBuffer buffer, NVSDK_NGX_Feature feature, NVSDK_NGX_Parameter* parameters,
                                            NVSDK_NGX_Handle** out_handle) {
   const VkCreateFn original = g_originals[SLOT].vk_create.load(std::memory_order_acquire);
-  return RunCreate({.api = NgxApi::VULKAN, .list = nr::AsList(buffer), .feature = feature, .parameters = parameters, .caller = _ReturnAddress()},
+  return RunCreate(SLOT,
+                   {.api = NgxApi::VULKAN, .list = nr::AsList(buffer), .feature = feature, .parameters = parameters, .caller = _ReturnAddress()},
                    out_handle, [&] { return original(buffer, feature, parameters, out_handle); });
 }
 
@@ -244,6 +264,7 @@ NVSDK_NGX_Result NVSDK_CONV VkCreate1Detour(VkDevice device, VkCommandBuffer buf
                                             NVSDK_NGX_Handle** out_handle) {
   const VkCreate1Fn original = g_originals[SLOT].vk_create1.load(std::memory_order_acquire);
   return RunCreate(
+      SLOT,
       {.api = NgxApi::VULKAN, .list = nr::AsList(buffer), .vk_device = device, .feature = feature, .parameters = parameters, .caller = _ReturnAddress()},
       out_handle, [&] { return original(device, buffer, feature, parameters, out_handle); });
 }
@@ -268,37 +289,39 @@ void NotifyEvaluate(NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX
 // them as ID3D11Resource* (NGX_D3D11_EVALUATE_DLSS_EXT), read and written with that overload (a void* one, as an engine may set, takes the pointer branch).
 class ColorSwap {
  public:
-  ColorSwap(NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters) noexcept {
+  // `call` is the detour's evaluate, already carrying the game's handle and parameters; BeforeEvaluate
+  // may set `call->color` and (the live preset swap) `call->eval_handle`. `game_handle` is the handle
+  // OnColorSwapRejected reports (BeforeEvaluate's swap may have changed what the original evaluates).
+  ColorSwap(EvaluateCall* call, const NVSDK_NGX_Handle* game_handle) noexcept {
     NgxObserver* const observer = g_observer.load(std::memory_order_acquire);
-    if (observer == nullptr || parameters == nullptr) return;
+    if (observer == nullptr || call->parameters == nullptr) return;
     try {
-      EvaluateCall call = {.api = api, .list = list, .handle = handle, .parameters = parameters};
-      observer->BeforeEvaluate(&call);
-      if (call.color == nullptr) return;
+      observer->BeforeEvaluate(call);
+      if (call->color == nullptr) return;
       // NGX takes the block as const, but it is the game's own mutable object, set again every frame.
-      auto* const block = const_cast<NVSDK_NGX_Parameter*>(parameters);
-      if (api == NgxApi::D3D11) {
+      auto* const block = const_cast<NVSDK_NGX_Parameter*>(call->parameters);
+      if (call->api == NgxApi::D3D11) {
         // Plan 18: `call.color` is an ID3D11Resource*, punned (nr/d3d11_handles.hpp). Fix round 1 (M-3): held for the original call, so a present on another
         // thread that releases the bridge's texture cannot free it under NGX. Final review: taken before the branch is chosen, so the ID3D11Resource* branch and
         // the void* one (an engine that sets Color as a pointer) both hold it, and the destructor releases it once, on every path (a rejected swap too).
-        swapped11_ = nr::D3D11ResourceOf(call.color);
+        swapped11_ = nr::D3D11ResourceOf(call->color);
         swapped11_->AddRef();
       }
-      if (api == NgxApi::D3D12 && NVSDK_NGX_SUCCEED(block->Get(NVSDK_NGX_Parameter_Color, &game_color_))) {
+      if (call->api == NgxApi::D3D12 && NVSDK_NGX_SUCCEED(block->Get(NVSDK_NGX_Parameter_Color, &game_color_))) {
         kind_ = Kind::D3D12;
-        block->Set(NVSDK_NGX_Parameter_Color, call.color);
-      } else if (api == NgxApi::D3D11 && NVSDK_NGX_SUCCEED(block->Get(NVSDK_NGX_Parameter_Color, &game_color11_))) {
+        block->Set(NVSDK_NGX_Parameter_Color, call->color);
+      } else if (call->api == NgxApi::D3D11 && NVSDK_NGX_SUCCEED(block->Get(NVSDK_NGX_Parameter_Color, &game_color11_))) {
         // NGX_D3D11_EVALUATE_DLSS_EXT sets Color as an ID3D11Resource*.
         kind_ = Kind::D3D11;
         block->Set(NVSDK_NGX_Parameter_Color, swapped11_);
       } else if (NVSDK_NGX_SUCCEED(block->Get(NVSDK_NGX_Parameter_Color, &game_pointer_))) {
         kind_ = Kind::POINTER;
-        block->Set(NVSDK_NGX_Parameter_Color, static_cast<void*>(call.color));
+        block->Set(NVSDK_NGX_Parameter_Color, static_cast<void*>(call->color));
       } else {
         // Minor 9: pre-SR already applied NR into call.color, on the assumption the swap below would
         // put it where DLSS reads it. It cannot: the game set no Color for this evaluate at all, so
         // there is nothing to swap into, and the caller's status must not say NR applied.
-        observer->OnColorSwapRejected(api, list, handle);
+        observer->OnColorSwapRejected(call->api, call->list, game_handle);
         return;
       }
       block_ = block;
@@ -333,18 +356,22 @@ class ColorSwap {
   void* game_pointer_ = nullptr;
 };
 
-// Every evaluate detour's body (Plan 13: shared by both APIs and both callback kinds). `original()` runs the hooked copy's own entry
-// point with the game's arguments.
+// Every evaluate detour's body (Plan 13: shared by both APIs and both callback kinds). `original(handle)`
+// runs the hooked copy's own entry point with the game's arguments, or with the handle BeforeEvaluate's
+// preset swap substituted; AfterEvaluate still sees the game's handle.
 template <class Original>
-NVSDK_NGX_Result RunEvaluate(NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
-                             Original&& original) {
+NVSDK_NGX_Result RunEvaluate(size_t slot, NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle,
+                             const NVSDK_NGX_Parameter* parameters, Original&& original) {
   const DepthGuard depth;
-  if (depth.Nested()) return original();
+  if (depth.Nested()) return original(handle);
+  const SlotGuard guard(slot);
+  EvaluateCall call = {.api = api, .list = list, .handle = handle, .parameters = parameters};
   NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
   {
-    const ColorSwap swap(api, list, handle, parameters);
+    const ColorSwap swap(&call, handle);
+    const NVSDK_NGX_Handle* const use = (call.eval_handle != nullptr ? call.eval_handle : handle);
     t_vulkan_evaluate = (api == NgxApi::VULKAN);
-    result = original();
+    result = original(use);
     t_vulkan_evaluate = false;
   }  // the game's Color is back before AfterEvaluate reads the block
   NotifyEvaluate(api, list, handle, parameters, result);
@@ -355,7 +382,8 @@ template <size_t SLOT>
 NVSDK_NGX_Result NVSDK_CONV EvaluateDetour(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle,
                                            const NVSDK_NGX_Parameter* parameters, PFN_NVSDK_NGX_ProgressCallback callback) {
   const EvaluateFn original = g_originals[SLOT].evaluate.load(std::memory_order_acquire);
-  return RunEvaluate(NgxApi::D3D12, list, handle, parameters, [&] { return original(list, handle, parameters, callback); });
+  return RunEvaluate(SLOT, NgxApi::D3D12, list, handle, parameters,
+                     [&](const NVSDK_NGX_Handle* use) { return original(list, use, parameters, callback); });
 }
 
 template <size_t SLOT>
@@ -363,26 +391,46 @@ NVSDK_NGX_Result NVSDK_CONV EvaluateCDetour(ID3D12GraphicsCommandList* list, con
                                             const NVSDK_NGX_Parameter* parameters,
                                             PFN_NVSDK_NGX_ProgressCallback_C callback) {
   const EvaluateCFn original = g_originals[SLOT].evaluate_c.load(std::memory_order_acquire);
-  return RunEvaluate(NgxApi::D3D12, list, handle, parameters, [&] { return original(list, handle, parameters, callback); });
+  return RunEvaluate(SLOT, NgxApi::D3D12, list, handle, parameters,
+                     [&](const NVSDK_NGX_Handle* use) { return original(list, use, parameters, callback); });
 }
 
 template <size_t SLOT>
 NVSDK_NGX_Result NVSDK_CONV VkEvaluateDetour(VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
                                              PFN_NVSDK_NGX_ProgressCallback callback) {
   const VkEvaluateFn original = g_originals[SLOT].vk_evaluate.load(std::memory_order_acquire);
-  return RunEvaluate(NgxApi::VULKAN, nr::AsList(buffer), handle, parameters, [&] { return original(buffer, handle, parameters, callback); });
+  return RunEvaluate(SLOT, NgxApi::VULKAN, nr::AsList(buffer), handle, parameters,
+                     [&](const NVSDK_NGX_Handle* use) { return original(buffer, use, parameters, callback); });
 }
 
 template <size_t SLOT>
 NVSDK_NGX_Result NVSDK_CONV VkEvaluateCDetour(VkCommandBuffer buffer, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
                                               PFN_NVSDK_NGX_ProgressCallback_C callback) {
   const VkEvaluateCFn original = g_originals[SLOT].vk_evaluate_c.load(std::memory_order_acquire);
-  return RunEvaluate(NgxApi::VULKAN, nr::AsList(buffer), handle, parameters, [&] { return original(buffer, handle, parameters, callback); });
+  return RunEvaluate(SLOT, NgxApi::VULKAN, nr::AsList(buffer), handle, parameters,
+                     [&](const NVSDK_NGX_Handle* use) { return original(buffer, use, parameters, callback); });
+}
+
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV D3D11EvaluateDetour(ID3D11DeviceContext* context, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
+                                                PFN_NVSDK_NGX_ProgressCallback callback) {
+  const D3D11EvaluateFn original = g_originals[SLOT].d3d11_evaluate.load(std::memory_order_acquire);
+  return RunEvaluate(SLOT, NgxApi::D3D11, nr::AsList(context), handle, parameters,
+                     [&](const NVSDK_NGX_Handle* use) { return original(context, use, parameters, callback); });
+}
+
+template <size_t SLOT>
+NVSDK_NGX_Result NVSDK_CONV D3D11EvaluateCDetour(ID3D11DeviceContext* context, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
+                                                 PFN_NVSDK_NGX_ProgressCallback_C callback) {
+  const D3D11EvaluateCFn original = g_originals[SLOT].d3d11_evaluate_c.load(std::memory_order_acquire);
+  return RunEvaluate(SLOT, NgxApi::D3D11, nr::AsList(context), handle, parameters,
+                     [&](const NVSDK_NGX_Handle* use) { return original(context, use, parameters, callback); });
 }
 
 // Both APIs' ReleaseFeature: BeforeRelease, then the hooked copy's own entry point.
-NVSDK_NGX_Result RunRelease(NVSDK_NGX_Handle* handle, ReleaseFn original) {
+NVSDK_NGX_Result RunRelease(size_t slot, NVSDK_NGX_Handle* handle, ReleaseFn original) {
   const DepthGuard depth;
+  const SlotGuard guard(slot);
   NgxObserver* const observer = g_observer.load(std::memory_order_acquire);
   if (!depth.Nested() && observer != nullptr) {
     try {
@@ -398,12 +446,12 @@ NVSDK_NGX_Result RunRelease(NVSDK_NGX_Handle* handle, ReleaseFn original) {
 
 template <size_t SLOT>
 NVSDK_NGX_Result NVSDK_CONV ReleaseDetour(NVSDK_NGX_Handle* handle) {
-  return RunRelease(handle, g_originals[SLOT].release.load(std::memory_order_acquire));
+  return RunRelease(SLOT, handle, g_originals[SLOT].release.load(std::memory_order_acquire));
 }
 
 template <size_t SLOT>
 NVSDK_NGX_Result NVSDK_CONV VkReleaseDetour(NVSDK_NGX_Handle* handle) {
-  return RunRelease(handle, g_originals[SLOT].vk_release.load(std::memory_order_acquire));
+  return RunRelease(SLOT, handle, g_originals[SLOT].vk_release.load(std::memory_order_acquire));
 }
 
 // Batch 3 review I-1: BeforeCoreShutdown on an outermost call, then the core's own Shutdown1 with the caller's four registers (VkShutdown1Fn).
@@ -434,32 +482,20 @@ NVSDK_NGX_Result NVSDK_CONV VkShutdown1Detour(void* device, void* second, void* 
   return RunShutdown1(NgxApi::VULKAN, g_originals[SLOT].vk_shutdown1.load(std::memory_order_acquire), _ReturnAddress(), device, second, third, fourth);
 }
 
-// Plan 18 (design §2): the Direct3D 11 detours mirror the Direct3D 12 ones; the evaluate's ID3D11DeviceContext rides as the command list (nr::AsList).
+// Plan 18 (design §2): the Direct3D 11 detours mirror the Direct3D 12 ones (their evaluate twins sit with the others above); the evaluate's
+// ID3D11DeviceContext rides as the command list (nr::AsList).
 template <size_t SLOT>
 NVSDK_NGX_Result NVSDK_CONV D3D11CreateDetour(ID3D11DeviceContext* context, NVSDK_NGX_Feature feature, NVSDK_NGX_Parameter* parameters,
                                               NVSDK_NGX_Handle** out_handle) {
   const D3D11CreateFn original = g_originals[SLOT].d3d11_create.load(std::memory_order_acquire);
-  return RunCreate({.api = NgxApi::D3D11, .list = nr::AsList(context), .feature = feature, .parameters = parameters, .caller = _ReturnAddress()},
+  return RunCreate(SLOT,
+                   {.api = NgxApi::D3D11, .list = nr::AsList(context), .feature = feature, .parameters = parameters, .caller = _ReturnAddress()},
                    out_handle, [&] { return original(context, feature, parameters, out_handle); });
 }
 
 template <size_t SLOT>
-NVSDK_NGX_Result NVSDK_CONV D3D11EvaluateDetour(ID3D11DeviceContext* context, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
-                                                PFN_NVSDK_NGX_ProgressCallback callback) {
-  const D3D11EvaluateFn original = g_originals[SLOT].d3d11_evaluate.load(std::memory_order_acquire);
-  return RunEvaluate(NgxApi::D3D11, nr::AsList(context), handle, parameters, [&] { return original(context, handle, parameters, callback); });
-}
-
-template <size_t SLOT>
-NVSDK_NGX_Result NVSDK_CONV D3D11EvaluateCDetour(ID3D11DeviceContext* context, const NVSDK_NGX_Handle* handle, const NVSDK_NGX_Parameter* parameters,
-                                                 PFN_NVSDK_NGX_ProgressCallback_C callback) {
-  const D3D11EvaluateCFn original = g_originals[SLOT].d3d11_evaluate_c.load(std::memory_order_acquire);
-  return RunEvaluate(NgxApi::D3D11, nr::AsList(context), handle, parameters, [&] { return original(context, handle, parameters, callback); });
-}
-
-template <size_t SLOT>
 NVSDK_NGX_Result NVSDK_CONV D3D11ReleaseDetour(NVSDK_NGX_Handle* handle) {
-  return RunRelease(handle, g_originals[SLOT].d3d11_release.load(std::memory_order_acquire));
+  return RunRelease(SLOT, handle, g_originals[SLOT].d3d11_release.load(std::memory_order_acquire));
 }
 
 template <size_t SLOT>
@@ -576,6 +612,60 @@ void RestoreParameters(NVSDK_NGX_Parameter* parameters, std::span<const SavedPar
 
 bool InsideVulkanEvaluate() {
   return t_vulkan_evaluate;
+}
+
+HMODULE CurrentNgxCore() {
+  const size_t slot = t_call_slot;
+  if (slot >= HookInstaller::MAX_MODULES) return nullptr;
+  return g_originals[slot].core.load(std::memory_order_acquire);
+}
+
+// The original entry point `api`'s own create, or Fail (a copy that exports only Vulkan's CreateFeature1
+// cannot serve the swap: CreateFeature names the device through the command buffer, CreateFeature1 needs
+// the VkDevice, which an evaluate does not carry).
+NVSDK_NGX_Result OwnCreate(NgxApi api, ID3D12GraphicsCommandList* list, NVSDK_NGX_Feature feature,
+                           NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** out_handle) {
+  const size_t slot = t_call_slot;
+  if (slot >= HookInstaller::MAX_MODULES) return NVSDK_NGX_Result_Fail;
+  const SlotOriginals& originals = g_originals[slot];
+  switch (api) {
+    case NgxApi::D3D12: {
+      const CreateFn create = originals.create.load(std::memory_order_acquire);
+      return (create != nullptr ? create(list, feature, parameters, out_handle) : NVSDK_NGX_Result_Fail);
+    }
+    case NgxApi::D3D11: {
+      const D3D11CreateFn create = originals.d3d11_create.load(std::memory_order_acquire);
+      return (create != nullptr ? create(reinterpret_cast<ID3D11DeviceContext*>(list), feature, parameters, out_handle)
+                                : NVSDK_NGX_Result_Fail);
+    }
+    case NgxApi::VULKAN: {
+      const VkCreateFn create = originals.vk_create.load(std::memory_order_acquire);
+      return (create != nullptr ? create(reinterpret_cast<VkCommandBuffer>(list), feature, parameters, out_handle)
+                                : NVSDK_NGX_Result_Fail);
+    }
+  }
+  return NVSDK_NGX_Result_Fail;
+}
+
+NVSDK_NGX_Result OwnRelease(NgxApi api, NVSDK_NGX_Handle* handle) {
+  const size_t slot = t_call_slot;
+  if (slot >= HookInstaller::MAX_MODULES) return NVSDK_NGX_Result_Fail;
+  const SlotOriginals& originals = g_originals[slot];
+  switch (api) {
+    case NgxApi::D3D12: {
+      const ReleaseFn release = originals.release.load(std::memory_order_acquire);
+      return (release != nullptr ? release(handle) : NVSDK_NGX_Result_Fail);
+    }
+    case NgxApi::D3D11: {
+      const ReleaseFn release = originals.d3d11_release.load(std::memory_order_acquire);
+      return (release != nullptr ? release(handle) : NVSDK_NGX_Result_Fail);
+    }
+    case NgxApi::VULKAN: {
+      const ReleaseFn release = originals.vk_release.load(std::memory_order_acquire);
+      return (release != nullptr ? release(handle) : NVSDK_NGX_Result_Fail);
+    }
+  }
+  return NVSDK_NGX_Result_Fail;
 }
 
 void* HotpatchChainTarget(const void* entry) {
@@ -893,6 +983,7 @@ size_t HookInstaller::ScanLocked() {
     const bool with_evaluate_c = (entry_points[2].original != nullptr);
     if (ok) {
       SlotOriginals& originals = g_originals[slot];
+      originals.core.store(module, std::memory_order_release);
       originals.create.store(reinterpret_cast<CreateFn>(entry_points[0].original), std::memory_order_release);
       originals.evaluate.store(reinterpret_cast<EvaluateFn>(entry_points[1].original), std::memory_order_release);
       originals.evaluate_c.store(reinterpret_cast<EvaluateCFn>(entry_points[2].original), std::memory_order_release);

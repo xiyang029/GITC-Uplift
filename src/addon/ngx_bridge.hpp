@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 
+#include "addon/dlss_swap.hpp"
 #include "addon/reshade_version.hpp"
 #include "ngx_hooks/dlss_capture.hpp"
 #include "ngx_hooks/dlss_overrides.hpp"
@@ -25,6 +26,10 @@ class NgxRouting {
   virtual ~NgxRouting() = default;
   // The DLSS-SR overrides to apply to a SuperSampling create now.
   [[nodiscard]] virtual ngx_hooks::SrOverrides Overrides() = 0;
+  // The panel's DLSSPreset<Mode> choices (the live preset swap's target, addon/dlss_swap.hpp): one
+  // J-M render preset per mode, 0 where the panel says Game. The add-on's lock is taken and released
+  // inside; never called under another lock of the add-on's.
+  [[nodiscard]] virtual ngx_hooks::SrOverrides DlssPresetOverrides() = 0;
   // The ReShade device a game list was created on (Uplift's identity data), or null when untracked.
   [[nodiscard]] virtual const void* DeviceOf(ID3D12GraphicsCommandList* list) = 0;
   // The primary swap chain's size on `device`, for the main-handle choice; empty before its first present.
@@ -91,7 +96,7 @@ class NgxRouting {
 // registry (frame generation and foreign NR included), and the main handle's evaluates. Thread-safe.
 class NgxBridge final : public ngx_hooks::NgxObserver {
  public:
-  explicit NgxBridge(NgxRouting& routing) : routing_(routing) {}
+  explicit NgxBridge(NgxRouting& routing) : routing_(routing), swap_(routing) {}
 
   void BeforeCreate(ngx_hooks::CreateCall* call) override;
   void AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle* handle, NVSDK_NGX_Result result) override;
@@ -134,6 +139,11 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   void NoteForeignD3D12Dlss() { foreign_d3d12_.store(true, std::memory_order_relaxed); }
   [[nodiscard]] bool ForeignD3D12Dlss() const { return foreign_d3d12_.load(std::memory_order_relaxed); }
 
+  // The panel's DLSSPreset<Mode> choices are (or are not) set: the gate the live preset swap's
+  // BeforeEvaluate reads before it costs anything. Pushed by the add-on at init and on every
+  // SaveAndApply.
+  void NoteDlssPresetChoices(bool any) { swap_.SetDesired(any); }
+
  private:
   // The device of a hooked call's list, through the API's own routing (a VkCommandBuffer never reaches a Direct3D 12 lookup, nor a Direct3D 11 context a
   // Direct3D 12 or Vulkan one).
@@ -151,6 +161,7 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
 
   NgxRouting& routing_;
   ngx_hooks::FeatureRegistry registry_;
+  DlssSwap swap_;  // the live DLSS preset switch (addon/dlss_swap.hpp); runs on the main handle only
   std::atomic<bool> pre_sr_{false};
   std::atomic<int> vk_contexts_{0};
   std::atomic<int> vk_nr_contexts_{0};

@@ -756,7 +756,9 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Switch", "切换"},
     {"Switching from Present: NR starts here once the Present path has released it", "正在从后处理切换：后处理路径释放 NR 后，将在此阶段启动"},
     {"The DLSS placements are latched off after a device removal: Clear latch, then restart the game", "GPU 设备移除后，DLSS 阶段已锁定为关闭：请清除锁定并重启游戏"},
-    {"The DLSS render preset for this quality mode (J-M). Applies when the game next creates its DLSS feature.", "此质量模式（J-M）对应的 DLSS 渲染预设。游戏下次创建 DLSS 功能时生效。"},
+    {"The DLSS render preset for this quality mode (J-M). Switches live in game: Uplift evaluates its own DLSS feature with the chosen "
+     "preset, and each switch briefly hitches while DLSS loads the model. Game keeps the game's choice.",
+     "此质量模式（J-M）对应的 DLSS 渲染预设。可在游戏内实时切换：Uplift 会以选定的预设评估自己的 DLSS 功能；每次切换时 DLSS 加载模型会短暂卡顿。选择“游戏”则保留游戏自身的预设。"},
     {"The Direct3D 10 bridge stopped: the game's Direct3D 10 device was destroyed", "游戏的 Direct3D 10 设备已销毁"},
     {"The Direct3D 10 bridge stopped: {}", "Direct3D 10 中继已停止：{}"},
     {"The Direct3D 11 bridge stopped: the game's Direct3D 11 device was destroyed", "游戏的 Direct3D 11 设备已销毁"},

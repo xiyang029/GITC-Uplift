@@ -311,6 +311,7 @@ void LogHeartbeat(DeviceEntry& entry, api::device* device, std::string_view lead
 class AddonRouting final : public addon::NgxRouting {
  public:
   ngx_hooks::SrOverrides Overrides() override;
+  ngx_hooks::SrOverrides DlssPresetOverrides() override;
   const void* DeviceOf(ID3D12GraphicsCommandList* list) override;
   nr::Size SwapchainSize(const void* device) override;
   bool IsOwnCode(const void* address) override;
@@ -475,6 +476,8 @@ void SaveAndApply(AddonState* state) {
   ApplyProcessSettings(state->settings);
   ++state->settings_generation;  // Plan 6 (D11): a settings change restarts the retry backoff
   state->front->SettingsChanged(state->settings);  // Plan 10: the helper of a Direct3D 9 game reads them too
+  // The live DLSS preset swap's gate: whether any DLSSPreset<Mode> choice is set (addon/dlss_swap.hpp).
+  state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(state->settings).Any());
 }
 
 // With the add-on's lock held.
@@ -544,6 +547,11 @@ void NoteLatchIfTripped(AddonState* state, Context* context) {
 ngx_hooks::SrOverrides AddonRouting::Overrides() {
   const std::unique_lock lock(g_state->mutex);
   return addon::ToSrOverrides(g_state->settings);
+}
+
+ngx_hooks::SrOverrides AddonRouting::DlssPresetOverrides() {
+  const std::unique_lock lock(g_state->mutex);
+  return addon::ToPresetOverrides(g_state->settings);
 }
 
 const void* AddonRouting::DeviceOf(ID3D12GraphicsCommandList* list) {
@@ -3313,6 +3321,8 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   }
   g_state->poller.Seen(g_state->settings.enabled);
   ApplyProcessSettings(g_state->settings);
+  // The live DLSS preset swap's gate (SaveAndApply keeps it current): the ini may carry preset choices already.
+  g_state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(g_state->settings).Any());
 
   const auto module_path = [](HMODULE handle) {
     std::wstring path(32768u, L'\0');

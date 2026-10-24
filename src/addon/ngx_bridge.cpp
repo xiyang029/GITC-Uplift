@@ -86,6 +86,25 @@ void NgxBridge::AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle*
 }
 
 void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
+  // The live DLSS preset swap (addon/dlss_swap.hpp): the panel's DLSSPreset<Mode> choices, applied by
+  // evaluating Uplift's own feature instead of the game's. Runs whatever pre-upscaling does -- it needs
+  // no watching context -- and only on the game's main upscaler handle, like the capture below: any
+  // other SuperSampling feature (a second view's, a mod's) keeps the game's own. The swap may create its
+  // feature right here, on the evaluate's thread and command list, which is why it runs first: the
+  // detour passes nested NGX calls straight through, so the create is invisible to every hook below.
+  if (swap_.Busy() && call->parameters != nullptr && call->handle != nullptr) {
+    const void* const device = DeviceOf(call->api, call->list);
+    if (device != nullptr) {
+      const std::optional<ngx_hooks::FeatureRecord> record = registry_.Find(call->handle);
+      if (record && ngx_hooks::KindOf(record->feature) == ngx_hooks::FeatureKind::UPSCALER
+          && registry_.MainHandle(device, routing_.SwapchainSize(device), call->api) == call->handle) {
+        const NVSDK_NGX_Handle* const swap = swap_.BeforeEvaluate(call->api, device, call->list, call->handle, *record);
+        if (swap != nullptr && swap != call->handle) {
+          call->eval_handle = swap;  // the original evaluate runs with the swap; AfterEvaluate still sees the game's handle
+        }
+      }
+    }
+  }
   if (!pre_sr_.load(std::memory_order_relaxed)) return;  // Before upscaling is off: one relaxed load per evaluate
   // Batch 3 review I-2: on Vulkan only a native context records before upscaling. Without one watching, nothing else is asked (not even the registry's lock).
   if (call->api == ngx_hooks::NgxApi::VULKAN && vk_nr_contexts_.load(std::memory_order_relaxed) <= 0) return;
@@ -260,6 +279,7 @@ std::optional<ngx_hooks::FeatureRecord> NgxBridge::AdoptD3D11Upscaler(const NVSD
 }
 
 void NgxBridge::BeforeRelease(NVSDK_NGX_Handle* handle) {
+  swap_.BeforeRelease(handle);  // the preset swap's feature goes with the game's (its own release, invisible to the hooks)
   registry_.OnRelease(handle);
 }
 
@@ -277,6 +297,7 @@ void NgxBridge::BeforeCoreShutdown(ngx_hooks::NgxApi api, void* device, const vo
       if (owner == nullptr) owner = &UNMARKED;
     }
     const size_t forgotten = registry_.OnCoreShutdown(ngx_hooks::NgxApi::D3D11, owner);
+    swap_.OnCoreShutdown(ngx_hooks::NgxApi::D3D11, owner);  // the swap's features died with the core; drop their bookkeeping
     nr::Logf(nr::LogLevel::INFO, "Direct3D 11: the game shut NGX down on {} ({} DLSS feature(s) forgotten; NR on Uplift's private device is unaffected)",
              (device == nullptr ? "every device" : "its device"), forgotten);
     return;
@@ -286,10 +307,13 @@ void NgxBridge::BeforeCoreShutdown(ngx_hooks::NgxApi api, void* device, const vo
   if (api == ngx_hooks::NgxApi::D3D12) {
     // Plan 15: the routing tells the game's device from any other (a bridge's private device, Uplift's own core init) before it takes the add-on's lock.
     if (routing_.IsOwnCode(caller)) return;
+    swap_.OnCoreShutdown(ngx_hooks::NgxApi::D3D12, nullptr);  // the game's core went for this API: the swap's features died with it
     routing_.BeforeCoreShutdownD3D12(static_cast<ID3D12Device*>(device));
     return;
   }
-  if (vk_contexts_.load(std::memory_order_relaxed) <= 0 || routing_.IsOwnCode(caller)) return;
+  if (routing_.IsOwnCode(caller)) return;
+  swap_.OnCoreShutdown(ngx_hooks::NgxApi::VULKAN, nullptr);  // as the Direct3D 12 branch's
+  if (vk_contexts_.load(std::memory_order_relaxed) <= 0) return;
   routing_.BeforeCoreShutdownVk(static_cast<VkDevice>(device));
 }
 

@@ -273,6 +273,7 @@ add_library(uplift_addon_core STATIC
   src/addon/environment.cpp
   src/addon/swapchain_selector.cpp
   src/addon/dlss_settings.cpp
+  src/addon/dlss_swap.cpp
   src/addon/reshade_version.cpp
   src/addon/ngx_bridge.cpp
   src/addon/d3d11_identity.cpp

@@ -69,7 +69,8 @@ double Flag(bool value) {
 }
 
 constexpr std::string_view PRESET_TOOLTIP =
-    "The DLSS render preset for this quality mode (J-M). Applies when the game next creates its DLSS feature.";
+    "The DLSS render preset for this quality mode (J-M). Switches live in game: Uplift evaluates its own DLSS feature with the chosen "
+    "preset, and each switch briefly hitches while DLSS loads the model. Game keeps the game's choice.";
 
 constexpr std::array<std::string_view, 2> LANGUAGES = {"English", "简体中文"};
 
@@ -715,9 +716,11 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return static_cast<double>(s.pass_count); },
         .set = [](Settings& s, double v) { s.pass_count = static_cast<uint32_t>(v); },
     },
-    // User decision (fix round 1): the user does not want to change DLSS modes or presets from
-    // Uplift -- it needs a DLSS re-create, and live switching is not practical -- so these 8 rows are
-    // hidden. The keys stay readable from the ini and the code stays inert at the GAME defaults.
+    // The live DLSS preset switch (2026-10-25, reversing fix round 1's ruling): the DLSSPreset<Mode>
+    // rows are on the Advanced page again. A preset cannot reach a game feature that already exists --
+    // DLSS reads it once, at creation -- so the addon's swap (dlss_swap.hpp) evaluates its own feature
+    // with the chosen presets instead of the game's, created on demand through the game's NGX core.
+    // DLSSQualityMode and DLSSAutoExposure stay hidden: they still need a game re-create.
     {
         .key = "DLSSQualityMode",
         .kind = SettingKind::CHOICE,
@@ -733,66 +736,60 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSPresetDLAA",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
+        .section = SettingSection::ADVANCED,
         .label = "DLAA preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
-        .flags = NEXT_DLSS_CREATE,
         .get = [](const Settings& s) { return Index(s.dlss_presets[0]); },
         .set = [](Settings& s, double v) { s.dlss_presets[0] = FromIndex<DlssPresetOverride>(v); },
     },
     {
         .key = "DLSSPresetUltraQuality",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
+        .section = SettingSection::ADVANCED,
         .label = "Ultra Quality preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
-        .flags = NEXT_DLSS_CREATE,
         .get = [](const Settings& s) { return Index(s.dlss_presets[1]); },
         .set = [](Settings& s, double v) { s.dlss_presets[1] = FromIndex<DlssPresetOverride>(v); },
     },
     {
         .key = "DLSSPresetQuality",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
+        .section = SettingSection::ADVANCED,
         .label = "Quality preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
-        .flags = NEXT_DLSS_CREATE,
         .get = [](const Settings& s) { return Index(s.dlss_presets[2]); },
         .set = [](Settings& s, double v) { s.dlss_presets[2] = FromIndex<DlssPresetOverride>(v); },
     },
     {
         .key = "DLSSPresetBalanced",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
+        .section = SettingSection::ADVANCED,
         .label = "Balanced preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
-        .flags = NEXT_DLSS_CREATE,
         .get = [](const Settings& s) { return Index(s.dlss_presets[3]); },
         .set = [](Settings& s, double v) { s.dlss_presets[3] = FromIndex<DlssPresetOverride>(v); },
     },
     {
         .key = "DLSSPresetPerformance",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
+        .section = SettingSection::ADVANCED,
         .label = "Performance preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
-        .flags = NEXT_DLSS_CREATE,
         .get = [](const Settings& s) { return Index(s.dlss_presets[4]); },
         .set = [](Settings& s, double v) { s.dlss_presets[4] = FromIndex<DlssPresetOverride>(v); },
     },
     {
         .key = "DLSSPresetUltraPerformance",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
+        .section = SettingSection::ADVANCED,
         .label = "Ultra Performance preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
-        .flags = NEXT_DLSS_CREATE,
         .get = [](const Settings& s) { return Index(s.dlss_presets[5]); },
         .set = [](Settings& s, double v) { s.dlss_presets[5] = FromIndex<DlssPresetOverride>(v); },
     },

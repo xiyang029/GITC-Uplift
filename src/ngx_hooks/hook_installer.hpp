@@ -60,6 +60,9 @@ struct EvaluateCall {
   // detour writes into the block as a void*, as the game sets its own. Plan 18: on Direct3D 11 an ID3D11Resource* (nr::AsResource), which the
   // detour writes into the block with the ID3D11Resource* overload, as NGX_D3D11_EVALUATE_DLSS_EXT does, and puts back after the original.
   ID3D12Resource* color = nullptr;
+  // The live preset swap (addon/dlss_swap.hpp): set by BeforeEvaluate to the handle the original evaluate must run with instead of the
+  // game's (Uplift's own SuperSampling feature with the panel's presets). Null evaluates `handle`; AfterEvaluate still sees `handle`.
+  const NVSDK_NGX_Handle* eval_handle = nullptr;
 };
 
 // Receives the hooked NGX calls (spec §10, v2 design §3.1). Every method runs on the game's calling
@@ -97,6 +100,20 @@ class NgxObserver {
 
 // `_nvngx.dll` or `nvngx.dll`, in any case: the NGX core file names Uplift hooks.
 [[nodiscard]] bool IsNgxCoreFileName(std::wstring_view file_name);
+
+// The NGX core module copy that received the outermost hooked call on this thread (the swap feature's
+// creates and releases go through its own exports), or null outside one. One TLS read.
+[[nodiscard]] HMODULE CurrentNgxCore();
+
+// Uplift's own NGX feature calls, made from an observer callback of an outermost hooked call: they run
+// the same module copy's original (trampolined) entry point, so no detour sees them -- no observer, no
+// create-time overrides, no registry insert. The swap feature (addon/dlss_swap.hpp) creates and retires
+// through these. Vulkan uses CreateFeature (the command buffer names the device); a copy that exports
+// only CreateFeature1 cannot serve one (false, with Fail). `list` is the API's own command-list type
+// punned as ID3D12GraphicsCommandList* (a VkCommandBuffer, or the Direct3D 11 device context).
+NVSDK_NGX_Result OwnCreate(NgxApi api, ID3D12GraphicsCommandList* list, NVSDK_NGX_Feature feature,
+                           NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Handle** out_handle);
+NVSDK_NGX_Result OwnRelease(NgxApi api, NVSDK_NGX_Handle* handle);
 
 struct HookedModule {
   std::wstring file_name;
