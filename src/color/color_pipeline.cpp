@@ -23,7 +23,7 @@ namespace uplift::color {
 namespace {
 
 constexpr uint32_t ROOT_CONSTANTS = 32u;     // the root signature's; each pass sets only what its shader reads
-constexpr uint32_t PASS_CONSTANTS = 20u;     // Plans 2-4's passes, plus the foveated grid's four dwords
+constexpr uint32_t PASS_CONSTANTS = 22u;     // Plans 2-4's passes, the foveated grid's four dwords, Guided's two gains
 constexpr uint32_t SHADER_RESOURCES = 5u;    // t0-t4
 constexpr uint32_t UNORDERED_ACCESSES = 2u;  // u0, u1
 constexpr uint32_t TABLE_SIZE = SHADER_RESOURCES + UNORDERED_ACCESSES;
@@ -375,6 +375,7 @@ bool ColorPipeline::RecordDecode(ID3D12GraphicsCommandList* list, uint32_t slot,
       (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u), 0u, 0u,
       pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u), Bits(pass.chroma_clamp),
       pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
+      Bits(pass.guided_low_gain), Bits(pass.guided_high_gain),
   };
   const D3D12_VIEWPORT viewport = {.TopLeftX = 0.f, .TopLeftY = 0.f, .Width = static_cast<float>(pass.width),
                                    .Height = static_cast<float>(pass.height), .MinDepth = 0.f, .MaxDepth = 1.f};
@@ -405,6 +406,7 @@ bool ColorPipeline::RecordComputeDecode(ID3D12GraphicsCommandList* list, uint32_
       pass.origin_y, pass.width, pass.height, (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u),
       pass.source_x, pass.source_y, pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u), Bits(pass.chroma_clamp),
       pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
+      Bits(pass.guided_low_gain), Bits(pass.guided_high_gain),
   };
   DispatchCompute(list, compute_decode_pipeline_.Get(), constants, base, pass.width, pass.height);
   return true;

@@ -60,6 +60,8 @@ struct DecodePass {
   std::optional<Upsampling> upsampling;  // unset: direct change-field reads; set: resample from the work size
   uint32_t options = 0u;                              // Plan 5: shader_options (the primaries, Consistent)
   float chroma_clamp = 0.f;                           // Plan 5 (F14): stops; 0 = off
+  float guided_low_gain = 0.85f;                      // Guided: the base band's gain
+  float guided_high_gain = 0.95f;                     // Guided: the detail band's gain
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
   nr::foveation::Grid foveation;
@@ -87,6 +89,8 @@ struct ComputeDecodePass {
   std::optional<Upsampling> upsampling;  // unset: direct change-field reads; set: resample from the work size
   uint32_t options = 0u;                              // Plan 5: shader_options (the primaries, Consistent)
   float chroma_clamp = 0.f;                           // Plan 5 (F14): stops; 0 = off
+  float guided_low_gain = 0.85f;                      // Guided: the base band's gain
+  float guided_high_gain = 0.95f;                     // Guided: the detail band's gain
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
   nr::foveation::Grid foveation;

@@ -30,6 +30,8 @@ struct ColorFixes {
   float adapt_darker = 0.7f;
   color::NeuralTransfer transfer = color::NeuralTransfer::BOUNDED_RATIO;
   float chroma_clamp = 0.f;      // stops; 0 = off
+  float guided_low_gain = 0.85f;   // Guided: the base band's gain (Upsampling = Guided only)
+  float guided_high_gain = 0.95f;  // Guided: the detail band's gain
   bool near_black_guard = false;
   friend bool operator==(const ColorFixes&, const ColorFixes&) = default;
 };

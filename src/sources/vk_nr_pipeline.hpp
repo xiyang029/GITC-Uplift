@@ -426,6 +426,7 @@ class VkNrPipeline final : private nr::PassResolver {
   std::array<nr::Mark, color::VkColorPipeline::RING_SLOTS> slot_marks_ = {};
   uint32_t next_slot_ = 0u;
   bool allocation_failure_logged_ = false;
+  bool decode_warned_ = false;  // WarnOnce (vk_nr_pipeline.cpp): the decode's one-shot warn gate
 };
 
 }  // namespace uplift::sources

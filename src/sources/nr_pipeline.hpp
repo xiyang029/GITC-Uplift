@@ -403,6 +403,12 @@ class NrPipeline final : private nr::PassResolver {
   uint32_t next_slot_ = 0u;
   uint64_t last_present_frame_ = 0u;
   bool allocation_failure_logged_ = false;
+  // Superior Scaling's fallback rule (PR #237): a degradation the card only names tersely warns once in the
+  // log, then runs degraded quietly -- never a per-frame warning, never a fully silent fallback. WarnOnce
+  // (nr_pipeline.cpp) does the logging; these are its one-shot gates.
+  bool decode_pipeline_warned_ = false;
+  bool dlss_present_motion_warned_ = false;
+  bool launchpad_motion_warned_ = false;
   MotionCopies motion_copies_;
   PresentMotionCounters present_motion_counters_;
   LaunchpadMotion launchpad_motion_;

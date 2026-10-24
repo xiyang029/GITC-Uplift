@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <format>
 #include <string_view>
 #include <utility>
 
@@ -16,6 +17,14 @@ namespace uplift::sources {
 namespace {
 
 static_assert(color::VkColorPipeline::RESOLVE_PASSES == LATER_PASSES, "the colour pipeline has one resolve per later pass");
+
+// Superior Scaling's fallback rule (PR #237), as Direct3D 12's NrPipeline: a degradation the card only
+// names tersely warns once in the log, then runs degraded quietly.
+template <class... Args>
+void WarnOnce(bool* logged, std::format_string<Args...> format, Args&&... args) {
+  if (std::exchange(*logged, true)) return;
+  nr::Logf(nr::LogLevel::WARN, format, std::forward<Args>(args)...);
+}
 
 constexpr uint64_t MODEL_BYTES_PER_PIXEL = 8u;   // RGBA16F
 constexpr uint64_t MOTION_BYTES_PER_PIXEL = 4u;  // RG16F
@@ -1021,7 +1030,10 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
                             .upsampling = after.upsampling,
                             .options = options,
                             .chroma_clamp = config_.fixes.chroma_clamp,
+                            .guided_low_gain = config_.fixes.guided_low_gain,
+                            .guided_high_gain = config_.fixes.guided_high_gain,
                             .mask = BoundMask(slot), .foveation = work.foveation})) {
+    WarnOnce(&decode_warned_, "Vulkan: the decode could not be recorded; NR's result does not reach the target");
     return {.recorded = true, .reason = "decode failed", .motion_source = motion_source, .motion_scale_x = frame_inputs.motion_scale_x, .motion_scale_y = frame_inputs.motion_scale_y};
   }
   Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -1261,7 +1273,10 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
                             .upsampling = after.upsampling,
                             .options = options,
                             .chroma_clamp = config_.fixes.chroma_clamp,
+                            .guided_low_gain = config_.fixes.guided_low_gain,
+                            .guided_high_gain = config_.fixes.guided_high_gain,
                             .mask = BoundMask(slot), .foveation = work.foveation})) {
+    WarnOnce(&decode_warned_, "Vulkan: the decode could not be recorded; NR's result does not reach the target");
     return {.recorded = true, .reason = "decode failed", .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
   }
   HandToNgx(buffer, set_->intermediates.private_color);

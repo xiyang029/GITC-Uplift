@@ -69,6 +69,8 @@ struct VkDecodePass {
   std::optional<Upsampling> upsampling;  // unset: direct change-field reads; set: resample from the work size
   uint32_t options = 0u;                 // shader_options (the primaries, Consistent)
   float chroma_clamp = 0.f;              // Plan 14 (F14): stops; 0 = off
+  float guided_low_gain = 0.85f;         // Guided: the base band's gain
+  float guided_high_gain = 0.95f;        // Guided: the detail band's gain
   VkSampledView mask;                    // Plan 14 (§3.13): the mask copy, SHADER_READ_ONLY_OPTIMAL; null = none
   nr::foveation::Grid foveation;
 };

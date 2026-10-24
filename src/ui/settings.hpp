@@ -242,6 +242,9 @@ struct Settings {
   ResolutionMode resolution_mode = ResolutionMode::FULL;  // user ruling: Full by default
   float resolution_scale = 100.f;                         // Custom: % of the output, 25-100
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
+  // Guided's two band gains (Upsampling = Guided below Full): the base band's and the detail band's, 1 = unchanged.
+  float guided_base_gain = 0.85f;   // after Superior Scaling's uncalibrated low-band default
+  float guided_detail_gain = 0.95f; // after Superior Scaling's uncalibrated high-band default
   // Foveated edge scaling (2026-10-21): NR's work grid keeps the centre of the output at full density and falls off toward the edges. The centre's width is a
   // share of the output's width, its height and both fall-offs shares of the output's height (whole per cent, the UI's sliders); `edge` is the density the
   // fall-off reaches (whole per cent, 25-100, where 100 is off). The two fall-offs are separate: the vertical one is the one a screen's aspect cuts short.

@@ -22,6 +22,7 @@ enum class Encoding : uint32_t {
 enum class Upsampling : uint32_t {
   CLASSIC = 0u,     // a bilinear sample
   EDGE_AWARE = 1u,  // a joint bilateral upsample guided by the original
+  GUIDED = 2u,      // guided reconstruction: a bilinear base and an edge-aware detail band, each with its own gain
 };
 
 // Plan 5 (v2 design §3.14, F7): the SourcePrimaries index, which is also the shaders' primaries bits (color_common.hlsli's

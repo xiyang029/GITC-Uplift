@@ -44,6 +44,8 @@ sources::LookConfig LookConfigFrom(const ui::Settings& settings,
           .adapt_darker = settings.adapt_darker_stops,
           .transfer = settings.neural_transfer,
           .chroma_clamp = settings.chroma_clamp,
+          .guided_low_gain = settings.guided_base_gain,    // the UI names the bands base/detail, the shaders low/high
+          .guided_high_gain = settings.guided_detail_gain,
           .near_black_guard = settings.near_black_guard,
       },
       .later_controls = later_controls,
@@ -1287,7 +1289,8 @@ ContextStatus DeviceContext::Status() const {
       detail = std::format(" (a {}x{} render, padded)", work_size_.width, work_size_.height);
     } else if (work_size_ != frame_size_ && !frame_size_.Empty()) {
       detail = std::format(" of {}x{} ({})", frame_size_.width, frame_size_.height,
-                           (config_.upsampling == color::Upsampling::CLASSIC ? "Classic" : "Edge-aware"));
+                           (config_.upsampling == color::Upsampling::GUIDED ? "Guided"
+                           : config_.upsampling == color::Upsampling::EDGE_AWARE ? "Edge-aware" : "Classic"));
     }
     if (match_game_unread) {
       detail += (dlss_off_.Off() ? " (Match game: the game's DLSS is off)" : " (Match game: waiting for DLSS)");

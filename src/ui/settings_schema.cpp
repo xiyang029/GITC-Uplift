@@ -30,7 +30,7 @@ constexpr std::array<std::string_view, 3> VRAM_CHECKS = {"Careful", "Relaxed", "
 constexpr std::array<std::string_view, 3> VULKAN_NR_MODES = {"Native", "Direct3D 12", "Helper"};  // Plan 19; T5: Helper
 constexpr std::array<std::string_view, 6> RESOLUTION_MODES = {"Full", "Quality (67 %)", "Balanced (58 %)",
                                                               "Performance (50 %)", "Match game", "Custom"};
-constexpr std::array<std::string_view, 2> UPSAMPLING_MODES = {"Classic", "Edge-aware"};
+constexpr std::array<std::string_view, 3> UPSAMPLING_MODES = {"Classic", "Edge-aware", "Guided"};
 // Split chain (2026-10-10): a pass's Runs at after its first choice, "Same as pass n-1" (PassStageChoices), in stored-index order.
 constexpr std::array<std::string_view, 3> PASS_STAGES = {"Before upscaling", "After DLSS", "Present"};
 constexpr std::array<std::string_view, 2> MASK_MODES = {"Auto (UPLIFT_MASK)", "Off"};
@@ -507,10 +507,37 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Upsampling",
         .tooltip = "How NR's change returns to full size below Full. Edge-aware keeps it on the side of an edge where NR "
-                   "made it; Classic is bilinear and slightly cheaper.",
+                   "made it; Guided splits it into a base and a detail band with their own gains, which steadies NR's "
+                   "sharpening at a reduced resolution; Classic is bilinear and slightly cheaper.",
         .choices = UPSAMPLING_MODES,
         .get = [](const Settings& s) { return Index(s.upsampling); },
         .set = [](Settings& s, double v) { s.upsampling = FromIndex<color::Upsampling>(v); },
+    },
+    {
+        .key = "GuidedBaseGain",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Guided base gain",
+        .tooltip = "Guided's gain on the change's base band, its large and gradual edits. Below 1 steadies NR's broadening at a reduced "
+                   "resolution; 1 leaves it unchanged. Applies when Upsampling = Guided below Full.",
+        .min = 0.5,
+        .max = 1.0,
+        .flags = SLIDER_RANGE_ONLY,  // a shaping, not a state: it applies when the slider is released
+        .get = [](const Settings& s) { return static_cast<double>(s.guided_base_gain); },
+        .set = [](Settings& s, double v) { s.guided_base_gain = static_cast<float>(v); },
+    },
+    {
+        .key = "GuidedDetailGain",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Guided detail gain",
+        .tooltip = "Guided's gain on the change's detail band, its small edits that hug an edge. Below 1 eases NR's sharpening at a reduced "
+                   "resolution; 1 leaves it unchanged. The foveated grid's edges always keep this band at full weight.",
+        .min = 0.5,
+        .max = 1.0,
+        .flags = SLIDER_RANGE_ONLY,  // a shaping, not a state: it applies when the slider is released
+        .get = [](const Settings& s) { return static_cast<double>(s.guided_detail_gain); },
+        .set = [](Settings& s, double v) { s.guided_detail_gain = static_cast<float>(v); },
     },
     {
         // Split chain (2026-10-10, design 4): a later stage group's own size, keyed by stage so moving a boundary pass keeps each stage's size.

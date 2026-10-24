@@ -18,7 +18,7 @@ cbuffer DecodeConstants : register(b0) {
   uint origin_y;
   uint width;          // the region: the output size
   uint height;
-  uint upsampling;     // change-field reads: 0 direct, 1 Classic, 2 Edge-aware
+  uint upsampling;     // change-field reads: 0 direct, 1 Classic, 2 Edge-aware, 3 Guided
   uint source_x;       // the region's top-left corner in the source
   uint source_y;
   uint options;        // Plan 5: OPTION_* (the primaries, Consistent transfer, the mask)
@@ -27,6 +27,8 @@ cbuffer DecodeConstants : register(b0) {
   uint foveation_y;
   float foveation_gmax_x;
   float foveation_gmax_y;
+  float guided_low_gain;   // Guided: the base band's gain (1 = the field's low frequencies unchanged)
+  float guided_high_gain;  // Guided: the detail band's gain (1 = the field's high frequencies unchanged)
 };
 
 // Plan 13: on Vulkan's After DLSS the decode works in place: the target (DLSS's output, u0) is also where the original pixel is read.
@@ -79,6 +81,20 @@ float3 ChangeEdgeAware(float2 position, uint2 size, float guide) {
   return (total >= MIN_WEIGHT ? sum / total : ChangeBilinear(position, size));
 }
 
+// Guided: the change field as a low band and a high band, upsampled separately. The base is the Classic
+// bilinear sample (the field's low frequencies); the detail is what the edge-aware kernel keeps beyond it
+// (the field's high frequencies, held on the side of an edge). Each band takes its own gain (the Guided
+// base/detail gain settings, defaults 0.850/0.950 after Superior Scaling's uncalibrated presets): NR's
+// edits made at a reduced resolution sharpen and bloat, and gains below 1 attenuate them. A foveated grid
+// already compresses the edges' frequencies into the work pixels, so its correction applies to the low
+// band only: the detail keeps its full weight there, or the doubled attenuation blurs the edges
+// (Superior Scaling's motion-blur regression).
+float3 ChangeGuided(float2 position, uint2 size, float guide, bool foveated, float low_gain, float high_gain) {
+  const float3 base = ChangeBilinear(position, size);
+  const float3 detail = ChangeEdgeAware(position, size, guide) - base;
+  return base * low_gain + detail * (foveated ? 1.f : high_gain);
+}
+
 // The mask's R channel, bilinear at this output pixel whatever the mask's size, clamped to [0, 1]; 1 when not finite.
 float MaskAt(uint2 pixel) {
   uint2 size;
@@ -110,6 +126,10 @@ float4 DecodePixel(uint2 pixel) {
     if (upsampling == 2u) {
       const float3 model = EncodeModel(encoding, primaries, source.rgb, scale);
       change = ChangeEdgeAware(position, size, log2(max(Luminance(SrgbDecode(model)), 0.f) + ChangeEpsilon(encoding)));
+    } else if (upsampling == 3u) {
+      const float3 model = EncodeModel(encoding, primaries, source.rgb, scale);
+      change = ChangeGuided(position, size, log2(max(Luminance(SrgbDecode(model)), 0.f) + ChangeEpsilon(encoding)),
+                            FovAny(uint2(foveation_x, foveation_y)), guided_low_gain, guided_high_gain);
     } else {
       change = ChangeBilinear(position, size);
     }

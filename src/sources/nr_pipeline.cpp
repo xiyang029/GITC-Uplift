@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <format>
 #include <optional>
 #include <utility>
 
@@ -12,6 +13,15 @@
 
 namespace uplift::sources {
 namespace {
+
+// Superior Scaling's fallback rule (PR #237): a degradation the card only names tersely warns once in the
+// log, then runs degraded quietly -- never a per-frame warning, never a fully silent fallback.
+template <class... Args>
+void WarnOnce(bool* logged, std::format_string<Args...> format, Args&&... args) {
+  if (std::exchange(*logged, true)) return;
+  nr::Logf(nr::LogLevel::WARN, format, std::forward<Args>(args)...);
+}
+
 
 // The Present decode is a pixel shader; everything else reads through compute-legal states only.
 constexpr D3D12_RESOURCE_STATES PIXEL_AND_COMPUTE_READ =
@@ -780,7 +790,11 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   const std::optional<color::FormatInfo> format = color::DescribeFormat(description.Format);
   if (!format) return {.reason = "unsupported format"};
   // Plan 2 final review M5: never run NR on a frame whose result could not be written back.
-  if (!color_.HasDecodePipeline(format->target_view_format)) return {.reason = "no pipeline for the target format"};
+  if (!color_.HasDecodePipeline(format->target_view_format)) {
+    WarnOnce(&decode_pipeline_warned_, "Direct3D 12: no decode pipeline for the target's format {}; NR skips the frame",
+             static_cast<uint32_t>(format->target_view_format));
+    return {.reason = "no pipeline for the target format"};
+  }
   const uint64_t frame = timeline_.CurrentFrame();
   if (frame == last_present_frame_) return {.reason = "already ran this frame"};
   const uint32_t slot = next_slot_;
@@ -929,11 +943,17 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
        .encoding = target.encoding, .input_scale = input_scale, .transfer_strength = target.transfer_strength,
        .color_strength = target.color_strength, .exposure = exposure.texture, .exposure_factor = exposure.factor,
        .upsampling = after.upsampling, .options = options, .chroma_clamp = config_.fixes.chroma_clamp,
+       .guided_low_gain = config_.fixes.guided_low_gain,
+       .guided_high_gain = config_.fixes.guided_high_gain,
        .mask = BoundMask(slot), .mask_view_format = mask_.view_format,
        .foveation = work.foveation});
   Transition(list, target.resource, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
   Transition(list, after.texture, PIXEL_AND_COMPUTE_READ, COMPUTE_READ);
-  if (!decoded) return {.recorded = true, .reason = "no pipeline for the target format", .motion_source = motion_source};
+  if (!decoded) {
+    WarnOnce(&decode_pipeline_warned_, "Direct3D 12: no decode pipeline for the target's format {}; NR skips the frame",
+             static_cast<uint32_t>(format ? static_cast<uint32_t>(format->target_view_format) : 0u));
+    return {.recorded = true, .reason = "no pipeline for the target format", .motion_source = motion_source};
+  }
   return {.recorded = true, .nr_applied = true, .passes_run = evaluated.passes_run, .reason = evaluated.reason,
           .from_session = SessionWroteMessage(evaluated.reason), .motion_source = motion_source};
 }
@@ -1041,6 +1061,8 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
        .transfer_strength = target.transfer_strength, .color_strength = target.color_strength,
        .exposure = exposure.texture, .exposure_factor = exposure.factor, .source_x = 0u, .source_y = 0u,
        .upsampling = after.upsampling, .options = options, .chroma_clamp = config_.fixes.chroma_clamp,
+       .guided_low_gain = config_.fixes.guided_low_gain,
+       .guided_high_gain = config_.fixes.guided_high_gain,
        .mask = BoundMask(slot), .mask_view_format = mask_.view_format,
        .foveation = work.foveation});
   UavBarrier(list, target.resource);
@@ -1199,6 +1221,8 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
           .upsampling = after.upsampling,
           .options = options,
           .chroma_clamp = config_.fixes.chroma_clamp,
+       .guided_low_gain = config_.fixes.guided_low_gain,
+       .guided_high_gain = config_.fixes.guided_high_gain,
           .mask = BoundMask(slot),
           .mask_view_format = mask_.view_format,
           .foveation = work.foveation,
@@ -1298,7 +1322,11 @@ nr::BoundResource NrPipeline::ConvertDlssMotion(ID3D12GraphicsCommandList* list,
   if (region.width == 0u || region.height == 0u) {
     region = {.x = 0u, .y = 0u, .width = static_cast<uint32_t>(description.Width), .height = description.Height};
   }
-  if (!view_format || uint64_t{region.x} + region.width > description.Width || uint64_t{region.y} + region.height > description.Height) return {};
+  if (!view_format || uint64_t{region.x} + region.width > description.Width || uint64_t{region.y} + region.height > description.Height) {
+    WarnOnce(&dlss_present_motion_warned_, "Direct3D 12: DLSS's motion vectors for Present are unreadable (format {}); NR runs on zero motion",
+             static_cast<uint32_t>(description.Format));
+    return {};
+  }
   const nr::Size size = {region.width, region.height};
   if (dlss_present_motion_.size != size || !dlss_present_motion_.texture) {
     RetireDlssPresentMotion();
@@ -1306,6 +1334,7 @@ nr::BoundResource NrPipeline::ConvertDlssMotion(ID3D12GraphicsCommandList* list,
                                                  L"Uplift DLSS motion for Present");
     if (!dlss_present_motion_.texture) {
       dlss_present_motion_ = {};
+      WarnOnce(&dlss_present_motion_warned_, "Direct3D 12: no video memory for DLSS's motion copy for Present; NR runs on zero motion");
       return {};
     }
     dlss_present_motion_.size = size;
@@ -1340,6 +1369,7 @@ nr::BoundResource NrPipeline::ConvertLaunchpadMotion(ID3D12GraphicsCommandList* 
   }
   if (!view_format || region.width == 0u || region.height == 0u || uint64_t{region.x} + region.width > description.Width
       || uint64_t{region.y} + region.height > description.Height || work.image.Empty() || work.canvas.Empty()) {
+    WarnOnce(&launchpad_motion_warned_, "Direct3D 12: Launchpad's motion vectors are unreadable; NR runs on zero motion");
     return {};
   }
   if (launchpad_motion_.size != work.canvas || !launchpad_motion_.texture) {
@@ -1348,6 +1378,7 @@ nr::BoundResource NrPipeline::ConvertLaunchpadMotion(ID3D12GraphicsCommandList* 
                                               L"Uplift Launchpad motion");
     if (!launchpad_motion_.texture) {
       launchpad_motion_ = {};
+      WarnOnce(&launchpad_motion_warned_, "Direct3D 12: no video memory for Launchpad's motion conversion; NR runs on zero motion");
       return {};
     }
     launchpad_motion_.size = work.canvas;
