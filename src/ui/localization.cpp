@@ -854,7 +854,9 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"This pass's processing style A/B/C (0/1/2), separate from the network preset. A change restarts its history.", "选择此层的处理风格 A/B/C（0/1/2），与 NR 渲染模型相互独立。更改后会重置此层的时序历史。"},
     {"This quality mode's render size as a percent of the output (e.g. Ultra Performance at 40 instead of its 33). Applied by answering the "
      "game's DLSS size queries, so it lands when the game next re-queries: a quality-mode flip or a resolution change, a restart if it never "
-     "does. 100 keeps the game's own choice.", "此质量模式的渲染尺寸占输出尺寸的百分比（例如超高性能设为 40，而非其默认的 33）。通过应答游戏的 DLSS 尺寸查询来生效，因此要等游戏下次重新查询才会落地：切换游戏内画质挡位或分辨率即可，若游戏从不重新查询则需重启。设为 100 表示保留游戏自身的选择。"},
+     "does. Some games that never rebuild to the answer go black -- if the screen blacks, flip the quality mode once to recover. "
+     "100 keeps the game's own choice.",
+     "此质量模式的渲染尺寸占输出尺寸的百分比（例如超高性能设为 40，而非其默认的 33）。通过应答游戏的 DLSS 尺寸查询来生效，因此要等游戏下次重新查询才会落地：切换游戏内画质挡位或分辨率即可，若游戏从不重新查询则需重启。部分不按应答重建资源的游戏会黑屏——如遇黑屏，切换一次画质挡位即可恢复。设为 100 表示保留游戏自身的选择。"},
     {"Timeline destroyed with {} pending releases; call Flush before destroying", "Timeline 销毁时仍有 {} 项待释放资源；销毁前请调用 Flush"},
     {"Timeline flush timed out", "Timeline 刷新超时"},
     {"Tints what Keep faces protects in magenta, to check what it finds while you tune it. Turn it off to see the result.", "将“面部保护”识别并保护的区域染成洋红色，便于调试蒙版。关闭后即可查看实际效果。"},

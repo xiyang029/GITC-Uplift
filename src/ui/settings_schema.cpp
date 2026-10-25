@@ -77,7 +77,8 @@ constexpr std::string_view PRESET_TOOLTIP =
 constexpr std::string_view RENDER_SCALE_TOOLTIP =
     "This quality mode's render size as a percent of the output (e.g. Ultra Performance at 40 instead of its 33). Applied by answering the "
     "game's DLSS size queries, so it lands when the game next re-queries: a quality-mode flip or a resolution change, a restart if it never "
-    "does. 100 keeps the game's own choice.";
+    "does. Some games that never rebuild to the answer go black -- if the screen blacks, flip the quality mode once to recover. "
+    "100 keeps the game's own choice.";
 
 constexpr std::string_view FG_PRESET_TOOLTIP =
     "The DLSS Frame Generation model preset (A/B/C; C is 310.9.16+'s lighter performance mode, older runtimes ignore it). Applied through the "

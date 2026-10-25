@@ -101,17 +101,22 @@ NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* block) 
     RescaleBound(block, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, factor);
     RescaleBound(block, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, factor);
   } else {
-    // No snippet answer to rescale: DLSS's DRS range (0.5-1.0) as the bounds.
-    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, std::min(optimal_w, width / 2u));
-    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, std::min(optimal_h, height / 2u));
-    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, width);
-    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, height);
+    // No snippet answer to rescale: DLSS's own 0.5-1.0 DRS window, slid proportionally with the
+    // override (a half-and-half mix of the override and the table's window is what some engines
+    // misread into an illegal size). The bounds stay inside [optimal, output].
+    const unsigned min_w = std::max(optimal_w, std::min(width, width / 2u));
+    const unsigned min_h = std::max(optimal_h, std::min(height, height / 2u));
+    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, std::min(min_w, width));
+    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, std::min(min_h, height));
+    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, std::max(optimal_w, width));
+    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, std::max(optimal_h, height));
     block->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
   }
   block->Set(NVSDK_NGX_Parameter_OutWidth, optimal_w);
   block->Set(NVSDK_NGX_Parameter_OutHeight, optimal_h);
-  block->Set(NVSDK_NGX_Parameter_Scale, scale);
-  block->Set(NVSDK_NGX_Parameter_SuperSampling_ScaleFactor, scale);
+  // The Scale keys stay untouched: their direction flipped across SDK versions (render/output once,
+  // output/render later), and a game reading the one we did not write computes a quarter- or fourfold
+  // texture and samples out of bounds. The pixels in Out* are unambiguous either way.
   // Every answer that carries the panel's ratio is logged: the game re-queries rarely, and these lines
   // are the whole evidence that the override reached it (the first pass-through answer is logged above).
   nr::Logf(nr::LogLevel::INFO, "the DLSS render scale override answered: {}x{} -> {}x{} (scale {:.2f}, {})", width, height, optimal_w, optimal_h,
@@ -136,7 +141,6 @@ void PlantDlssRatio(ngx_hooks::NgxApi api, NVSDK_NGX_Parameter* block) {
     if (current == reinterpret_cast<void*>(&OptimalSettingsCallback)) return;  // this block is ours already
     g_originals.insert_or_assign(block, reinterpret_cast<OptimalSettingsFn>(current));
     block->Set(NVSDK_NGX_Parameter_DLSSOptimalSettingsCallback, reinterpret_cast<void*>(&OptimalSettingsCallback));
-    block->Set(NVSDK_NGX_EParameter_DLSSOptimalSettingsCallback, reinterpret_cast<void*>(&OptimalSettingsCallback));
   }
   static std::atomic<bool> logged{false};
   if (!logged.exchange(true)) {
