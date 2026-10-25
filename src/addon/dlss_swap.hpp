@@ -46,7 +46,7 @@ class DlssSwap {
   // panel's choices demand. The NGX create runs here, on the game's evaluate thread, with the evaluate's
   // command list; a swap created this frame evaluates this frame.
   [[nodiscard]] const NVSDK_NGX_Handle* BeforeEvaluate(ngx_hooks::NgxApi api, const void* device,
-                                                       ID3D12GraphicsCommandList* list,
+                                                       ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* evaluate,
                                                        const NVSDK_NGX_Handle* game_handle,
                                                        const ngx_hooks::FeatureRecord& record);
   // The game released `game_handle`: its swap feature goes with it, through the same core.
@@ -77,7 +77,7 @@ class DlssSwap {
   // Creates the swap feature: a SuperSampling (or Ray Reconstruction, `record.feature`'s kind) create
   // through the game's core with the record's snapshot and the chosen preset keys. Null, with a
   // warn-once log, when the core's own parameters allocator or the create itself fails.
-  [[nodiscard]] NVSDK_NGX_Handle* CreateSwap(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list,
+  [[nodiscard]] NVSDK_NGX_Handle* CreateSwap(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* evaluate,
                                              const ngx_hooks::FeatureRecord& record, const ngx_hooks::SrOverrides& desired);
   // Releases `handle` through `api`'s original (best effort; logged once when the core refuses it).
   static void ReleaseSwap(ngx_hooks::NgxApi api, NVSDK_NGX_Handle* handle);

@@ -34,6 +34,7 @@ struct OverlayView {
   // The engine's own lines, which Details lists under the status line (Plan 14: the rows no longer repeat them as "Now: ..." readouts).
   std::string placement_line;  // FormatPlacementLine; "Placement: NR is off" before a device exists
   std::string motion_line;     // "Motion vectors: DLSS (the game's own, scale 1 x 1)"; never empty
+  std::string dlss_mode_line;  // "DLSS mode: Ultra Performance (1536x864 of 2560x1440)"; the game feature's create-time mode, empty before its DLSS is seen
   std::string work_line;       // "Working at 1920x1080 of 3840x2160 (Edge-aware)"; empty before a frame
   std::string exposure_line;   // Plan 17: "Input exposure: metered (the game's exposure was 6.3 stops off)"; empty when none is used
   std::string chain_line;      // split chain: "Chain: pass 1 before upscaling (960x540), 2 at Present (1920x1080)", and the chain's note; empty otherwise

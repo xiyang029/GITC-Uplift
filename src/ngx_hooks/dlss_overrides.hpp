@@ -6,6 +6,7 @@
 
 #include "ngx_hooks/hook_installer.hpp"
 #include "nr/ngx.hpp"
+#include <nvsdk_ngx_defs_dlssd.h>  // the Ray Reconstruction preset keys (RR_PRESET_KEYS below)
 
 namespace uplift::ngx_hooks {
 
@@ -31,6 +32,17 @@ inline constexpr std::array<const char*, 6> PRESET_KEYS = {
 // Applies `overrides` to a SuperSampling create's parameter block. The game's value of every key it
 // changes goes into `saved` first, so the create detour can put it back (Task 1). The create helper
 // writes PerfQualityValue and the create flags as int; games write presets as unsigned int.
+// The Ray Reconstruction preset keys, in ui::DlssPresetMode order (the swap writes the RR table for a
+// Ray Reconstruction feature, the DLSS table for a SuperSampling one).
+inline constexpr std::array<const char*, 6> RR_PRESET_KEYS = {
+    NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA,
+    NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality,
+    NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality,
+    NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced,
+    NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance,
+    NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance,
+};
+
 void ApplySrOverrides(NVSDK_NGX_Parameter* parameters, const SrOverrides& overrides, std::vector<SavedParameter>* saved);
 
 }  // namespace uplift::ngx_hooks

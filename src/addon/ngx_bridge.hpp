@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "addon/dlss_ratio.hpp"
+#include "addon/fg_preset.hpp"
 #include "addon/dlss_swap.hpp"
 #include "addon/reshade_version.hpp"
 #include "ngx_hooks/dlss_capture.hpp"
@@ -31,6 +32,8 @@ class NgxRouting {
   // J-M render preset per mode, 0 where the panel says Game. The add-on's lock is taken and released
   // inside; never called under another lock of the add-on's.
   [[nodiscard]] virtual ngx_hooks::SrOverrides DlssPresetOverrides() = 0;
+  // The panel's RayReconstructionPreset<Mode> choices, same shape as the SR ones above.
+  [[nodiscard]] virtual ngx_hooks::SrOverrides RrPresetOverrides() = 0;
   // The ReShade device a game list was created on (Uplift's identity data), or null when untracked.
   [[nodiscard]] virtual const void* DeviceOf(ID3D12GraphicsCommandList* list) = 0;
   // The primary swap chain's size on `device`, for the main-handle choice; empty before its first present.
@@ -99,7 +102,7 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
  public:
   explicit NgxBridge(NgxRouting& routing) : routing_(routing), swap_(routing) {}
 
-  void BeforeCreate(ngx_hooks::CreateCall* call) override;
+  void BeforeCreate(ngx_hooks::CreateCall* call) override;  // also an early EnsureFgPresetHook install point
   void AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle* handle, NVSDK_NGX_Result result) override;
   void BeforeEvaluate(ngx_hooks::EvaluateCall* call) override;
   void OnColorSwapRejected(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle) override;
@@ -111,6 +114,9 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   // block, seen once per copy in practice.
   void AfterCapabilityParameters(ngx_hooks::NgxApi api, NVSDK_NGX_Parameter* parameters) override {
     PlantDlssRatio(api, parameters);
+    // The FG provider reads its preset's driver setting once, at its first create, which can precede
+    // the first present (and so the add-on's own Poll): the earliest NGX-level signals install it.
+    EnsureFgPresetHook();
   }
 
   [[nodiscard]] const ngx_hooks::FeatureRegistry& Registry() const { return registry_; }
@@ -150,7 +156,7 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   // SaveAndApply.
   void NoteDlssPresetChoices(bool any) { swap_.SetDesired(any); }
   // The panel's per-mode render scales (addon/dlss_ratio.hpp), read lock-free by the planted callback.
-  void NoteDlssRenderScales(const std::array<float, 6>& scales_percent) { SetDlssRenderScales(scales_percent); }
+  void NoteDlssRenderScales(const std::array<uint32_t, 6>& scales_percent) { SetDlssRenderScales(scales_percent); }
 
  private:
   // The device of a hooked call's list, through the API's own routing (a VkCommandBuffer never reaches a Direct3D 12 lookup, nor a Direct3D 11 context a

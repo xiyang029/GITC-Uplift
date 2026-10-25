@@ -13,9 +13,9 @@ namespace {
 
 using OptimalSettingsFn = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter*);
 
-// The panel's per-mode render scales, percent (100 = follow the game), indexed by ui::DlssPresetMode
-// (DLAA, Ultra Quality, Quality, Balanced, Performance, Ultra Performance).
-std::atomic<float> g_scales[6] = {100.f, 100.f, 100.f, 100.f, 100.f, 100.f};
+// The panel's per-mode render scales, whole percent (100 = follow the game), indexed by ui::DlssPresetMode
+// (DLAA, Ultra Quality, Quality, Balanced, Performance, Ultra Performance). Stored as ratios.
+std::atomic<float> g_scales[6] = {1.f, 1.f, 1.f, 1.f, 1.f, 1.f};
 // The callback the block carried before the plant (the snippet's, or none): the planted callback
 // rescales its answer. The capability blocks live for the process, so the pointers stay valid.
 std::mutex g_mutex;
@@ -78,10 +78,18 @@ NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* block) 
     block->Get(NVSDK_NGX_Parameter_OutHeight, &snippet_h);
   }
   const unsigned mode = ModeOf(perf_quality);
-  float scale = g_scales[mode].load(std::memory_order_relaxed) / 100.f;
-  if (scale >= 0.995f) {
-    if (original != nullptr && snippet_w != 0u) return result;  // follow the snippet for this mode
-    scale = 1.f / DefaultDenominator(mode);                     // no snippet answer: DLSS's own table
+  float scale = g_scales[mode].load(std::memory_order_relaxed);
+  const bool overridden = (scale < 0.995f);  // the panel set a ratio for this mode
+  if (!overridden) {
+    if (original != nullptr && snippet_w != 0u) {
+      // Follow the snippet's own answer; the first pass-through answer is logged once, later ones are noise.
+      static std::atomic<bool> pass_through_logged{false};
+      if (!pass_through_logged.exchange(true)) {
+        nr::Logf(nr::LogLevel::INFO, "the DLSS render scale override follows the game's query: {}x{} -> {}x{}", width, height, snippet_w, snippet_h);
+      }
+      return result;
+    }
+    scale = 1.f / DefaultDenominator(mode);  // no snippet answer: DLSS's own table
   }
   // The override's answer: the game's selected size times the render scale.
   const unsigned optimal_w = (unsigned)(width * scale);
@@ -104,19 +112,18 @@ NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* block) 
   block->Set(NVSDK_NGX_Parameter_OutHeight, optimal_h);
   block->Set(NVSDK_NGX_Parameter_Scale, scale);
   block->Set(NVSDK_NGX_Parameter_SuperSampling_ScaleFactor, scale);
-  static std::atomic<bool> answered{false};
-  if (!answered.exchange(true)) {
-    nr::Logf(nr::LogLevel::INFO, "the DLSS render scale override answered a query: {}x{} -> {}x{} (scale {:.2f})", width, height,
-             optimal_w, optimal_h, scale);
-  }
+  // Every answer that carries the panel's ratio is logged: the game re-queries rarely, and these lines
+  // are the whole evidence that the override reached it (the first pass-through answer is logged above).
+  nr::Logf(nr::LogLevel::INFO, "the DLSS render scale override answered: {}x{} -> {}x{} (scale {:.2f}, {})", width, height, optimal_w, optimal_h,
+           scale, (original != nullptr ? "rescaled the snippet's answer" : "DLSS's own table"));
   return NVSDK_NGX_Result_Success;
 }
 
 }  // namespace
 
-void SetDlssRenderScales(const std::array<float, 6>& scales_percent) {
+void SetDlssRenderScales(const std::array<uint32_t, 6>& scales_percent) {
   for (size_t mode = 0u; mode < 6u; ++mode) {
-    g_scales[mode].store(scales_percent[mode], std::memory_order_relaxed);
+    g_scales[mode].store(scales_percent[mode] / 100.f, std::memory_order_relaxed);
   }
 }
 

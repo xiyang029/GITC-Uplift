@@ -32,6 +32,7 @@
 #include "addon/device_context.hpp"
 #include "addon/dlss_settings.hpp"
 #include "addon/dlss_summary.hpp"
+#include "addon/fg_preset.hpp"
 #include "addon/environment.hpp"
 #include "addon/frame_config.hpp"
 #include "addon/frame_trigger.hpp"
@@ -312,6 +313,7 @@ class AddonRouting final : public addon::NgxRouting {
  public:
   ngx_hooks::SrOverrides Overrides() override;
   ngx_hooks::SrOverrides DlssPresetOverrides() override;
+  ngx_hooks::SrOverrides RrPresetOverrides() override;
   const void* DeviceOf(ID3D12GraphicsCommandList* list) override;
   nr::Size SwapchainSize(const void* device) override;
   bool IsOwnCode(const void* address) override;
@@ -476,10 +478,13 @@ void SaveAndApply(AddonState* state) {
   ApplyProcessSettings(state->settings);
   ++state->settings_generation;  // Plan 6 (D11): a settings change restarts the retry backoff
   state->front->SettingsChanged(state->settings);  // Plan 10: the helper of a Direct3D 9 game reads them too
-  // The live DLSS preset swap's gate: whether any DLSSPreset<Mode> choice is set (addon/dlss_swap.hpp),
-  // and the render scale override's per-mode percents (addon/dlss_ratio.hpp).
-  state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(state->settings).Any());
+  // The live DLSS preset swap's gate: whether any DLSSPreset<Mode> or RayReconstructionPreset<Mode>
+  // choice is set (addon/dlss_swap.hpp), and the render scale override's per-mode percents
+  // (addon/dlss_ratio.hpp).
+  state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(state->settings).Any()
+                                      || addon::ToRrPresetOverrides(state->settings).Any());
   state->bridge.NoteDlssRenderScales(state->settings.dlss_render_scale);
+  addon::SetFgPresetDesired(static_cast<uint32_t>(state->settings.fg_preset));
 }
 
 // With the add-on's lock held.
@@ -492,6 +497,7 @@ addon::DeviceContext* ContextOf(api::device* device) {
 // loader lock. One atomic exchange when nothing loaded.
 void PollHooks() {
   g_state->hooks.Poll();
+  addon::EnsureFgPresetHook();  // the DLSS-FG preset's driver-setting filter, once nvapi64.dll shows up
 }
 
 // Amendment 1: this thread's earlier ExecuteCommandLists calls have returned by its next Uplift event,
@@ -554,6 +560,11 @@ ngx_hooks::SrOverrides AddonRouting::Overrides() {
 ngx_hooks::SrOverrides AddonRouting::DlssPresetOverrides() {
   const std::unique_lock lock(g_state->mutex);
   return addon::ToPresetOverrides(g_state->settings);
+}
+
+ngx_hooks::SrOverrides AddonRouting::RrPresetOverrides() {
+  const std::unique_lock lock(g_state->mutex);
+  return addon::ToRrPresetOverrides(g_state->settings);
 }
 
 const void* AddonRouting::DeviceOf(ID3D12GraphicsCommandList* list) {
@@ -747,6 +758,28 @@ void AddonRouting::BeforeCoreShutdownD3D12(ID3D12Device* device) {
 // Plan 18: the NGX API the game's DLSS on this device goes through, for the registry's per-API questions.
 ngx_hooks::NgxApi DlssApiOf(const DeviceEntry& entry) {
   return (entry.vulkan ? ngx_hooks::NgxApi::VULKAN : entry.d3d11 ? ngx_hooks::NgxApi::D3D11 : ngx_hooks::NgxApi::D3D12);
+}
+
+// The Details line naming the main DLSS feature's quality mode and sizes (2026-10-25): the panel's
+// per-mode render-scale and preset rows key off exactly this mode, so the line says which row matters
+// now. The mode is the game's PerfQualityValue at its DLSS create, from the registry's snapshot.
+std::string DlssModeLine(const ngx_hooks::FeatureRecord& record) {
+  std::string_view mode;
+  switch (record.snapshot.perf_quality) {
+    case 0:  mode = "Performance";        break;
+    case 1:  mode = "Balanced";           break;
+    case 2:  mode = "Quality";            break;
+    case 3:  mode = "Ultra Performance";  break;
+    case 4:  mode = "Ultra Quality";      break;
+    case 5:  mode = "DLAA";               break;
+    default: mode = "the game's own choice"; break;
+  }
+  std::string line = std::format("DLSS mode: {}", mode);
+  const ngx_hooks::CreateSnapshot& snapshot = record.snapshot;
+  if (!snapshot.render.Empty() && !snapshot.output.Empty()) {
+    line += std::format(" ({}x{} of {}x{})", snapshot.render.width, snapshot.render.height, snapshot.output.width, snapshot.output.height);
+  }
+  return line;
 }
 
 // Plan 18 (design §5): why the DLSS stages cannot run on this Direct3D 11 device, or empty. With the add-on's lock held.
@@ -3037,6 +3070,9 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       if (const NVSDK_NGX_Handle* const main_handle = state.bridge.Registry().MainHandle(device, entry.swapchain_size, DlssApiOf(entry))) {
         const std::optional<ngx_hooks::FeatureRecord> main_record = state.bridge.Registry().Find(main_handle);
         facts.ray_reconstruction = main_record && main_record->feature == NVSDK_NGX_Feature_RayReconstruction;
+        if (main_record) {
+          view.dlss_mode_line = DlssModeLine(*main_record);  // which per-mode row (preset, render scale) matters now
+        }
       }
       // Split-chain design 11 (the owner, 2026-10-15): Before upscaling runs on Ray Reconstruction on Direct3D 12 and Vulkan; the Direct3D 11 bridge keeps
       // DLSS-SR only (decision Q7).
@@ -3310,7 +3346,16 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   // the module a second time would even be refused (ReShadeRegisterAddon takes a module once). Without the pin (best effort: it does not fail in
   // practice) this call registers again below, as a first one: a ReShade that stayed loaded refuses that with two ERROR lines and keeps the first
   // registration, and one that really unloaded starts empty and takes it.
-  if (g_state != nullptr && g_reshade_pinned.load(std::memory_order_acquire) && (g_state->hooks.Started() || vk::DeviceHook::Installed())) return true;
+  if (g_state != nullptr && g_reshade_pinned.load(std::memory_order_acquire) && (g_state->hooks.Started() || vk::DeviceHook::Installed())) {
+    // A ReShade runtime rebuild re-loads its add-ons: the state survives, but re-push the static/instance
+    // settings gates anyway -- the preset swap's wanted flag lives in the bridge instance and a rebuild
+    // that did replace the state would otherwise leave every live switch off until a settings change.
+    addon::SetFgPresetDesired(static_cast<uint32_t>(g_state->settings.fg_preset));
+    g_state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(g_state->settings).Any()
+                                          || addon::ToRrPresetOverrides(g_state->settings).Any());
+    g_state->bridge.NoteDlssRenderScales(g_state->settings.dlss_render_scale);
+    return true;
+  }
   // Fails when ReShade lacks this API version or ImGui table.
   if (!reshade::register_addon(addon_module, reshade_module)) return false;
   g_state = new AddonState();
@@ -3324,8 +3369,11 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   g_state->poller.Seen(g_state->settings.enabled);
   ApplyProcessSettings(g_state->settings);
   // The live DLSS preset swap's gate (SaveAndApply keeps both current): the ini may carry choices already.
-  g_state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(g_state->settings).Any());
+  g_state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(g_state->settings).Any()
+                                        || addon::ToRrPresetOverrides(g_state->settings).Any());
   g_state->bridge.NoteDlssRenderScales(g_state->settings.dlss_render_scale);
+  addon::SetFgPresetDesired(static_cast<uint32_t>(g_state->settings.fg_preset));
+  addon::EnsureFgPresetHook();  // the watchdog waits for nvapi64.dll, before any NvAPI caller
 
   const auto module_path = [](HMODULE handle) {
     std::wstring path(32768u, L'\0');

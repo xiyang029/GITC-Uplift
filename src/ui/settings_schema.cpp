@@ -19,6 +19,8 @@ constexpr std::array<std::string_view, 5> MOTION_VECTORS = {"Auto", "DLSS", "Lau
 constexpr std::array<std::string_view, 7> QUALITY_MODES = {"Game", "Performance", "Balanced", "Quality",
                                                            "Ultra Performance", "Ultra Quality", "DLAA"};
 constexpr std::array<std::string_view, 5> PRESETS = {"Game", "J", "K", "L", "M"};
+constexpr std::array<std::string_view, 4> FG_PRESETS = {"Game", "A", "B", "C"};
+constexpr std::array<std::string_view, 4> RR_PRESETS = {"Game", "D", "E", "F"};
 constexpr std::array<std::string_view, 3> AUTO_EXPOSURE = {"Game", "Off", "On"};
 constexpr std::array<std::string_view, 6> ENCODINGS = {"Auto", "Linear BT.709", "sRGB", "BT.2100 PQ", "scRGB", "scRGB-nl"};
 constexpr std::array<std::string_view, 3> DEPTH_DIRECTIONS = {"Game", "Normal", "Inverted"};
@@ -76,6 +78,17 @@ constexpr std::string_view RENDER_SCALE_TOOLTIP =
     "This quality mode's render size as a percent of the output (e.g. Ultra Performance at 40 instead of its 33). Applied by answering the "
     "game's DLSS size queries, so it lands when the game next re-queries: a quality-mode flip or a resolution change, a restart if it never "
     "does. 100 keeps the game's own choice.";
+
+constexpr std::string_view FG_PRESET_TOOLTIP =
+    "The DLSS Frame Generation model preset (A/B/C; C is 310.9.16+'s lighter performance mode, older runtimes ignore it). Applied through the "
+    "game's driver-settings read, which also beats a NVIDIA App frame-generation override. The provider reads this once, at its first FG "
+    "feature, so a change needs a restart. An add-on that owns the FG preset pipeline (MFG-Unlocker and the like) serves its own choice and wins "
+    "over this one.";
+
+constexpr std::string_view RR_PRESET_TOOLTIP =
+    "The Ray Reconstruction render preset, applied to every quality mode: D is the transformer, E the latest transformer (a game using the DoF "
+    "guide needs it), F the RR2 default. Switches live in game, like the SR presets -- Uplift evaluates its own Ray Reconstruction feature with the "
+    "chosen preset. Game keeps the game's choice.";
 
 constexpr std::array<std::string_view, 2> LANGUAGES = {"English", "简体中文"};
 
@@ -805,75 +818,101 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     // own feature, so nothing is owned or released here.
     {
         .key = "DLSSRenderScaleDLAA",
-        .kind = SettingKind::FLOAT,
+        .kind = SettingKind::UINT,
         .section = SettingSection::ADVANCED,
         .label = "DLAA render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
-        .min = 10.0,
+        .min = 33.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[0]); },
-        .set = [](Settings& s, double v) { s.dlss_render_scale[0] = static_cast<float>(v); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[0] = static_cast<uint32_t>(v); },
     },
     {
         .key = "DLSSRenderScaleUltraQuality",
-        .kind = SettingKind::FLOAT,
+        .kind = SettingKind::UINT,
         .section = SettingSection::ADVANCED,
         .label = "Ultra Quality render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
-        .min = 10.0,
+        .min = 33.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[1]); },
-        .set = [](Settings& s, double v) { s.dlss_render_scale[1] = static_cast<float>(v); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[1] = static_cast<uint32_t>(v); },
     },
     {
         .key = "DLSSRenderScaleQuality",
-        .kind = SettingKind::FLOAT,
+        .kind = SettingKind::UINT,
         .section = SettingSection::ADVANCED,
         .label = "Quality render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
-        .min = 10.0,
+        .min = 33.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[2]); },
-        .set = [](Settings& s, double v) { s.dlss_render_scale[2] = static_cast<float>(v); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[2] = static_cast<uint32_t>(v); },
     },
     {
         .key = "DLSSRenderScaleBalanced",
-        .kind = SettingKind::FLOAT,
+        .kind = SettingKind::UINT,
         .section = SettingSection::ADVANCED,
         .label = "Balanced render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
-        .min = 10.0,
+        .min = 33.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[3]); },
-        .set = [](Settings& s, double v) { s.dlss_render_scale[3] = static_cast<float>(v); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[3] = static_cast<uint32_t>(v); },
     },
     {
         .key = "DLSSRenderScalePerformance",
-        .kind = SettingKind::FLOAT,
+        .kind = SettingKind::UINT,
         .section = SettingSection::ADVANCED,
         .label = "Performance render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
-        .min = 10.0,
+        .min = 33.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[4]); },
-        .set = [](Settings& s, double v) { s.dlss_render_scale[4] = static_cast<float>(v); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[4] = static_cast<uint32_t>(v); },
     },
     {
         .key = "DLSSRenderScaleUltraPerformance",
-        .kind = SettingKind::FLOAT,
+        .kind = SettingKind::UINT,
         .section = SettingSection::ADVANCED,
         .label = "Ultra Performance render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
-        .min = 10.0,
+        .min = 33.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[5]); },
-        .set = [](Settings& s, double v) { s.dlss_render_scale[5] = static_cast<float>(v); },
+        .set = [](Settings& s, double v) { s.dlss_render_scale[5] = static_cast<uint32_t>(v); },
+    },
+    // The DLSS-FG model preset (2026-10-25, addon/fg_preset.hpp): one choice, applied by rewriting the
+    // game's driver-settings read for the FG preset id after the driver answered -- so it also beats a
+    // NVIDIA App override. The provider caches its first read, hence the restart.
+    {
+        .key = "DLSSFGPreset",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::ADVANCED,
+        .label = "FG preset",
+        .tooltip = FG_PRESET_TOOLTIP,
+        .choices = FG_PRESETS,
+        .get = [](const Settings& s) { return static_cast<double>(s.fg_preset); },
+        .set = [](Settings& s, double v) { s.fg_preset = static_cast<FgPresetOverride>(static_cast<uint32_t>(v)); },
+    },
+    // The Ray Reconstruction render preset (2026-10-25): one choice for every mode -- RR's default
+    // model does not vary by mode (all modes default to F/RR2). The live preset swap writes all six
+    // RayReconstruction.* keys with it for an RR feature.
+    {
+        .key = "RayReconstructionPreset",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::ADVANCED,
+        .label = "RR preset",
+        .tooltip = RR_PRESET_TOOLTIP,
+        .choices = RR_PRESETS,
+        .get = [](const Settings& s) { return static_cast<double>(s.rr_preset); },
+        .set = [](Settings& s, double v) { s.rr_preset = FromIndex<RrPresetOverride>(v); },
     },
     {
         .key = "DLSSAutoExposure",

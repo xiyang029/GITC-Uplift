@@ -261,6 +261,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Every setting returns to its default, the hotkey included; Enable stays as it is.", "所有设置都将恢复默认值，包括快捷键；“启用”状态保持不变。"},
     {"Experimental NR 310.9.16 control, modes 0-3; default 1. Mode 0 uses a different mask combination and can produce little visible change. This is separate from Uplift's NR mask. NR 310.8 ignores it. Full mask-combination behavior on the Ada compatibility runtime remains under validation.", "NR 310.9.16 的实验性选项，模式为 0–3，默认值为 1。模式 0 使用不同的蒙版组合方式，画面变化可能不明显。此项与 Uplift 的 NR 蒙版相互独立；NR 310.8 会忽略此项。Ada 兼容运行时的完整蒙版组合行为仍在验证中。"},
     {"FAILED", "失败"},
+    {"FG preset", "FG 预设"},
     {"Face protection", "面部保护"},
     {"Fades NR's colour change where the image is near black, so noise does not turn into green or grey specks.", "在接近黑色的区域逐渐减弱 NR 的色彩变化，避免噪点变成绿色或灰色斑点。"},
     {"Fall-off length X (%)", "过渡带长度 X（%）"},
@@ -668,6 +669,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Quality preset", "质量预设"},
     {"Quality render scale", "质量渲染比例"},
     {"QueryVideoMemoryInfo failed with {:#010x}; reporting unlimited headroom", "QueryVideoMemoryInfo 调用失败：{:#010x}；将报告可用显存不受限"},
+    {"RR preset", "RR 预设"},
     {"Raise it if the mask has holes inside faces; lower it if it spreads past them.", "如果面部内部的蒙版有缺口，请调高；如果蒙版扩散到面部以外，请调低。"},
     {"Raise it if the mask looks blotchy or flickers; lower it if it spreads past faces.", "如果蒙版呈斑驳状或闪烁，请调高；如果蒙版扩散到面部以外，请调低。"},
     {"Ray Reconstruction", "光线重建（Ray Reconstruction）"},
@@ -759,6 +761,11 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Suspended: game needs VRAM", "已暂停：游戏需要更多显存"},
     {"Switch", "切换"},
     {"Switching from Present: NR starts here once the Present path has released it", "正在从后处理切换：后处理路径释放 NR 后，将在此阶段启动"},
+    {"The DLSS Frame Generation model preset (A/B/C; C is 310.9.16+'s lighter performance mode, older runtimes ignore it). Applied through the "
+     "game's driver-settings read, which also beats a NVIDIA App frame-generation override. The provider reads this once, at its first FG "
+     "feature, so a change needs a restart. An add-on that owns the FG preset pipeline (MFG-Unlocker and the like) serves its own choice and "
+     "wins over this one.",
+     "DLSS 帧生成的模型预设（A/B/C；C 是 310.9.16+ 的轻量性能模式，旧运行时会忽略）。通过游戏的驱动设置读取来应用，因此也能压过 NVIDIA App 的帧生成覆盖。提供程序只在其第一次创建 FG 功能时读取一次，更改后需重启。接管 FG 预设管线的插件（MFG-Unlocker 等）会供给自己的选择并优先于此项。"},
     {"The DLSS placements are latched off after a device removal: Clear latch, then restart the game", "GPU 设备移除后，DLSS 阶段已锁定为关闭：请清除锁定并重启游戏"},
     {"The DLSS render preset for this quality mode (J-M). Switches live in game: Uplift evaluates its own DLSS feature with the chosen "
      "preset, and each switch briefly hitches while DLSS loads the model. Game keeps the game's choice.",
@@ -776,6 +783,9 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"The OpenGL bridge stopped: {}", "OpenGL 中继已停止：{}"},
     {"The OpenGL bridge stopped: {}. Restart the game to use NR again", "OpenGL 中继已停止：{}。请重启游戏以再次使用 NR"},
     {"The OpenGL context could not import the helper's shared fences (glImportSemaphoreWin32HandleEXT set GL error {:#06x}); frames cross through CPU-ordered shared textures instead", "OpenGL 上下文无法导入辅助进程共享的栅栏（glImportSemaphoreWin32HandleEXT 返回 GL 错误 {:#06x}）；帧将改为通过 CPU 排序的共享纹理传递"},
+    {"The Ray Reconstruction render preset, applied to every quality mode: D is the transformer, E the latest transformer (a game using the DoF "
+     "guide needs it), F the RR2 default. Switches live in game, like the SR presets -- Uplift evaluates its own Ray Reconstruction feature with the "
+     "chosen preset. Game keeps the game's choice.", "光线重构（Ray Reconstruction）的渲染预设，应用于所有画质挡位：D 为 transformer，E 为最新 transformer（使用 DoF 引导的游戏需要它），F 为 RR2 默认模型。与 SR 预设一样可在游戏内实时切换——Uplift 会以选定的预设评估自己的光线重构功能。选择“游戏”则保留游戏自身的预设。"},
     {"The Vulkan bridge stopped: NR at Present runs in Uplift's helper process", "NR 在 Uplift 辅助进程的后处理运行"},
     {"The Vulkan bridge stopped: NR at Present runs natively on the game's device", "NR 在游戏设备的后处理运行"},
     {"The Vulkan bridge stopped: the game's Vulkan device was destroyed", "游戏的 Vulkan 设备已销毁"},

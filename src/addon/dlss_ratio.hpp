@@ -20,9 +20,9 @@ namespace uplift::addon {
 // The planted callback runs on a game thread with none of Uplift's locks held: the scales are atomics,
 // the per-block original-callback map is a leaf lock.
 
-// The panel's per-mode render scales, percent of the output size (100 = the game's choice), indexed by
-// ui::DlssPresetMode. Pushed by the add-on at init and on every SaveAndApply.
-void SetDlssRenderScales(const std::array<float, 6>& scales_percent);
+// The panel's per-mode render scales, whole percent of the output size (100 = the game's choice),
+// indexed by ui::DlssPresetMode. Pushed by the add-on at init and on every SaveAndApply.
+void SetDlssRenderScales(const std::array<uint32_t, 6>& scales_percent);
 
 // Plants the override's callback into `block` (the core's cached DLSS capability block, seen through
 // the hooked GetCapabilityParameters). Idempotent per block; keeps the snippet's own callback for

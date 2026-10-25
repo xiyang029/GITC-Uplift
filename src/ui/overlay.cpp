@@ -905,7 +905,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     gui::TextWrapped("Native inputs: depth and bidirectional distortion are not bound. Native guided upsampling is not enabled; reduced resolution uses Uplift's own upsampling.");
     gui::TextWrapped("Native mask blend mode defaults to 1. Full mask-combination behavior on the Ada compatibility runtime remains under validation. Global tone and native Performance have no verified effect.");
     // Plan 14: the engine's own lines, which the rows no longer show under themselves.
-    for (const std::string* line : {&view.placement_line, &view.chain_line, &view.motion_line, &view.work_line, &view.exposure_line}) {
+    for (const std::string* line : {&view.placement_line, &view.chain_line, &view.dlss_mode_line, &view.motion_line, &view.work_line, &view.exposure_line}) {
       if (!line->empty()) {
         gui::TextUnformatted(line->c_str());
       }

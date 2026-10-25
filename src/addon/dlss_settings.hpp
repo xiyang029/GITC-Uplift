@@ -15,5 +15,7 @@ namespace uplift::addon {
 // render preset value (10-13) per DLSS mode, 0 where the choice is Game. Only the preset keys -- the
 // quality mode and auto-exposure overrides stay inert (see ToSrOverrides).
 [[nodiscard]] ngx_hooks::SrOverrides ToPresetOverrides(const ui::Settings& settings);
+// The panel's RayReconstructionPreset<Mode> choices, same shape (render preset values, 0 = Game).
+[[nodiscard]] ngx_hooks::SrOverrides ToRrPresetOverrides(const ui::Settings& settings);
 
 }  // namespace uplift::addon

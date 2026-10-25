@@ -50,6 +50,7 @@ void NgxBridge::BeforeCreate(ngx_hooks::CreateCall* call) {
   // already holds it (spec §6.1: Uplift's runtime creates no SuperSampling feature today, but this
   // must hold even if a future NR version ever did).
   if (routing_.IsOwnCode(call->caller)) return;
+  EnsureFgPresetHook();  // early: the FG provider's single preset read can precede the first present
   if (call->feature != NVSDK_NGX_Feature_SuperSampling || call->parameters == nullptr) return;
   const ngx_hooks::SrOverrides overrides = routing_.Overrides();
   if (overrides.Any()) {
@@ -82,6 +83,12 @@ void NgxBridge::AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle*
     snapshot.render = call.submitted->render;
     snapshot.output = call.submitted->output;
   }
+  // The FG preset's live switch keys off the game re-creating its frame-generation feature: log
+  // those creates, they are rare.
+  if (call.feature == NVSDK_NGX_Feature_FrameGeneration) {
+    nr::Logf(nr::LogLevel::INFO, "the game created its DLSS-FG feature ({}x{} -> {}x{}, handle {})", snapshot.render.width,
+             snapshot.render.height, snapshot.output.width, snapshot.output.height, static_cast<const void*>(handle));
+  }
   registry_.OnCreate(handle, call.feature, device, snapshot, call.api);
 }
 
@@ -98,7 +105,7 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
       const std::optional<ngx_hooks::FeatureRecord> record = registry_.Find(call->handle);
       if (record && ngx_hooks::KindOf(record->feature) == ngx_hooks::FeatureKind::UPSCALER
           && registry_.MainHandle(device, routing_.SwapchainSize(device), call->api) == call->handle) {
-        const NVSDK_NGX_Handle* const swap = swap_.BeforeEvaluate(call->api, device, call->list, call->handle, *record);
+        const NVSDK_NGX_Handle* const swap = swap_.BeforeEvaluate(call->api, device, call->list, call->parameters, call->handle, *record);
         if (swap != nullptr && swap != call->handle) {
           call->eval_handle = swap;  // the original evaluate runs with the swap; AfterEvaluate still sees the game's handle
         }
@@ -279,8 +286,15 @@ std::optional<ngx_hooks::FeatureRecord> NgxBridge::AdoptD3D11Upscaler(const NVSD
 }
 
 void NgxBridge::BeforeRelease(NVSDK_NGX_Handle* handle) {
+  const std::optional<ngx_hooks::FeatureRecord> record = registry_.Find(handle);
+  const bool fg = (record && record->feature == NVSDK_NGX_Feature_FrameGeneration);
   swap_.BeforeRelease(handle);  // the preset swap's feature goes with the game's (its own release, invisible to the hooks)
   registry_.OnRelease(handle);
+  // The FG preset's live switch: the last frame-generation feature going away is the one quiescent
+  // moment where the provider's cached configuration can be reset for the panel's next choice.
+  if (fg && registry_.LiveCount(ngx_hooks::FeatureKind::FRAME_GENERATION) == 0u) {
+    NotifyFgQuiescent();
+  }
 }
 
 void NgxBridge::BeforeCoreShutdown(ngx_hooks::NgxApi api, void* device, const void* caller) {

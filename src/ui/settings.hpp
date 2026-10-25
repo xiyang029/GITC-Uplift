@@ -97,6 +97,24 @@ enum class DlssPresetMode : uint32_t {
   COUNT = 6u,
 };
 
+// The Ray Reconstruction render preset (2026-10-25): D is the transformer, E the latest transformer
+// (required for the DoF guide), F the RR2 default; A-C are retired. Values are the wire values.
+enum class RrPresetOverride : uint32_t {
+  GAME = 0u,
+  D = 1u,
+  E = 2u,
+  F = 3u,
+};
+
+// The DLSS-FG model preset (2026-10-25, addon/fg_preset.hpp): A/B/C are the provider's model presets,
+// read from a driver setting at its first feature create; Game keeps the game's/driver's own.
+enum class FgPresetOverride : uint32_t {
+  GAME = 0u,
+  A = 1u,
+  B = 2u,
+  C = 3u,
+};
+
 enum class AutoExposureOverride : uint32_t {
   GAME = 0u,
   OFF = 1u,
@@ -230,7 +248,13 @@ struct Settings {
   std::array<DlssPresetOverride, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_presets = {};
   // The render scale override (2026-10-25, addon/dlss_ratio.hpp): each mode's render size as percent of
   // the output, 100 = the game's choice. Applied at the game's next OptimalSettings query.
-  std::array<float, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_render_scale {100.f, 100.f, 100.f, 100.f, 100.f, 100.f};
+  std::array<uint32_t, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_render_scale {100u, 100u, 100u, 100u, 100u, 100u};
+  // The Ray Reconstruction render preset (the swap writes the RR keys for an RR feature). One choice
+  // for every mode: RR's default model does not vary by mode (all modes default to F/RR2).
+  RrPresetOverride rr_preset = RrPresetOverride::GAME;
+
+  // The DLSS-FG model preset (addon/fg_preset.hpp): applied through the driver-setting read filter.
+  FgPresetOverride fg_preset = FgPresetOverride::GAME;
   AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
   bool present_with_frame_gen = false;
   bool allow_cross_queue_passes = false;
