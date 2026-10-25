@@ -185,6 +185,10 @@ nvapi::Status __cdecl SleepDetour(IUnknown* device) {
         }
       } else {
         g_cap_last_qpc = now;  // no precise wait on this system: resync, do not fake the anchor
+        static std::atomic_bool wait_warned{false};
+        if (!wait_warned.exchange(true, std::memory_order_relaxed)) {
+          nr::Logf(nr::LogLevel::WARN, "reflex: the enforced cap's wait failed; the frames since it started were not held (the cap resyncs each time)");
+        }
       }
     } else {
       g_cap_last_qpc = now;
@@ -295,8 +299,8 @@ nvapi::Status __cdecl SetSleepModeDetour(IUnknown* device, nvapi::SleepModeParam
     }
   } else {
     if (log_this_call) {
-      nr::Logf(nr::LogLevel::INFO, "reflex: rewritten submission accepted: mode {} boost {} interval {} us -> {}",
-               rewritten->b_low_latency_mode, rewritten->b_low_latency_boost, rewritten->minimum_interval_us, result);
+      nr::Logf(nr::LogLevel::INFO, "reflex: rewritten submission accepted: mode {} boost {} interval {} us",
+               rewritten->b_low_latency_mode, rewritten->b_low_latency_boost, rewritten->minimum_interval_us);
     }
   }
   g_refresh_pending.store(false, std::memory_order_relaxed);
@@ -365,8 +369,13 @@ void InstallReflexHook() {
 }  // namespace
 
 void SetDesired(ReflexModeOverride mode, uint32_t fps_cap) {
-  g_desired_mode.store(static_cast<uint32_t>(mode), std::memory_order_relaxed);
-  g_desired_cap_fps.store(fps_cap > 1000u ? 0u : fps_cap, std::memory_order_relaxed);
+  const uint32_t new_mode = static_cast<uint32_t>(mode);
+  const uint32_t new_cap = fps_cap > 1000u ? 0u : fps_cap;
+  // Every settings change re-pushes all live choices (PushFgRuntimeChoices), so an unrelated row's
+  // drag would otherwise re-submit SetSleepMode on each frame; only a different choice needs one.
+  const uint32_t previous_mode = g_desired_mode.exchange(new_mode, std::memory_order_relaxed);
+  const uint32_t previous_cap = g_desired_cap_fps.exchange(new_cap, std::memory_order_relaxed);
+  if (previous_mode == new_mode && previous_cap == new_cap) return;
   g_refresh_pending.store(true, std::memory_order_release);  // RefreshFromPanel (the Present poll) submits it
 }
 
@@ -403,15 +412,14 @@ void RefreshFromPanel() {
   }
   if (cap_us != 0u && fields->minimum_interval_us < cap_us) fields->minimum_interval_us = cap_us;
   const nvapi::Status result = original(device, fields);
-  if (result != nvapi::kOk) {
-    nr::Logf(nr::LogLevel::INFO, "reflex: live refresh submitted mode {} interval {} us -> {}",
-             fields->b_low_latency_mode, fields->minimum_interval_us, result);
-  }
+  // Once per panel save: the values submitted live and the driver's verdict.
+  nr::Logf(nr::LogLevel::INFO, "reflex: live refresh submitted mode {} boost {} interval {} us -> {}",
+           fields->b_low_latency_mode, fields->b_low_latency_boost, fields->minimum_interval_us, result);
 }
 
 // Every two seconds: sample the driver's sleep status for the live FG multiplier (the enforced
-// cap divides by it) and warn once when the game never calls the Reflex sleep at all -- the cap
-// cannot bite there. The per-sample line itself was noise in the log.
+// cap divides by it), log the driver's held mode and interval, and warn once when the game never
+// calls the Reflex sleep at all -- the cap cannot bite there.
 void LogSleepStatusThrottled() {
   static std::atomic<uint64_t> last_log_ms{0u};
   const uint64_t now = GetTickCount64();
@@ -430,7 +438,23 @@ void LogSleepStatusThrottled() {
   }
   // The enforced cap divides by the live multiplier: the sleep hook runs per source frame.
   if (sample.sleep.frame_generation_multiplier >= 1u && sample.sleep.frame_generation_multiplier <= 8u) {
-    g_live_fg_multiplier.store(sample.sleep.frame_generation_multiplier, std::memory_order_relaxed);
+    const uint32_t previous = g_live_fg_multiplier.exchange(sample.sleep.frame_generation_multiplier,
+                                                            std::memory_order_relaxed);
+    // The submitted interval is the cap's source-rate value, so a new multiplier rescales it: re-submit
+    // once at the next Present instead of leaving the driver on the old one until the game calls. With
+    // nothing submitted yet there is nothing to resubmit: the detour reads the new value itself.
+    if (previous != sample.sleep.frame_generation_multiplier && g_desired_cap_fps.load(std::memory_order_relaxed) != 0u
+        && g_seen_device.load(std::memory_order_acquire) != nullptr) {
+      g_refresh_pending.store(true, std::memory_order_release);
+    }
+  }
+  // The driver's held mode and interval, logged only while the panel overrides something.
+  if (g_desired_mode.load(std::memory_order_relaxed) != static_cast<uint32_t>(ReflexModeOverride::GAME)
+      || g_desired_cap_fps.load(std::memory_order_relaxed) != 0u) {
+    nr::Logf(nr::LogLevel::INFO, "reflex: driver status: mode {} interval {} us, game sleep {}, FG x{}",
+             static_cast<uint32_t>(sample.sleep.low_latency_mode), sample.sleep.sleep_interval_us,
+             static_cast<uint32_t>(sample.sleep.game_sleep),
+             static_cast<uint32_t>(sample.sleep.frame_generation_multiplier));
   }
   // The cap only bites when something calls the Reflex sleep each frame; say so once instead of
   // letting a silently ineffective cap look like a broken feature.

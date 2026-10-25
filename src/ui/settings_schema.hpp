@@ -42,7 +42,7 @@ inline constexpr uint32_t NEXT_DLSS_CREATE = 1u << 2u;  // applies when the game
 inline constexpr uint32_t GREYED = 1u << 3u;            // shown read-only: no effect in NR 310.8
 inline constexpr uint32_t PASS_SWITCH = 1u << 4u;       // a pass's look-sharing, stage or network selection: always written, shown while it follows pass 1
 inline constexpr uint32_t BOOKKEEPING = 1u << 5u;       // hidden state Uplift writes itself: Restore all keeps it
-inline constexpr uint32_t APPLY_ON_RELEASE = 1u << 6u;  // a SliderInt row: shows its value while held, applies it once on release
+inline constexpr uint32_t APPLY_ON_RELEASE = 1u << 6u;  // a UINT row: shows its value while held/typed, applies it once on release or focus loss
 // Split chain (2026-10-10): a pass's "Runs at". Never part of the Defaults view: moving a pass to another stage rebuilds NR's features.
 inline constexpr uint32_t PASS_STAGE = 1u << 7u;
 // 2026-10-17: a FLOAT whose slider's range is its meaning (a share of the output, a blend): Ctrl+click cannot type past the slider's end.

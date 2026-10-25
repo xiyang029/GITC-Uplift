@@ -952,6 +952,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 1000.0,
         .step = 1,
         .fast_step = 32,
+        // One live SetSleepMode / MFG submission per edit, not one per digit.
+        .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.dynamic_mfg_target_fps); },
         .set = [](Settings& s, double v) { s.dynamic_mfg_target_fps = static_cast<uint32_t>(v); },
     },
@@ -980,6 +982,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 1000.0,
         .step = 1,
         .fast_step = 32,
+        .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.reflex_fps_cap); },
         .set = [](Settings& s, double v) { s.reflex_fps_cap = static_cast<uint32_t>(v); },
     },

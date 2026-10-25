@@ -182,11 +182,14 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         // A row of whole numbers draws as the panel's own slider; only a value that may be typed past 100
         // (the VRAM margin) keeps ImGui's input, where a slider would have no useful range.
         bool active = false;
-        const bool edited =
-            (descriptor.max > 100.0
-                 ? gui::InputInt(hidden.c_str(), &value, descriptor.step, descriptor.fast_step)
-                 : widgets::SliderInt(hidden.c_str(), &value, static_cast<int>(descriptor.min),
-                                      static_cast<int>(descriptor.max), nullptr, &active));
+        bool edited = false;
+        if (descriptor.max > 100.0) {
+          edited = gui::InputInt(hidden.c_str(), &value, descriptor.step, descriptor.fast_step);
+          active = ImGui::IsItemActive();  // a typed row reports its focus, so APPLY_ON_RELEASE waits for the field to let go
+        } else {
+          edited = widgets::SliderInt(hidden.c_str(), &value, static_cast<int>(descriptor.min),
+                                      static_cast<int>(descriptor.max), nullptr, &active);
+        }
         if (!on_release) {
           if (edited) {
             descriptor.set(*settings, std::clamp(static_cast<double>(value), descriptor.min, descriptor.max));
