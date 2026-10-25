@@ -117,10 +117,13 @@ NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* block) 
   // The Scale keys stay untouched: their direction flipped across SDK versions (render/output once,
   // output/render later), and a game reading the one we did not write computes a quarter- or fourfold
   // texture and samples out of bounds. The pixels in Out* are unambiguous either way.
-  // Every answer that carries the panel's ratio is logged: the game re-queries rarely, and these lines
-  // are the whole evidence that the override reached it (the first pass-through answer is logged above).
-  nr::Logf(nr::LogLevel::INFO, "the DLSS render scale override answered: {}x{} -> {}x{} (scale {:.2f}, {})", width, height, optimal_w, optimal_h,
-           scale, (original != nullptr ? "rescaled the snippet's answer" : "DLSS's own table"));
+  // The first answer that carries the panel's ratio is the evidence that the override reached the game;
+  // a runtime rebuild asks again with the same sizes, so later answers add nothing.
+  static std::atomic<bool> answered_logged{false};
+  if (!answered_logged.exchange(true, std::memory_order_relaxed)) {
+    nr::Logf(nr::LogLevel::INFO, "the DLSS render scale override answered: {}x{} -> {}x{} (scale {:.2f}, {})", width, height, optimal_w, optimal_h,
+             scale, (original != nullptr ? "rescaled the snippet's answer" : "DLSS's own table"));
+  }
   return NVSDK_NGX_Result_Success;
 }
 

@@ -64,6 +64,8 @@ struct SettingDescriptor {
   std::string_view enable_warning;  // BOOL: confirmation text shown before a checkbox enables the setting
   double min = 0.0;
   double max = 1.0;
+  int step = 64;       // the overlay's +/- and drag step for rows above 100 (the typed-int path)
+  int fast_step = 512;  // Ctrl: the same, accelerated
   std::optional<double> special;              // one valid value outside [min, max]: 0 = automatic, -1 = same as Structure
   double ui_max = 0.0;                        // FLOAT: the slider's end when below `max`; 0 = max. Ctrl+click types up to DescriptorMax
   std::span<const std::string_view> choices;  // CHOICE: the labels, in stored-index order

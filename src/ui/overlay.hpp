@@ -27,6 +27,10 @@ struct OverlayView {
   std::string api_line;  // the Direct3D 11/10 bridge's or the helper front's line; empty on native Direct3D 12
   std::string frame_generation_line;     // FormatFrameGenerationLine; empty before a context exists and in 32-bit games
   bool frame_generation_active = false;  // the working card shows frame_generation_line only when this is set
+  // The FG multiplier row: only choices the DLSS-G runtime's own ceiling allows are offered
+  // (generated frames + 1, i.e. 3 = 2x..4x). A stored choice above it stays saved and returns
+  // by itself where it is supported. 6 = the runtime has not said yet: offer every choice.
+  std::size_t fg_multiplier_options = 6;
   bool dlss_latched = false;              // DlssPlacementBlocked: the device-removal latch is set (Plan 19 fix round: or, in a Vulkan game, VulkanNativeNr = 0)
   std::string ui_correction_note;  // Plan 5 (D7): why UI correction does nothing on this placement
   std::string keep_faces_unavailable;  // Keep faces (2026-10-08): non-empty greys its rows, and says why (ui::KeepFacesUnavailable)

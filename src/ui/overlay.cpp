@@ -184,7 +184,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         bool active = false;
         const bool edited =
             (descriptor.max > 100.0
-                 ? gui::InputInt(hidden.c_str(), &value, 64, 512)
+                 ? gui::InputInt(hidden.c_str(), &value, descriptor.step, descriptor.fast_step)
                  : widgets::SliderInt(hidden.c_str(), &value, static_cast<int>(descriptor.min),
                                       static_cast<int>(descriptor.max), nullptr, &active));
         if (!on_release) {
@@ -258,7 +258,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         // Plan 14's settle.
         const bool resolution_row = (descriptor.key == "ResolutionMode" || descriptor.key == "ResolutionAfterDlss"
                                      || descriptor.key == "ResolutionPresent");
-        const size_t count = (std::min)(descriptor.choices.size(), static_cast<size_t>(8));
+        size_t count = (std::min)(descriptor.choices.size(), static_cast<size_t>(8));
         std::array<const char*, 8> labels = {};
         for (size_t index = 0u; index < count; ++index) {
           labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
@@ -294,6 +294,14 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           why[static_cast<size_t>(VulkanNrMode::DIRECT3D_12)] = view.vulkan_d3d12_unavailable;
           if (view.vulkan_nr_running) {
             shown = static_cast<int>(*view.vulkan_nr_running);
+          }
+        } else if (descriptor.key == "FGMultiplier") {
+          // Only what the DLSS-G runtime's ceiling allows is offered (generated frames + 1: 3 = up to
+          // 4x). A stored choice above it stays saved: the row shows Game and the tooltip says so.
+          count = (std::min)(count, view.fg_multiplier_options);
+          if (static_cast<size_t>(shown) >= count) {
+            saved_note = SavedNote(labels[static_cast<size_t>(shown)]);
+            shown = 0;
           }
         }
         widgets::RowLabel(label.c_str(), tip_text);

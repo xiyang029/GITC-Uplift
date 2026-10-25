@@ -33,6 +33,8 @@
 #include "addon/dlss_settings.hpp"
 #include "addon/dlss_summary.hpp"
 #include "addon/fg_preset.hpp"
+#include "addon/reflex_override.hpp"
+#include "addon/sl_fg_hooks.hpp"
 #include "addon/environment.hpp"
 #include "addon/frame_config.hpp"
 #include "addon/frame_trigger.hpp"
@@ -118,6 +120,12 @@ static_assert(static_cast<uint32_t>(api::shader_stage::compute) == state::SHADER
 static_assert(static_cast<uint32_t>(api::pipeline_stage::compute_shader) == state::PIPELINE_STAGE_COMPUTE);
 static_assert(static_cast<uint32_t>(api::descriptor_type::constant_buffer) == state::DESCRIPTOR_CONSTANT_BUFFER);
 static_assert(static_cast<uint32_t>(api::descriptor_type::acceleration_structure) == state::DESCRIPTOR_ACCELERATION_STRUCTURE);
+// The Reflex row's choices are the add-on's mode in order (settings_schema.cpp's REFLEX_MODES);
+// PushFgRuntimeChoices hands the stored value over as a number.
+static_assert(static_cast<uint32_t>(ui::ReflexOverride::GAME) == static_cast<uint32_t>(addon::reflex::ReflexModeOverride::GAME));
+static_assert(static_cast<uint32_t>(ui::ReflexOverride::ON) == static_cast<uint32_t>(addon::reflex::ReflexModeOverride::ON));
+static_assert(static_cast<uint32_t>(ui::ReflexOverride::BOOST) == static_cast<uint32_t>(addon::reflex::ReflexModeOverride::BOOST));
+static_assert(static_cast<uint32_t>(ui::ReflexOverride::OFF) == static_cast<uint32_t>(addon::reflex::ReflexModeOverride::OFF));
 
 // Plan 17: DiagnosticRemoveDevice presses Retry now itself about a second (at 60 Hz) after a stop that may still be retried.
 constexpr uint32_t DIAGNOSTIC_RETRY_PRESENTS = 60u;
@@ -470,6 +478,26 @@ void ApplyProcessSettings(const ui::Settings& settings) {
   SetEnvironmentVariableW(L"__NGX_SHOW_INDICATOR", (settings.show_nv_indicator ? L"1024" : nullptr));
 }
 
+// The FG multiplier / Dynamic MFG / Reflex choices (addon/sl_fg_hooks.hpp, addon/reflex_override.hpp):
+// each is a live switch -- the atomics take the choice and the game's next relevant call applies it.
+void PushFgRuntimeChoices(const ui::Settings& settings) {
+  uint32_t multiplier = 0u;
+  switch (settings.fg_multiplier) {
+    case ui::FgMultiplierOverride::X2: multiplier = 2u; break;
+    case ui::FgMultiplierOverride::X3: multiplier = 3u; break;
+    case ui::FgMultiplierOverride::X4: multiplier = 4u; break;
+    case ui::FgMultiplierOverride::X5: multiplier = 5u; break;
+    case ui::FgMultiplierOverride::X6: multiplier = 6u; break;
+    default: break;
+  }
+  addon::slfg::SetForceMultiplier(multiplier);
+  addon::slfg::SetDynamicMfg(settings.dynamic_mfg, settings.dynamic_mfg_target_fps);
+  // Advertise the provider's full ceiling (5 generated frames = 6x) once any override is wanted.
+  addon::slfg::SetAdvertisedMaxGenerated(settings.dynamic_mfg || multiplier >= 3u ? 5u : 0u);
+  addon::reflex::SetDesired(static_cast<addon::reflex::ReflexModeOverride>(static_cast<uint32_t>(settings.reflex_mode)),
+                            settings.reflex_fps_cap);
+}
+
 // After the overlay or the hotkey changed a setting.
 void SaveAndApply(AddonState* state) {
   state->settings = ui::Sanitized(state->settings);
@@ -485,6 +513,7 @@ void SaveAndApply(AddonState* state) {
                                       || addon::ToRrPresetOverrides(state->settings).Any());
   state->bridge.NoteDlssRenderScales(state->settings.dlss_render_scale);
   addon::SetFgPresetDesired(static_cast<uint32_t>(state->settings.fg_preset));
+  PushFgRuntimeChoices(state->settings);
 }
 
 // With the add-on's lock held.
@@ -498,6 +527,15 @@ addon::DeviceContext* ContextOf(api::device* device) {
 void PollHooks() {
   g_state->hooks.Poll();
   addon::EnsureFgPresetHook();  // the DLSS-FG preset's driver-setting filter, once nvapi64.dll shows up
+  // The FG multiplier hooks must land before the game asks slGetFeatureFunction for
+  // slDLSSGSetOptions (it asks once, during DLSS-G setup); the Reflex hook before any
+  // SetSleepMode caller.
+  addon::slfg::EnsureSlFgHooks();
+  addon::reflex::EnsureReflexHook();
+  // Live panel changes: re-submit the cached game submissions on the game's present thread.
+  addon::slfg::RefreshFromPanel();
+  addon::reflex::RefreshFromPanel();
+  addon::reflex::LogSleepStatusThrottled();
 }
 
 // Amendment 1: this thread's earlier ExecuteCommandLists calls have returned by its next Uplift event,
@@ -1631,6 +1669,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     const bool vulkan = (device_api == api::device_api::vulkan);
     const bool opengl = (device_api == api::device_api::opengl);  // Plan 12: the same shape as Vulkan, on a GL context
     PollHooks();
+    addon::slfg::NotifyDynamicD3D12(device_api == api::device_api::d3d12);  // Dynamic MFG is D3D12-only
     StampThisThread();
     const auto now = std::chrono::steady_clock::now();
     // Plan 7 (key decision a): the private device D3D12Side made for a new bridge. On the fallback it is D3D12CreateDevice's (ReShade's proxy in a game),
@@ -3001,6 +3040,11 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     // Plan 13 (the user's decision 1): on Vulkan, Before upscaling and After DLSS are explicit choices, offered where native NR can run.
     view.dlss_explicit = (overlay_device_api == api::device_api::vulkan);
     view.cross_queue_passes_available = (sizeof(void*) == 8u && overlay_device_api == api::device_api::d3d12);
+    // The DLSS-G runtime's own multiplier ceiling: the FG row offers only what it allows, and the
+    // advertisement site never raises the game's selector above it either. Unknown yet: offer all.
+    if (const uint32_t generated_max = addon::slfg::GeneratedFramesCeiling(); generated_max != 0u) {
+      view.fg_multiplier_options = (std::min)(static_cast<size_t>(6), static_cast<size_t>(generated_max) + 1u);
+    }
     // Plan 14 (design §1): Setup's facts. The stored preference here; what is possible and what runs below, per path; the draw resolves them.
     ui::SetupFacts facts;
     std::string after_dlss_problem;  // Plan 18: Setup's facts view these; they outlive FinishSetup
@@ -3354,6 +3398,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     g_state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(g_state->settings).Any()
                                           || addon::ToRrPresetOverrides(g_state->settings).Any());
     g_state->bridge.NoteDlssRenderScales(g_state->settings.dlss_render_scale);
+    PushFgRuntimeChoices(g_state->settings);
     return true;
   }
   // Fails when ReShade lacks this API version or ImGui table.
@@ -3373,7 +3418,10 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
                                         || addon::ToRrPresetOverrides(g_state->settings).Any());
   g_state->bridge.NoteDlssRenderScales(g_state->settings.dlss_render_scale);
   addon::SetFgPresetDesired(static_cast<uint32_t>(g_state->settings.fg_preset));
+  PushFgRuntimeChoices(g_state->settings);
   addon::EnsureFgPresetHook();  // the watchdog waits for nvapi64.dll, before any NvAPI caller
+  addon::slfg::EnsureSlFgHooks();  // and for sl.interposer.dll, before the game asks for the FG functions
+  addon::reflex::EnsureReflexHook();
 
   const auto module_path = [](HMODULE handle) {
     std::wstring path(32768u, L'\0');

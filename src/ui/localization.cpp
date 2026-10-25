@@ -58,6 +58,10 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"<path not representable as UTF-8>", "<路径无法转换为 UTF-8>"},
     {"<path too long to log>", "<路径过长，无法写入日志>"},
     {"A 32-bit game: NR always runs in Uplift's helper process", "32 位游戏的 NR 始终在 Uplift 辅助进程中运行"},
+    {"A final output-FPS ceiling (after frame generation) submitted through Reflex. Needs the game to call the Reflex "
+     "sleep each frame, which some games never do -- the log says so. 0 leaves the game's own limiter alone; a lower "
+     "cap than the game's is always kept.",
+     "通过 Reflex 提交的最终输出帧率上限（插帧之后的帧数）。需要游戏每帧调用 Reflex 等待，部分游戏从不调用——日志会提示这种情况。设为 0 时不干涉游戏自己的限制；若游戏的限制更严格，则始终保持游戏的限制。"},
     {"A soft cap on colour movement, in normalised chroma; 0 is no cap.", "限制颜色移动幅度，以归一化色度表示；0 表示不限制。"},
     {"A soft cap on how far a pixel is brightened; 0 is no cap.", "限制单个像素可被提亮的最大幅度；0 表示不限制。"},
     {"A soft cap on how far a pixel is darkened; 0 is no cap.", "限制单个像素可被压暗的最大幅度；0 表示不限制。"},
@@ -112,6 +116,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Blend", "混合"},
     {"Blend (game to meter)", "混合比例（游戏曝光至测光值）"},
     {"Blend {:.0f} %", "混合 {:.0f} %"},
+    {"Boost", "加速"},
     {"Bounded ratio", "有界比率"},
     {"Brightening", "提亮"},
     {"Budget: Keep faces paused, the game needs VRAM", "显存预算：游戏需要显存，已暂停保留面部"},
@@ -245,6 +250,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Direct3D 9Ex requested; waiting for the first frame", "已请求 Direct3D 9Ex，正在等待首帧"},
     {"Direct3D 9Ex turned off: the last start with it did not reach its first frame", "已关闭 Direct3D 9Ex：上次启用后，游戏未能显示首帧"},
     {"Direct3D 9Ex: the game asks for exclusive fullscreen, which ReShade cannot create as a Direct3D 9Ex device; Uplift runs it as a window of the same size instead (borderless)", "Direct3D 9Ex：游戏请求独占全屏，但 ReShade 无法以 Direct3D 9Ex 设备实现独占全屏；Uplift 将以相同分辨率的无边框窗口运行"},
+    {"Dynamic MFG", "动态多帧生成"},
+    {"Dynamic MFG target FPS", "动态 MFG 目标帧率"},
     {"Each extra pass runs NR again on the previous pass's output, at the full cost of one more pass. Applies when the slider is released.", "每增加一层，NR 就会对上一层的输出再次处理，开销相当于多运行一层 NR。松开滑块后生效。"},
     {"Edge density (%)", "边缘密度（%）"},
     {"Edge falloff (% of height)", "边缘衰减（画面高度百分比）"},
@@ -261,6 +268,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Every setting returns to its default, the hotkey included; Enable stays as it is.", "所有设置都将恢复默认值，包括快捷键；“启用”状态保持不变。"},
     {"Experimental NR 310.9.16 control, modes 0-3; default 1. Mode 0 uses a different mask combination and can produce little visible change. This is separate from Uplift's NR mask. NR 310.8 ignores it. Full mask-combination behavior on the Ada compatibility runtime remains under validation.", "NR 310.9.16 的实验性选项，模式为 0–3，默认值为 1。模式 0 使用不同的蒙版组合方式，画面变化可能不明显。此项与 Uplift 的 NR 蒙版相互独立；NR 310.8 会忽略此项。Ada 兼容运行时的完整蒙版组合行为仍在验证中。"},
     {"FAILED", "失败"},
+    {"FG multiplier", "FG 倍率"},
     {"FG preset", "FG 预设"},
     {"Face protection", "面部保护"},
     {"Fades NR's colour change where the image is near black, so noise does not turn into green or grey specks.", "在接近黑色的区域逐渐减弱 NR 的色彩变化，避免噪点变成绿色或灰色斑点。"},
@@ -306,6 +314,10 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Guided's gain on the change's detail band, its small edits that hug an edge. Below 1 eases NR's sharpening at a reduced resolution; 1 leaves it unchanged. The foveated grid's edges always keep this band at full weight.", "引导升采样对变化细节段（贴着边缘的细小调整）的增益。低于 1 可减轻降分辨率下 NR 的锐化；1 表示不变。边缘压缩（Foveation）的边缘区域始终保持该频段的完整权重。"},
     {"HDR10 HLG output is not supported", "不支持 HDR10 HLG 输出"},
     {"Halo suppression", "光晕抑制"},
+    {"Hands multiplier selection to NVIDIA's Dynamic MFG (DLSS-G 4.5): the provider picks the per-scene multiplier and owns pacing. Needs "
+     "Direct3D 12 and the release-supported Streamline (2.14.1/2.14.16) with DLSS-G (310.9.1/310.9.16); otherwise it stays off and the "
+     "fixed multiplier above applies. Takes priority over the fixed multiplier while active.",
+     "把倍率选择交给 NVIDIA 的动态多帧生成（DLSS-G 4.5）：由提供程序按场景选择倍率并负责帧节奏。需要 Direct3D 12，且 Streamline（2.14.1/2.14.16）与 DLSS-G（310.9.1/310.9.16）均为官方支持的版本组合；否则保持关闭并沿用上方的固定倍率。启用期间优先于固定倍率。"},
     {"Helper", "辅助进程"},
     {"Highlights", "高光"},
     {"Holds each colour channel's change within this many stops of the brightness change; 0 is off.", "限制各颜色通道的变化幅度，使其不超过亮度变化对应的档数；0 表示关闭。"},
@@ -588,6 +600,9 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"NR's recording on the helper's Direct3D 12 device threw; this frame goes without NR", "在辅助进程的 Direct3D 12 设备上记录 NR 命令时发生异常；本帧将不运行 NR"},
     {"NR's recording on the private Direct3D 12 device threw; this frame goes without NR", "在专用 Direct3D 12 设备上记录 NR 命令时发生异常；本帧将不运行 NR"},
     {"NR's result did not come back", "NR 结果未能传回游戏"},
+    {"NVIDIA Reflex, rewritten into the game's own latency calls: On is low latency, Boost also forces maximum GPU clocks, Off disables the "
+     "latency wait (frame generation keeps working). The game's own frame-rate limit is never relaxed. Game keeps the game's/driver's mode.",
+     "NVIDIA Reflex，通过改写游戏自身的延迟调用来应用：On 为低延迟模式，Boost 额外强制 GPU 最高频率，Off 关闭延迟等待（帧生成继续工作）。游戏自身的帧率限制永远不会被放宽。“游戏”保持游戏/驱动自己的模式。"},
     {"NVIDIA's DLSS loaded nvngx_dlssnr.dll from the game's folder before Uplift could (RTX 50 cards do this), and NR cannot run on that copy", "NVIDIA 的 DLSS 在 Uplift 之前从游戏文件夹加载了 nvngx_dlssnr.dll（RTX 50 系列显卡会这样做），NR 无法使用该副本运行"},
     {"NVIDIA's on-screen NR indicator.", "显示 NVIDIA 的屏幕内 NR 指示器。"},
     {"Native", "原生"},
@@ -677,6 +692,8 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"ReShade gave no immediate command list for this queue; NR is skipped until it does", "ReShade 未为此队列提供即时命令列表；在提供前将跳过 NR"},
     {"ReShade's version could not be read: DLSS placement needs ReShade 6.1 or newer", "无法读取 ReShade 版本：DLSS 阶段需要 ReShade 6.1 或更高版本"},
     {"Reduces the dark rings NR leaves next to bright objects. Even darkening across a surface, and shadows beside dark objects, are left alone.", "减少 NR 在明亮物体周围留下的暗环；不会影响表面上均匀的暗部变化，也不会影响暗物体旁的阴影。"},
+    {"Reflex", "Reflex"},
+    {"Reflex FPS cap", "Reflex 帧率上限"},
     {"Relaxed", "宽松"},
     {"Relaxed or Off", "宽松或关闭"},
     {"ReleaseFeature failed: {:#010x}", "ReleaseFeature 调用失败：{:#010x}"},
@@ -813,6 +830,12 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"The centre's width as a share of the screen's width: this part of the image keeps NR's full density at any resolution. A centre wider than the grid is clamped to it, which switches the scaling off. Only after upscaling.", "中心区域的宽度，按占屏幕宽度的比例计：这部分画面在任何分辨率下都保持 NR 的全密度。中心宽度超过网格时会被截断为网格宽度，此时缩放关闭。仅在超分之后生效。"},
     {"The change, against the pixel's own brightness, from which a pixel counts fully as face. Lower it if faces are tinted only in patches; raise it if hair or clothes are tinted too. Always counts as above Mask threshold.", "像素变化达到此阈值后，会被视为完整的面部区域。若面部着色不完整，请调低；若头发或衣物也被着色，请调高。此值始终高于“蒙版阈值”。"},
     {"The device was removed soon after NR ran inside the game's frame.", "NR 在游戏帧内运行后不久，设备即被移除。"},
+    {"The frame rate NVIDIA's Dynamic MFG paces toward. 0 follows the active display refresh rate.",
+     "NVIDIA 动态多帧生成所维持的目标帧率。设为 0 时跟随当前显示器刷新率。"},
+    {"The frame-generation multiplier, forced through the game's own DLSS-G options (Streamline games). Applies live at the game's next "
+     "frame-generation settings call -- toggle frame generation off/on to apply it immediately. Game keeps the game's choice. The override "
+     "never turns frame generation off: if the runtime refuses the count, the game's own request is restored.",
+     "帧生成倍率，通过游戏自身的 DLSS-G 设置项强制应用（Streamline 游戏）。在游戏下一次提交帧生成设置时实时生效——开关一次帧生成可立即应用。“游戏”保持游戏自己的选择。此覆盖绝不会关闭帧生成：若运行时拒绝该倍率，会自动恢复游戏原本的请求。"},
     {"The game passes DLSS no motion vectors", "游戏未向 DLSS 传递运动矢量"},
     {"The game presents from a second queue, where copying DLSS's vectors would stall its render thread", "游戏从第二个队列呈现画面，在该队列复制 DLSS 运动矢量会阻塞渲染线程"},
     {"The game presents from another OpenGL context than the one ReShade's effects run on; NR stays off", "游戏使用的 OpenGL 上下文与 ReShade 效果运行时的上下文不同；NR 将保持关闭"},

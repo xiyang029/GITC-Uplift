@@ -115,6 +115,26 @@ enum class FgPresetOverride : uint32_t {
   C = 3u,
 };
 
+// The FG frame multiplier (2026-10-25, addon/sl_fg_hooks.hpp): forced through the game's
+// slDLSSGSetOptions on Streamline games, live at the next enabled call. Game keeps the game's own.
+enum class FgMultiplierOverride : uint32_t {
+  GAME = 0u,
+  X2 = 1u,
+  X3 = 2u,
+  X4 = 3u,
+  X5 = 4u,
+  X6 = 5u,
+};
+
+// The Reflex mode (2026-10-25, addon/reflex_override.hpp): rewritten into the game's
+// NvAPI_D3D_SetSleepMode calls. Game keeps the game's/driver's own.
+enum class ReflexOverride : uint32_t {
+  GAME = 0u,
+  ON = 1u,
+  BOOST = 2u,
+  OFF = 3u,
+};
+
 enum class AutoExposureOverride : uint32_t {
   GAME = 0u,
   OFF = 1u,
@@ -255,6 +275,13 @@ struct Settings {
 
   // The DLSS-FG model preset (addon/fg_preset.hpp): applied through the driver-setting read filter.
   FgPresetOverride fg_preset = FgPresetOverride::GAME;
+  // The FG multiplier and Dynamic MFG (addon/sl_fg_hooks.hpp) and the Reflex override
+  // (addon/reflex_override.hpp); each applies live on the game's next relevant call.
+  FgMultiplierOverride fg_multiplier = FgMultiplierOverride::GAME;
+  bool dynamic_mfg = false;
+  uint32_t dynamic_mfg_target_fps = 0u;  // 0 = the display's refresh rate
+  ReflexOverride reflex_mode = ReflexOverride::GAME;
+  uint32_t reflex_fps_cap = 0u;  // 0 = no cap; an output-FPS cap submitted through Reflex
   AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
   bool present_with_frame_gen = false;
   bool allow_cross_queue_passes = false;

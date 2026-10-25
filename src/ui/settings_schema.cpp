@@ -20,6 +20,8 @@ constexpr std::array<std::string_view, 7> QUALITY_MODES = {"Game", "Performance"
                                                            "Ultra Performance", "Ultra Quality", "DLAA"};
 constexpr std::array<std::string_view, 5> PRESETS = {"Game", "J", "K", "L", "M"};
 constexpr std::array<std::string_view, 4> FG_PRESETS = {"Game", "A", "B", "C"};
+constexpr std::array<std::string_view, 6> FG_MULTIPLIERS = {"Game", "2x", "3x", "4x", "5x", "6x"};
+constexpr std::array<std::string_view, 4> REFLEX_MODES = {"Game", "On", "Boost", "Off"};
 constexpr std::array<std::string_view, 4> RR_PRESETS = {"Game", "D", "E", "F"};
 constexpr std::array<std::string_view, 3> AUTO_EXPOSURE = {"Game", "Off", "On"};
 constexpr std::array<std::string_view, 6> ENCODINGS = {"Auto", "Linear BT.709", "sRGB", "BT.2100 PQ", "scRGB", "scRGB-nl"};
@@ -44,6 +46,20 @@ constexpr std::array<std::string_view, 2> ADAPT_MODES = {"Off", "Smooth"};
 constexpr std::array<std::string_view, 4> PRIMARIES = {"Auto", "BT.709", "BT.2020", "AP1 (ACEScg)"};
 constexpr std::array<std::string_view, 2> NEURAL_TRANSFERS = {"Bounded ratio", "Consistent"};
 constexpr std::array<std::string_view, 3> PEDESTAL_MODES = {"Off", "Auto", "Always"};
+
+constexpr std::string_view FG_MULTIPLIER_TOOLTIP =
+    "The frame-generation multiplier, forced through the game's own DLSS-G options (Streamline games). Applies live at the game's next "
+    "frame-generation settings call -- toggle frame generation off/on to apply it immediately. Game keeps the game's choice. The override "
+    "never turns frame generation off: if the runtime refuses the count, the game's own request is restored.";
+
+constexpr std::string_view DYNAMIC_MFG_TOOLTIP =
+    "Hands multiplier selection to NVIDIA's Dynamic MFG (DLSS-G 4.5): the provider picks the per-scene multiplier and owns pacing. Needs "
+    "Direct3D 12 and the release-supported Streamline (2.14.1/2.14.16) with DLSS-G (310.9.1/310.9.16); otherwise it stays off and the "
+    "fixed multiplier above applies. Takes priority over the fixed multiplier while active.";
+
+constexpr std::string_view REFLEX_MODE_TOOLTIP =
+    "NVIDIA Reflex, rewritten into the game's own latency calls: On is low latency, Boost also forces maximum GPU clocks, Off disables the "
+    "latency wait (frame generation keeps working). The game's own frame-rate limit is never relaxed. Game keeps the game's/driver's mode.";
 
 using setting_flags::APPLY_ON_RELEASE;
 using setting_flags::BOOKKEEPING;
@@ -901,6 +917,71 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .choices = FG_PRESETS,
         .get = [](const Settings& s) { return static_cast<double>(s.fg_preset); },
         .set = [](Settings& s, double v) { s.fg_preset = static_cast<FgPresetOverride>(static_cast<uint32_t>(v)); },
+    },
+    // The FG frame multiplier (2026-10-25, addon/sl_fg_hooks.hpp): forced through the game's own
+    // slDLSSGSetOptions (wrapped at slGetFeatureFunction), live at the game's next enabled call.
+    {
+        .key = "FGMultiplier",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::ADVANCED,
+        .label = "FG multiplier",
+        .tooltip = FG_MULTIPLIER_TOOLTIP,
+        .choices = FG_MULTIPLIERS,
+        .get = [](const Settings& s) { return static_cast<double>(s.fg_multiplier); },
+        .set = [](Settings& s, double v) { s.fg_multiplier = FromIndex<FgMultiplierOverride>(v); },
+    },
+    // NVIDIA Dynamic MFG (2026-10-25, addon/sl_fg_hooks.hpp): submit DLSSGMode::eDynamic and let
+    // NVIDIA's provider own the multiplier. Only the release-supported Streamline/DLSS-G pairs
+    // qualify; anything else stays on the fixed multiplier above.
+    {
+        .key = "DynamicMFG",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::ADVANCED,
+        .label = "Dynamic MFG",
+        .tooltip = DYNAMIC_MFG_TOOLTIP,
+        .get = [](const Settings& s) { return Flag(s.dynamic_mfg); },
+        .set = [](Settings& s, double v) { s.dynamic_mfg = v != 0.0; },
+    },
+    {
+        .key = "DynamicMFGTargetFps",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::ADVANCED,
+        .label = "Dynamic MFG target FPS",
+        .tooltip = "The frame rate NVIDIA's Dynamic MFG paces toward. 0 follows the active display refresh rate.",
+        .min = 0.0,
+        .max = 1000.0,
+        .step = 1,
+        .fast_step = 32,
+        .get = [](const Settings& s) { return static_cast<double>(s.dynamic_mfg_target_fps); },
+        .set = [](Settings& s, double v) { s.dynamic_mfg_target_fps = static_cast<uint32_t>(v); },
+    },
+    // The Reflex override (2026-10-25, addon/reflex_override.hpp): the mode and an output-FPS cap,
+    // rewritten into the game's NvAPI_D3D_SetSleepMode calls. Works for native Reflex games and
+    // Streamline's sl.reflex alike.
+    {
+        .key = "ReflexMode",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::ADVANCED,
+        .label = "Reflex",
+        .tooltip = REFLEX_MODE_TOOLTIP,
+        .choices = REFLEX_MODES,
+        .get = [](const Settings& s) { return static_cast<double>(s.reflex_mode); },
+        .set = [](Settings& s, double v) { s.reflex_mode = FromIndex<ReflexOverride>(v); },
+    },
+    {
+        .key = "ReflexFpsCap",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::ADVANCED,
+        .label = "Reflex FPS cap",
+        .tooltip = "A final output-FPS ceiling (after frame generation) submitted through Reflex. Needs the game to call the Reflex "
+                   "sleep each frame, which some games never do -- the log says so. 0 leaves the game's own limiter alone; a lower "
+                   "cap than the game's is always kept.",
+        .min = 0.0,
+        .max = 1000.0,
+        .step = 1,
+        .fast_step = 32,
+        .get = [](const Settings& s) { return static_cast<double>(s.reflex_fps_cap); },
+        .set = [](Settings& s, double v) { s.reflex_fps_cap = static_cast<uint32_t>(v); },
     },
     // The Ray Reconstruction render preset (2026-10-25): one choice for every mode -- RR's default
     // model does not vary by mode (all modes default to F/RR2). The live preset swap writes all six

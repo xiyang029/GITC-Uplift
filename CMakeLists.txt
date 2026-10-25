@@ -276,6 +276,8 @@ add_library(uplift_addon_core STATIC
   src/addon/dlss_swap.cpp
   src/addon/dlss_ratio.cpp
   src/addon/fg_preset.cpp
+  src/addon/sl_fg_hooks.cpp
+  src/addon/reflex_override.cpp
   src/addon/reshade_version.cpp
   src/addon/ngx_bridge.cpp
   src/addon/d3d11_identity.cpp
@@ -285,8 +287,11 @@ add_library(uplift_addon_core STATIC
   src/addon/nr_heartbeat.cpp
   src/addon/dred.cpp)
 target_link_libraries(uplift_addon_core PUBLIC uplift_sources uplift_ui uplift_ngx_hooks uplift_state bcrypt)
-# The FG preset override hooks NvAPI's DRS reads with the shared MinHook (fg_preset.cpp).
-target_link_libraries(uplift_addon_core PRIVATE uplift_minhook uplift_minhook_once)
+# The FG preset override hooks NvAPI's DRS reads with the shared MinHook (fg_preset.cpp); the FG
+# multiplier hooks (sl_fg_hooks.cpp) and the Reflex override (reflex_override.cpp) hook Streamline's
+# slGetFeatureFunction and NvAPI_D3D_SetSleepMode/Sleep the same way. sl_fg_hooks.cpp reads module file
+# versions (Dynamic MFG's release-stack allowlist), which needs version.lib.
+target_link_libraries(uplift_addon_core PRIVATE uplift_minhook uplift_minhook_once version)
 # Plan 11: the Vulkan side's log and pending marker (nr::Log, addon::WriteLatchMarker) come from here in the 64-bit half.
 target_link_libraries(uplift_vk PUBLIC uplift_addon_core)
 # Plan 13: native Vulkan NR's device functions and completion (on nr::Timeline), the 64-bit half only. Batch 3: the native context of the DLSS

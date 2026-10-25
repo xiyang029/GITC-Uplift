@@ -1,6 +1,7 @@
 #include "addon/dlss_swap.hpp"
 
 #include <array>
+#include <atomic>
 #include <format>
 #include <string_view>
 #include <utility>
@@ -141,10 +142,15 @@ NVSDK_NGX_Handle* DlssSwap::CreateSwap(ngx_hooks::NgxApi api, ID3D12GraphicsComm
                          static_cast<unsigned>(created)).c_str());
     return nullptr;
   }
-  nr::Logf(nr::LogLevel::INFO, "the DLSS preset swap created a {} feature ({}x{} -> {}x{}, flags {:x}, presets {} {} {} {} {} {})",
-           (rr ? "Ray Reconstruction" : "SuperSampling"), snapshot.render.width, snapshot.render.height, snapshot.output.width,
-           snapshot.output.height, snapshot.flags, desired.presets[0], desired.presets[1], desired.presets[2], desired.presets[3],
-           desired.presets[4], desired.presets[5]);
+  // The first create is the evidence the swap feature exists; a runtime rebuild recreates it with the
+  // same snapshot and presets, so later creates add nothing.
+  static std::atomic<bool> created_logged{false};
+  if (!created_logged.exchange(true, std::memory_order_relaxed)) {
+    nr::Logf(nr::LogLevel::INFO, "the DLSS preset swap created a {} feature ({}x{} -> {}x{}, flags {:x}, presets {} {} {} {} {} {})",
+             (rr ? "Ray Reconstruction" : "SuperSampling"), snapshot.render.width, snapshot.render.height, snapshot.output.width,
+             snapshot.output.height, snapshot.flags, desired.presets[0], desired.presets[1], desired.presets[2], desired.presets[3],
+             desired.presets[4], desired.presets[5]);
+  }
   return handle;
 }
 
