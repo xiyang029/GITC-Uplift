@@ -297,13 +297,18 @@ void LogSleepStatusThrottled() {
              static_cast<uint32_t>(sample.sleep.bUseGameSleep),
              static_cast<uint32_t>(sample.sleep.fgMultiplier));
   }
-  // The cap only bites when something calls the Reflex sleep each frame; say so once instead of
-  // letting a silently ineffective cap look like a broken feature.
-  if (sample.sleep.bUseGameSleep == 0u && g_desired_cap_fps.load(std::memory_order_relaxed) != 0u) {
+  // The cap only bites when something calls the Reflex sleep each frame; say so instead of letting a
+  // silently ineffective cap look like a broken feature. One sample is not a verdict, though: The
+  // Witcher 3 reports "no sleep" once around loading and sleeps every frame after, and the cap bites
+  // there. Only three samples in a row (~6 s) without a sleep is worth the warning.
+  static std::atomic<uint32_t> no_sleep_samples{0u};
+  if (sample.sleep.bUseGameSleep != 0u || g_desired_cap_fps.load(std::memory_order_relaxed) == 0u) {
+    no_sleep_samples.store(0u, std::memory_order_relaxed);
+  } else if (no_sleep_samples.fetch_add(1u, std::memory_order_relaxed) + 1u >= 3u) {
     static std::atomic<bool> warned{false};
     if (!warned.exchange(true, std::memory_order_relaxed)) {
       nr::Logf(nr::LogLevel::WARN,
-               "reflex: this game does not call the Reflex sleep each frame, so the FPS cap cannot take effect; use the game's own limiter or RTSS's Reflex mode instead");
+               "reflex: the game has not called the Reflex sleep in the last three samples, so the FPS cap cannot take effect; use the game's own limiter or RTSS's Reflex mode instead");
     }
   }
 }

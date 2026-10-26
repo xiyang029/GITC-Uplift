@@ -9,9 +9,6 @@
 #include <cwchar>
 #include <string>
 #include <thread>
-#include <vector>
-
-#include <psapi.h>
 
 #include "ngx_hooks/minhook_once.hpp"
 #include "nr/log.hpp"
@@ -75,55 +72,12 @@ std::atomic<uint32_t> g_dynamic_set_failures{0u};
 std::atomic<uint32_t> g_dynamic_probe_failures{0u};
 std::atomic<uint32_t> g_state_logs{0u};
 
-// ---- The version stack gate (Dynamic MFG) ----
-// NVIDIA releases Dynamic MFG on Streamline 2.14.1/2.14.16 with DLSS-G 310.9.1/310.9.16, but this
-// project does not gate on those numbers: the authoritative gate is the provider's own
-// bIsDynamicMFGSupported (see DynamicVersionStackReady). All that is needed here is the file
-// version, as proof that the two modules were actually found.
-
-struct SlVersion {
-  uint16_t major = 0, minor = 0, patch = 0, revision = 0;
-  bool valid = false;
-};
-
-bool IsMappedImage(HMODULE module) {
-  if (module == nullptr) return false;
-  MEMORY_BASIC_INFORMATION info{};
-  return VirtualQuery(module, &info, sizeof(info)) == sizeof(info) && info.AllocationBase == module
-         && info.Type == MEM_IMAGE && info.State == MEM_COMMIT;
-}
-
-SlVersion VersionFromModule(HMODULE module) {
-  SlVersion result{};
-  if (!IsMappedImage(module)) return result;
-  wchar_t path[MAX_PATH * 4] = {};
-  const DWORD length = GetModuleFileNameW(module, path, static_cast<DWORD>(std::size(path)));
-  if (length == 0 || length >= std::size(path)) return result;
-  DWORD ignored = 0;
-  const DWORD bytes = GetFileVersionInfoSizeW(path, &ignored);
-  if (bytes == 0) return result;
-  std::vector<unsigned char> storage(bytes);
-  if (!GetFileVersionInfoW(path, 0, bytes, storage.data())) return result;
-  VS_FIXEDFILEINFO* fixed_info = nullptr;
-  UINT fixed_size = 0;
-  if (!VerQueryValueW(storage.data(), L"\\", reinterpret_cast<void**>(&fixed_info), &fixed_size)
-      || fixed_info == nullptr || fixed_size < sizeof(VS_FIXEDFILEINFO)
-      || fixed_info->dwSignature != 0xFEEF04BDu) {
-    return result;
-  }
-  result.major = HIWORD(fixed_info->dwFileVersionMS);
-  result.minor = LOWORD(fixed_info->dwFileVersionMS);
-  result.patch = HIWORD(fixed_info->dwFileVersionLS);
-  result.revision = LOWORD(fixed_info->dwFileVersionLS);
-  result.valid = true;
-  return result;
-}
-
-// The Streamline wrapper's own version, taken from the module that owns the real function
-// pointer. A second Streamline-hooking addon sitting in between must not have its file version
-// mistaken for NVIDIA's, so only sl.dlss_g / sl.interposer paths count.
-std::atomic<bool> g_streamline_version_seen{false};
-std::atomic<bool> g_dlssg_version_seen{false};
+// ---- The Streamline owner gate (Dynamic MFG) ----
+// Dynamic MFG is driven only when the module that owns the real slDLSSGSetOptions points at
+// NVIDIA's own Streamline tree: a second hooking add-on sitting in between must not have Dynamic
+// MFG driven through it. The capability gate itself stays the provider's own
+// bIsDynamicMFGSupported (g_dynamic_support_seen / g_dynamic_supported).
+std::atomic<bool> g_streamline_owner_seen{false};
 
 void ObserveStreamlineFunctionOwner(const void* function) {
   HMODULE owner = nullptr;
@@ -153,70 +107,7 @@ void ObserveStreamlineFunctionOwner(const void* function) {
              streamline_owner ? "is" : "is NOT");
   }
   if (!streamline_owner) return;
-  const SlVersion version = VersionFromModule(owner);
-  if (!version.valid) {
-    nr::Logf(nr::LogLevel::WARN, "sl-fg: the Streamline owner's file version could not be read ({})", path_utf8);
-    return;
-  }
-  if (g_streamline_version_seen.exchange(true, std::memory_order_acq_rel)) return;  // keep the first observation
-  nr::Logf(nr::LogLevel::INFO, "the FG multiplier hooks observed Streamline {}.{}.{}.{} (version readable; Dynamic MFG itself is gated on the provider's bIsDynamicMFGSupported)",
-           version.major, version.minor, version.patch, version.revision);
-}
-
-// The DLSS-G provider (sl.dlss_g) module, found by name among the mapped images. Dynamic MFG's
-// allowlist needs its file version; the scan runs at most until a valid version is seen.
-HMODULE FindDlssgProvider() {
-  std::vector<HMODULE> loaded(256u);
-  while (true) {
-    DWORD needed = 0u;
-    if (K32EnumProcessModules(GetCurrentProcess(), loaded.data(), static_cast<DWORD>(loaded.size() * sizeof(HMODULE)), &needed) == FALSE) {
-      return nullptr;
-    }
-    const size_t count = needed / sizeof(HMODULE);
-    if (count <= loaded.size()) {
-      loaded.resize(count);
-      break;
-    }
-    loaded.resize(count);
-  }
-  for (const HMODULE candidate : loaded) {
-    if (candidate == nullptr) continue;
-    wchar_t path[MAX_PATH * 4] = {};
-    const DWORD length = GetModuleFileNameW(candidate, path, static_cast<DWORD>(std::size(path)));
-    if (length == 0 || length >= std::size(path)) continue;
-    _wcslwr_s(path, std::size(path));
-    if (wcsstr(path, L"sl.dlss_g") != nullptr || wcsstr(path, L"sl_dlss_g") != nullptr) {
-      return candidate;
-    }
-  }
-  return nullptr;
-}
-
-void ObserveDlssgProviderVersion() {
-  if (g_dlssg_version_seen.load(std::memory_order_acquire)) return;
-  const HMODULE provider = FindDlssgProvider();
-  if (provider == nullptr) {
-    // Bounded: also says what the scan looked for, in case this chain names its FG provider
-    // differently (an OptiScaler-style shim would).
-    static std::atomic<uint32_t> misses{0u};
-    if (misses.fetch_add(1u, std::memory_order_relaxed) == 4u) {
-      nr::Logf(nr::LogLevel::INFO, "sl-fg: no mapped module named sl.dlss_g* found for the DLSS-G provider version check");
-    }
-    return;
-  }
-  const SlVersion version = VersionFromModule(provider);
-  if (!version.valid) return;
-  g_dlssg_version_seen.store(true, std::memory_order_release);
-  nr::Logf(nr::LogLevel::INFO, "the FG multiplier hooks observed the DLSS-G provider {}.{}.{}.{} (version readable; Dynamic MFG itself is gated on the provider's bIsDynamicMFGSupported)",
-           version.major, version.minor, version.patch, version.revision);
-}
-
-bool DynamicVersionStackReady() {
-  // The authoritative gate is the provider's own bIsDynamicMFGSupported from GetState: this project
-  // ships no kernel patches whose safety exact versions would guard, and the OTA override tree
-  // reports versions a fixed list would never anticipate. Both versions must merely be readable,
-  // proving the modules were actually found.
-  return g_streamline_version_seen.load(std::memory_order_acquire) && g_dlssg_version_seen.load(std::memory_order_acquire);
+  g_streamline_owner_seen.store(true, std::memory_order_release);
 }
 
 bool IsTransientDynamicFailure(sl::Result result) {
@@ -299,6 +190,11 @@ bool BuildForwardedOptions(const sl::DLSSGOptions& source, sl::DLSSGOptions& des
 // an override did or did not land (called at all? which ABI? which branch? what result?).
 
 void LogSlResult(const char* what, sl::Result result) {
+  // Edge log: one line per distinct (tag, result), not one per call. `what` is always a literal here,
+  // so its address identifies the branch, and a user-space pointer leaves the top bits free.
+  static std::atomic<uint64_t> last{0u};
+  const uint64_t key = reinterpret_cast<uint64_t>(what) | (static_cast<uint64_t>(static_cast<uint32_t>(result)) << 48);
+  if (last.exchange(key, std::memory_order_relaxed) == key) return;
   nr::Logf(nr::LogLevel::INFO, "sl-fg: {} -> sl result {}", what, static_cast<uint32_t>(result));
 }
 
@@ -331,7 +227,7 @@ void CacheReplaySubmission(const sl::ViewportHandle& viewport, const sl::DLSSGOp
 
 bool DynamicReady(bool game_enabled) {
   return game_enabled && g_dynamic_enabled.load(std::memory_order_relaxed) && g_dynamic_d3d12.load(std::memory_order_relaxed)
-         && DynamicVersionStackReady() && g_dynamic_support_seen.load(std::memory_order_acquire)
+         && g_streamline_owner_seen.load(std::memory_order_acquire) && g_dynamic_support_seen.load(std::memory_order_acquire)
          && g_dynamic_supported.load(std::memory_order_relaxed)
          && !g_dynamic_declined.load(std::memory_order_relaxed);
 }
@@ -389,10 +285,7 @@ sl::Result CallSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
   }
 
   const sl::Result result = real(viewport, forwarded);
-  if (dynamic) {
-    nr::Logf(nr::LogLevel::INFO, "sl-fg: dynamic submission (eDynamic, target {}) -> sl result {}", target == 0.0f ? "active-display refresh" : std::to_string(static_cast<unsigned>(target)) + " FPS",
-             static_cast<uint32_t>(result));
-  }
+  if (dynamic) LogSlResult("dynamic submission (eDynamic)", result);
   if (result == sl::Result::eOk) {
     if (dynamic) {
       g_dynamic_set_failures.store(0u, std::memory_order_relaxed);
@@ -447,27 +340,40 @@ sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     g_dynamic_declined.store(false, std::memory_order_release);
     g_dynamic_applied.store(false, std::memory_order_relaxed);
   }
-  ObserveDlssgProviderVersion();
 
   const bool dynamic_ready = DynamicReady(game_enabled);
   const uint32_t multiplier = g_force_multiplier.load(std::memory_order_relaxed);
   const uint32_t requested = options.numFramesToGenerate;
   if (game_enabled) CacheReplaySubmission(viewport, options);
-  nr::Logf(nr::LogLevel::INFO,
-           "sl-fg: slDLSSGSetOptions(mode {}, v{}, numFramesToGenerate {} = {}x, hudless fmt {}, ui fmt {}); panel: multiplier {}, dynamic {} -> {}",
-           static_cast<uint32_t>(options.mode), options.structVersion, requested, requested + 1u,
-           options.hudLessBufferFormat, options.uiBufferFormat, multiplier,
-           g_dynamic_enabled.load(std::memory_order_relaxed) ? "on" : "off",
-           dynamic_ready ? "eligible" : "not eligible");
-  if (!dynamic_ready && g_dynamic_enabled.load(std::memory_order_relaxed)) {
-    // Which gate held it back: exactly what a live test needs to know.
+  // The request line is an edge log too: The Witcher 3 submits the same off shape every frame, and a
+  // line per frame buried a session in 21k copies of it. Every field the line prints is in the key.
+  const uint64_t shape = (static_cast<uint64_t>(static_cast<uint32_t>(options.mode) & 0xffu))
+                         | (static_cast<uint64_t>(options.structVersion & 0xffu) << 8)
+                         | (static_cast<uint64_t>(requested & 0xffu) << 16)
+                         | (static_cast<uint64_t>(static_cast<uint32_t>(options.hudLessBufferFormat) & 0xffu) << 24)
+                         | (static_cast<uint64_t>(static_cast<uint32_t>(options.uiBufferFormat) & 0xffu) << 32)
+                         | (static_cast<uint64_t>(multiplier & 0xffu) << 40)
+                         | (static_cast<uint64_t>(g_dynamic_enabled.load(std::memory_order_relaxed) ? 1u : 0u) << 48)
+                         | (static_cast<uint64_t>(dynamic_ready ? 1u : 0u) << 49);
+  static std::atomic<uint64_t> last_shape{~0ull};
+  const bool shape_changed = last_shape.exchange(shape, std::memory_order_relaxed) != shape;
+  if (shape_changed) {
     nr::Logf(nr::LogLevel::INFO,
-             "sl-fg: dynamic gates: game_enabled={} enabled={} d3d12={} versions_seen({}/{}) support_seen={} supported={} declined={}",
-             game_enabled, g_dynamic_enabled.load(std::memory_order_relaxed),
-             g_dynamic_d3d12.load(std::memory_order_relaxed),
-             g_streamline_version_seen.load(std::memory_order_acquire), g_dlssg_version_seen.load(std::memory_order_acquire),
-             g_dynamic_support_seen.load(std::memory_order_acquire), g_dynamic_supported.load(std::memory_order_relaxed),
-             g_dynamic_declined.load(std::memory_order_relaxed));
+             "sl-fg: slDLSSGSetOptions(mode {}, v{}, numFramesToGenerate {} = {}x, hudless fmt {}, ui fmt {}); panel: multiplier {}, dynamic {} -> {}",
+             static_cast<uint32_t>(options.mode), options.structVersion, requested, requested + 1u,
+             options.hudLessBufferFormat, options.uiBufferFormat, multiplier,
+             g_dynamic_enabled.load(std::memory_order_relaxed) ? "on" : "off",
+             dynamic_ready ? "eligible" : "not eligible");
+    if (!dynamic_ready && g_dynamic_enabled.load(std::memory_order_relaxed)) {
+      // Which gate held it back: exactly what a live test needs to know.
+      nr::Logf(nr::LogLevel::INFO,
+               "sl-fg: dynamic gates: game_enabled={} enabled={} d3d12={} sl_owner={} support_seen={} supported={} declined={}",
+               game_enabled, g_dynamic_enabled.load(std::memory_order_relaxed),
+               g_dynamic_d3d12.load(std::memory_order_relaxed),
+               g_streamline_owner_seen.load(std::memory_order_acquire),
+               g_dynamic_support_seen.load(std::memory_order_acquire), g_dynamic_supported.load(std::memory_order_relaxed),
+               g_dynamic_declined.load(std::memory_order_relaxed));
+    }
   }
 
   // Fixed-multiplier force policy (force_policy.hpp): Off is never rewritten; Dynamic owns the

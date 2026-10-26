@@ -4,8 +4,8 @@ set "DEPS=%~dp0..\third_party\_deps"
 set "RESHADE_TAG=v6.8.0"
 if not exist "%DEPS%" mkdir "%DEPS%"
 
-rem NVIDIA NGX SDK headers (never committed) at a pinned commit: the DLSS 310.9.1 SDK that Uplift is built and tested against.
-set "DLSS_COMMIT=374959484e79a640feaba44c93ac8cfb0a03f5b5"
+rem NVIDIA NGX SDK headers (never committed) at a pinned commit: the DLSS 310.9.16 SDK that Uplift is built and tested against.
+set "DLSS_COMMIT=9981c6350dc58c0ce21f024fd65e31e851c31689"
 set "FETCHED_DLSS="
 if exist "%DEPS%\dlss\include\nvsdk_ngx.h" for /f %%c in ('git -C "%DEPS%\dlss" rev-parse HEAD 2^>nul') do set "FETCHED_DLSS=%%c"
 if "!FETCHED_DLSS!"=="%DLSS_COMMIT%" goto dlss_done
