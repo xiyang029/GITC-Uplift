@@ -33,6 +33,16 @@ constexpr const char* DestroyName(ngx_hooks::NgxApi api) {
                                             : "NVSDK_NGX_VULKAN_DestroyParameters");
 }
 
+// Whether the two choices differ in the preset the feature actually reads: DLSS reads only its mode's
+// hint, selected by the create's PerfQualityValue. A change to another mode's row lands when the game
+// re-creates for that mode (a new handle, and so a fresh `applied`), not now -- and re-creating the
+// swap feature for a key it will not read costs a real hitch (DLSS loads its network).
+bool SameActivePresets(const ngx_hooks::SrOverrides& a, const ngx_hooks::SrOverrides& b, int perf_quality) {
+  const unsigned slot = ngx_hooks::PresetSlotOf(perf_quality);
+  // With no quality mode in the create there is no slot to single out: any change re-creates.
+  return (slot < a.presets.size() ? a.presets[slot] == b.presets[slot] : a.presets == b.presets);
+}
+
 // One "logged once" latch, module-wide: a core that cannot serve the swap says so once, whatever the
 // games, features and frames after it.
 void WarnOnce(std::string_view what) {
@@ -197,7 +207,7 @@ const NVSDK_NGX_Handle* DlssSwap::BeforeEvaluate(ngx_hooks::NgxApi api, const vo
     RefreshActive();
     return game_handle;
   }
-  if (state.handle != nullptr && state.applied.presets == desired.presets) {
+  if (state.handle != nullptr && SameActivePresets(state.applied, desired, record.snapshot.perf_quality)) {
     RefreshActive();
     return state.handle;
   }

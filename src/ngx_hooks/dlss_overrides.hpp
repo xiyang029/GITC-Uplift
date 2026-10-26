@@ -29,6 +29,22 @@ inline constexpr std::array<const char*, 6> PRESET_KEYS = {
     NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance,
 };
 
+// The PRESET_KEYS slot a feature runs in: the create's PerfQualityValue picks the one
+// DLSS.Hint.Render.Preset.<Mode> key the runtime reads (MaxPerf 0, Balanced 1, MaxQuality 2,
+// UltraPerformance 3, UltraQuality 4, DLAA 5 -- the keys list the modes in UI order). 6 when
+// `perf_quality` names no mode.
+inline constexpr unsigned PresetSlotOf(int perf_quality) {
+  switch (perf_quality) {
+    case NVSDK_NGX_PerfQuality_Value_MaxPerf: return 4u;
+    case NVSDK_NGX_PerfQuality_Value_Balanced: return 3u;
+    case NVSDK_NGX_PerfQuality_Value_MaxQuality: return 2u;
+    case NVSDK_NGX_PerfQuality_Value_UltraPerformance: return 5u;
+    case NVSDK_NGX_PerfQuality_Value_UltraQuality: return 1u;
+    case NVSDK_NGX_PerfQuality_Value_DLAA: return 0u;
+    default: return 6u;
+  }
+}
+
 // Applies `overrides` to a SuperSampling create's parameter block. The game's value of every key it
 // changes goes into `saved` first, so the create detour can put it back (Task 1). The create helper
 // writes PerfQualityValue and the create flags as int; games write presets as unsigned int.

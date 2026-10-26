@@ -126,6 +126,10 @@ static_assert(static_cast<uint32_t>(ui::ReflexOverride::GAME) == static_cast<uin
 static_assert(static_cast<uint32_t>(ui::ReflexOverride::ON) == static_cast<uint32_t>(addon::reflex::ReflexModeOverride::ON));
 static_assert(static_cast<uint32_t>(ui::ReflexOverride::BOOST) == static_cast<uint32_t>(addon::reflex::ReflexModeOverride::BOOST));
 static_assert(static_cast<uint32_t>(ui::ReflexOverride::OFF) == static_cast<uint32_t>(addon::reflex::ReflexModeOverride::OFF));
+// The same for the two DLSS-G option rows (settings_schema.cpp's FG_OPTION_CHOICES).
+static_assert(static_cast<uint32_t>(ui::FgOptionOverride::GAME) == static_cast<uint32_t>(addon::slfg::FgOptionOverride::GAME));
+static_assert(static_cast<uint32_t>(ui::FgOptionOverride::ON) == static_cast<uint32_t>(addon::slfg::FgOptionOverride::ON));
+static_assert(static_cast<uint32_t>(ui::FgOptionOverride::OFF) == static_cast<uint32_t>(addon::slfg::FgOptionOverride::OFF));
 
 // Plan 17: DiagnosticRemoveDevice presses Retry now itself about a second (at 60 Hz) after a stop that may still be retried.
 constexpr uint32_t DIAGNOSTIC_RETRY_PRESENTS = 60u;
@@ -492,6 +496,8 @@ void PushFgRuntimeChoices(const ui::Settings& settings) {
   }
   addon::slfg::SetForceMultiplier(multiplier);
   addon::slfg::SetDynamicMfg(settings.dynamic_mfg, settings.dynamic_mfg_target_fps);
+  addon::slfg::SetOptionOverrides(static_cast<addon::slfg::FgOptionOverride>(static_cast<uint32_t>(settings.fg_ui_recomposition)),
+                                  static_cast<addon::slfg::FgOptionOverride>(static_cast<uint32_t>(settings.fg_menu_detection)));
   // Advertise the provider's full ceiling (5 generated frames = 6x) once any override is wanted.
   addon::slfg::SetAdvertisedMaxGenerated(settings.dynamic_mfg || multiplier >= 3u ? 5u : 0u);
   addon::reflex::SetDesired(static_cast<addon::reflex::ReflexModeOverride>(static_cast<uint32_t>(settings.reflex_mode)),
@@ -537,7 +543,6 @@ void PollHooks() {
   addon::slfg::RefreshFromPanel();
   addon::reflex::RefreshFromPanel();
   addon::reflex::LogSleepStatusThrottled();
-  addon::reflex::PollLatency();  // the panel's latency line, sampled at most once a second
 }
 
 // Amendment 1: this thread's earlier ExecuteCommandLists calls have returned by its next Uplift event,
@@ -3271,10 +3276,6 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       // and Match game wait for it (temporary), Present runs. Plan 15's hold, the stopped Vulkan context and the fixed causes keep their own text (ResolveSetup).
       facts.dlss_off = addon::DlssReleased(state.bridge.Registry(), device, DlssApiOf(entry), facts.dlss_seen);
     }
-    // The latency readout (addon/reflex_override.cpp): one line, empty until the game marks frames.
-    view.latency_line = addon::reflex::LatencyLine();
-    // The driver's display-path state, from the same two-second sleep-status read.
-    view.driver_line = addon::reflex::DriverLine();
     // Fix round (I-C): Clear latch also clears native Vulkan NR's latch (VulkanNativeNr), from the next start, so it shows in a Vulkan game while that is set.
     view.dlss_latched = (state.settings.dlss_placement_blocked || (overlay_device_api == api::device_api::vulkan && !state.settings.vulkan_native_nr));
     if (!setup_finished) {

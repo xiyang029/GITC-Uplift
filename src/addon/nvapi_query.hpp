@@ -3,10 +3,9 @@
 // The shared, read-mostly NvAPI resolver (addon/nvapi_query.hpp).
 //
 // The Reflex override (addon/reflex_override.cpp) is the only caller: it needs nvapi_QueryInterface
-// to reach NvAPI_D3D_SetSleepMode's internal implementation, reads the driver's own state through
-// NvAPI_D3D_GetSleepStatus, and samples NvAPI_D3D_GetLatency for the panel's latency line. Every id
-// resolves through the same nvapi_QueryInterface export, cached once per process like the FG preset
-// hook's DRS resolver (addon/fg_preset.cpp).
+// to reach NvAPI_D3D_SetSleepMode's internal implementation, and reads the driver's own state through
+// NvAPI_D3D_GetSleepStatus for its status log. Every id resolves through the same nvapi_QueryInterface
+// export, cached once per process like the FG preset hook's DRS resolver (addon/fg_preset.cpp).
 //
 // The structures are NVIDIA's own (nvapi.h, shipped by the pinned Streamline commit): nothing
 // here is a hand-copied ABI. NV_SET_SLEEP_MODE_PARAMS' version a caller sends is
@@ -44,13 +43,12 @@ inline uint32_t InterfaceId(const char* name) {
 
 inline const uint32_t kGetSleepStatusId = InterfaceId("NvAPI_D3D_GetSleepStatus");
 inline const uint32_t kSetSleepModeId = InterfaceId("NvAPI_D3D_SetSleepMode");
-inline const uint32_t kGetLatencyId = InterfaceId("NvAPI_D3D_GetLatency");
 
 using SleepStatus = NV_GET_SLEEP_STATUS_PARAMS;
 using SleepModeParams = NV_SET_SLEEP_MODE_PARAMS;
-using LatencyResult = NV_LATENCY_RESULT_PARAMS;
 
-// The system's nvapi64.dll, or null when the driver has not loaded it into this process yet.
+// Loads the system's nvapi64.dll (or returns the copy already mapped); null when the driver has
+// none, which stays null for the process's life.
 inline HMODULE Module() {
   static const HMODULE module = LoadLibraryExW(L"nvapi64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
   return module;
@@ -85,16 +83,6 @@ inline SleepSample GetSleepStatus(IUnknown* device) {
   sample.sleep.version = NV_GET_SLEEP_STATUS_PARAMS_VER;
   sample.status = get(device, &sample.sleep);
   return sample;
-}
-
-// The latency report: the newest completed frame sits at element 63 (nvapi.h's NvAPI_D3D_GetLatency
-// comment), and every frame is zeroed until the game has marked at least that many frames.
-inline Status GetLatency(IUnknown* device, LatencyResult* out) {
-  if (device == nullptr || out == nullptr) return kUnavailable;
-  const auto get = Interface<Status(__cdecl*)(IUnknown*, LatencyResult*)>(kGetLatencyId);
-  if (get == nullptr) return kUnavailable;
-  out->version = NV_LATENCY_RESULT_PARAMS_VER;
-  return get(device, out);
 }
 
 }  // namespace uplift::addon::nvapi

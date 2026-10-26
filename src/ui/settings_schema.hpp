@@ -30,6 +30,7 @@ enum class SettingSection : uint8_t {
   FIXES_COLOR,
   FIXES_GUIDES,
   MASK,  // ui-review.md §3: "Mask and HUD"
+  DLSS_REFLEX,  // the live DLSS, FG and Reflex overrides, in their own card
   ADVANCED,
   HOTKEYS,
   HIDDEN,  // written by Uplift, never drawn as a control

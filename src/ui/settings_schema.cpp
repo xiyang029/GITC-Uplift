@@ -21,6 +21,7 @@ constexpr std::array<std::string_view, 7> QUALITY_MODES = {"Game", "Performance"
 constexpr std::array<std::string_view, 5> PRESETS = {"Game", "J", "K", "L", "M"};
 constexpr std::array<std::string_view, 4> FG_PRESETS = {"Game", "A", "B", "C"};
 constexpr std::array<std::string_view, 6> FG_MULTIPLIERS = {"Game", "2x", "3x", "4x", "5x", "6x"};
+constexpr std::array<std::string_view, 3> FG_OPTION_CHOICES = {"Game", "On", "Off"};
 constexpr std::array<std::string_view, 4> REFLEX_MODES = {"Game", "On", "Boost", "Off"};
 constexpr std::array<std::string_view, 4> RR_PRESETS = {"Game", "D", "E", "F"};
 constexpr std::array<std::string_view, 3> AUTO_EXPOSURE = {"Game", "Off", "On"};
@@ -56,6 +57,16 @@ constexpr std::string_view DYNAMIC_MFG_TOOLTIP =
     "Hands multiplier selection to NVIDIA's Dynamic MFG (DLSS-G 4.5): the provider picks the per-scene multiplier and owns pacing. Needs "
     "Direct3D 12 and the release-supported Streamline (2.14.1/2.14.16) with DLSS-G (310.9.1/310.9.16); otherwise it stays off and the "
     "fixed multiplier above applies. Takes priority over the fixed multiplier while active.";
+
+constexpr std::string_view FG_UI_RECOMPOSITION_TOOLTIP =
+    "Asks DLSS Frame Generation to interpolate the HUD and game UI separately from the 3D image (UI recomposition) -- the fix for HUD "
+    "ghosting and jitter at 3x/4x and above. It only works when the game hands DLSS-G its HUD-less and UI colour buffers, so a game that "
+    "does not tag them shows no change. Game keeps the game's own value (an NVIDIA App override can still win).";
+
+constexpr std::string_view FG_MENU_DETECTION_TOOLTIP =
+    "Asks DLSS Frame Generation to detect the game's fullscreen menus and pause interpolation underneath them, which removes the menu "
+    "stutter and smearing. Like UI recomposition it needs the game to hand DLSS-G its UI colour-and-alpha buffer; without that tag the flag "
+    "has nothing to detect. Game keeps the game's own value.";
 
 constexpr std::string_view REFLEX_MODE_TOOLTIP =
     "NVIDIA Reflex, rewritten into the game's own latency calls: On is low latency, Boost also forces maximum GPU clocks, Off disables the "
@@ -752,7 +763,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.pass_count = static_cast<uint32_t>(v); },
     },
     // The live DLSS preset switch (2026-10-25, reversing fix round 1's ruling): the DLSSPreset<Mode>
-    // rows are on the Advanced page again. A preset cannot reach a game feature that already exists --
+    // rows are in the DLSS / Reflex card. A preset cannot reach a game feature that already exists --
     // DLSS reads it once, at creation -- so the addon's swap (dlss_swap.hpp) evaluates its own feature
     // with the chosen presets instead of the game's, created on demand through the game's NGX core.
     // DLSSQualityMode and DLSSAutoExposure stay hidden: they still need a game re-create.
@@ -771,7 +782,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSPresetDLAA",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "DLAA preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
@@ -781,7 +792,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSPresetUltraQuality",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Ultra Quality preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
@@ -791,7 +802,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSPresetQuality",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Quality preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
@@ -801,7 +812,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSPresetBalanced",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Balanced preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
@@ -811,7 +822,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSPresetPerformance",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Performance preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
@@ -821,7 +832,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSPresetUltraPerformance",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Ultra Performance preset",
         .tooltip = PRESET_TOOLTIP,
         .choices = PRESETS,
@@ -836,7 +847,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSRenderScaleDLAA",
         .kind = SettingKind::UINT,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "DLAA render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
         .min = 33.0,
@@ -848,7 +859,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSRenderScaleUltraQuality",
         .kind = SettingKind::UINT,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Ultra Quality render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
         .min = 33.0,
@@ -860,7 +871,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSRenderScaleQuality",
         .kind = SettingKind::UINT,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Quality render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
         .min = 33.0,
@@ -872,7 +883,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSRenderScaleBalanced",
         .kind = SettingKind::UINT,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Balanced render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
         .min = 33.0,
@@ -884,7 +895,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSRenderScalePerformance",
         .kind = SettingKind::UINT,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Performance render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
         .min = 33.0,
@@ -896,7 +907,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSRenderScaleUltraPerformance",
         .kind = SettingKind::UINT,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Ultra Performance render scale",
         .tooltip = RENDER_SCALE_TOOLTIP,
         .min = 33.0,
@@ -911,7 +922,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSFGPreset",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "FG preset",
         .tooltip = FG_PRESET_TOOLTIP,
         .choices = FG_PRESETS,
@@ -923,7 +934,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "FGMultiplier",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "FG multiplier",
         .tooltip = FG_MULTIPLIER_TOOLTIP,
         .choices = FG_MULTIPLIERS,
@@ -936,7 +947,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DynamicMFG",
         .kind = SettingKind::BOOL,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Dynamic MFG",
         .tooltip = DYNAMIC_MFG_TOOLTIP,
         .get = [](const Settings& s) { return Flag(s.dynamic_mfg); },
@@ -945,7 +956,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DynamicMFGTargetFps",
         .kind = SettingKind::UINT,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Dynamic MFG target FPS",
         .tooltip = "The frame rate NVIDIA's Dynamic MFG paces toward. 0 follows the active display refresh rate.",
         .min = 0.0,
@@ -957,13 +968,36 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return static_cast<double>(s.dynamic_mfg_target_fps); },
         .set = [](Settings& s, double v) { s.dynamic_mfg_target_fps = static_cast<uint32_t>(v); },
     },
+    // The DLSS-G option overrides (2026-10-26, addon/sl_fg_hooks.cpp): fields of the same
+    // addon-owned options copy the multiplier rewrite submits, so they apply with or without a
+    // multiplier override, on every enabled submission.
+    {
+        .key = "FGUiRecomposition",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::DLSS_REFLEX,
+        .label = "UI recomposition",
+        .tooltip = FG_UI_RECOMPOSITION_TOOLTIP,
+        .choices = FG_OPTION_CHOICES,
+        .get = [](const Settings& s) { return static_cast<double>(s.fg_ui_recomposition); },
+        .set = [](Settings& s, double v) { s.fg_ui_recomposition = FromIndex<FgOptionOverride>(v); },
+    },
+    {
+        .key = "FGMenuDetection",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::DLSS_REFLEX,
+        .label = "Fullscreen menu detection",
+        .tooltip = FG_MENU_DETECTION_TOOLTIP,
+        .choices = FG_OPTION_CHOICES,
+        .get = [](const Settings& s) { return static_cast<double>(s.fg_menu_detection); },
+        .set = [](Settings& s, double v) { s.fg_menu_detection = FromIndex<FgOptionOverride>(v); },
+    },
     // The Reflex override (2026-10-25, addon/reflex_override.hpp): the mode and an output-FPS cap,
     // rewritten into the game's NvAPI_D3D_SetSleepMode calls. Works for native Reflex games and
     // Streamline's sl.reflex alike.
     {
         .key = "ReflexMode",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Reflex",
         .tooltip = REFLEX_MODE_TOOLTIP,
         .choices = REFLEX_MODES,
@@ -973,7 +1007,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "ReflexFpsCap",
         .kind = SettingKind::UINT,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Reflex FPS cap",
         .tooltip = "A final output-FPS ceiling (after frame generation) submitted through Reflex. Needs the game to call the Reflex "
                    "sleep each frame and the driver to honour the submitted interval -- the log says which one is missing. 0 "
@@ -991,7 +1025,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "ReflexMarkers",
         .kind = SettingKind::BOOL,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Reflex markers",
         .tooltip = "Sets bUseMarkersToOptimize in the Reflex sleep submission: the driver may then use the game's latency markers "
                    "for runtime optimizations. Only worth ticking when the game marks its frames; unticked keeps what the game sent.",
@@ -1001,7 +1035,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "ReflexMinQueueTime",
         .kind = SettingKind::BOOL,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "Reflex min queue time",
         .tooltip = "Sets bUseMinQueueTime in the Reflex sleep submission: every submission overlap counts toward the queue time, "
                    "not only the ones between frames. Unticked keeps what the game sent.",
@@ -1014,7 +1048,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "RayReconstructionPreset",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::ADVANCED,
+        .section = SettingSection::DLSS_REFLEX,
         .label = "RR preset",
         .tooltip = RR_PRESET_TOOLTIP,
         .choices = RR_PRESETS,

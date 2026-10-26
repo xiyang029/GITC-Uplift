@@ -6,6 +6,7 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "ngx_hooks/dlss_overrides.hpp"
 #include "nr/log.hpp"
 
 namespace uplift::addon {
@@ -20,20 +21,6 @@ std::atomic<float> g_scales[6] = {1.f, 1.f, 1.f, 1.f, 1.f, 1.f};
 // rescales its answer. The capability blocks live for the process, so the pointers stay valid.
 std::mutex g_mutex;
 std::unordered_map<const NVSDK_NGX_Parameter*, OptimalSettingsFn> g_originals;
-
-// ui::DlssPresetMode's index for a PerfQualityValue (nvsdk_ngx_defs.h: MaxPerf 0, Balanced 1,
-// MaxQuality 2, UltraPerformance 3, UltraQuality 4, DLAA 5). 4 (Performance) for anything unknown.
-unsigned ModeOf(int perf_quality) {
-  switch (perf_quality) {
-    case 0: return 4u;  // MaxPerf
-    case 1: return 3u;  // Balanced
-    case 2: return 2u;  // MaxQuality
-    case 3: return 5u;  // UltraPerformance
-    case 4: return 1u;  // UltraQuality
-    case 5: return 0u;  // DLAA
-    default: return 4u;
-  }
-}
 
 // DLSS's own render ratios as denominators (the OptimalSettings helper's table), by ui::DlssPresetMode.
 // Only used when the block carried no snippet callback to ask first.
@@ -77,7 +64,10 @@ NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* block) 
     block->Get(NVSDK_NGX_Parameter_OutWidth, &snippet_w);
     block->Get(NVSDK_NGX_Parameter_OutHeight, &snippet_h);
   }
-  const unsigned mode = ModeOf(perf_quality);
+  // ui::DlssPresetMode's index for a PerfQualityValue. 4 (Performance) for anything unknown
+  // (PresetSlotOf's sentinel 6): the mode whose scale a query that names no mode most likely wants.
+  const unsigned slot = ngx_hooks::PresetSlotOf(perf_quality);
+  const unsigned mode = slot < 6u ? slot : 4u;
   float scale = g_scales[mode].load(std::memory_order_relaxed);
   const bool overridden = (scale < 0.995f);  // the panel set a ratio for this mode
   if (!overridden) {

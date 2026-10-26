@@ -167,7 +167,7 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   // Plan 18 fix round 1 (I-1, design §2): a Direct3D 11 DLSS-SR feature the hooks did not see created (the game loaded NGX and created DLSS before the next
   // present, the only Direct3D 11 entry point where a newly loaded core is hooked; or it kept the feature across an NGX shutdown), registered at its first
   // hooked evaluate from that evaluate's block, on the device its context names (null: the unknown device). Adopted only with an upscaler's key set: Color,
-  // Output, and the motion vectors or the depth (DeepDVC and DLISP have neither), and no albedo (Ray Reconstruction is not on Direct3D 11); the create
+  // Output, and the motion vectors or the depth, and no albedo (Ray Reconstruction is not on Direct3D 11); the create
   // keys when the block still has them, else the render subrect's and the textures' sizes, low-res vectors, and (final review) IsHDR when the Output is a
   // float format. The record, or nullopt (refused, and not probed again until the handle is created, released or shut down).
   std::optional<ngx_hooks::FeatureRecord> AdoptD3D11Upscaler(const NVSDK_NGX_Handle* handle, ID3D12GraphicsCommandList* list,

@@ -126,6 +126,14 @@ enum class FgMultiplierOverride : uint32_t {
   X6 = 5u,
 };
 
+// The DLSS-G option rows (2026-10-26, addon/sl_fg_hooks.hpp): Game keeps the game's own value,
+// On/Off force it into the add-on's own slDLSSGOptions copy on every enabled submission.
+enum class FgOptionOverride : uint32_t {
+  GAME = 0u,
+  ON = 1u,
+  OFF = 2u,
+};
+
 // The Reflex mode (2026-10-25, addon/reflex_override.hpp): rewritten into the game's
 // NvAPI_D3D_SetSleepMode calls. Game keeps the game's/driver's own.
 enum class ReflexOverride : uint32_t {
@@ -280,6 +288,10 @@ struct Settings {
   FgMultiplierOverride fg_multiplier = FgMultiplierOverride::GAME;
   bool dynamic_mfg = false;
   uint32_t dynamic_mfg_target_fps = 0u;  // 0 = the display's refresh rate
+  // The two DLSS-G option rows: UI recomposition (needs the game's HUD-less/UI tags) and the
+  // fullscreen menu-detection flag, carried on every enabled submission.
+  FgOptionOverride fg_ui_recomposition = FgOptionOverride::GAME;
+  FgOptionOverride fg_menu_detection = FgOptionOverride::GAME;
   ReflexOverride reflex_mode = ReflexOverride::GAME;
   uint32_t reflex_fps_cap = 0u;  // 0 = no cap; an output-FPS cap submitted through Reflex
   // The two advanced SetSleepMode bits, forced on through the same rewrite while ticked.

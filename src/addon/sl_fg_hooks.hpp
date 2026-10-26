@@ -15,9 +15,23 @@
 
 namespace uplift::addon::slfg {
 
+// A DLSS-G option row: Game keeps the game's own value, On/Off force it into the add-on's own
+// options copy on every enabled submission.
+enum class FgOptionOverride : uint32_t {
+  GAME = 0u,
+  ON = 1u,
+  OFF = 2u,
+};
+
 // 0 = leave the game's request alone; 2..6 = force that exact multiplier. Applied on the
 // game's next enabled slDLSSGSetOptions call (no restart, no config reload).
 void SetForceMultiplier(uint32_t multiplier);
+
+// The two DLSS-G option fields (2026-10-26), applied on every enabled submission -- with or
+// without a multiplier override. UI recomposition asks the provider to interpolate the HUD and
+// game UI separately (only effective when the game tags HUDLessColor/UIColorAndAlpha);
+// fullscreen menu detection is DLSSGFlags::eEnableFullscreenMenuDetection.
+void SetOptionOverrides(FgOptionOverride ui_recomposition, FgOptionOverride menu_detection);
 
 // Dynamic MFG: submit DLSSGMode::eDynamic and let NVIDIA's provider own multiplier selection
 // and pacing. `target_fps` 0 = follow the active display refresh rate.

@@ -621,6 +621,17 @@ widgets::CardView BuildCardView(const StatusCard& card, const OverlayView& view)
   return shown;
 }
 
+// The DLSS / Reflex card's sub-captions: the first row of each group names the group. The rows are
+// drawn in schema order, so these keys are where a group begins.
+constexpr const char* DlssReflexGroup(std::string_view key) {
+  if (key == "DLSSPresetDLAA") return "DLSS presets";
+  if (key == "DLSSRenderScaleDLAA") return "DLSS render scale";
+  if (key == "DLSSFGPreset") return "Frame generation";
+  if (key == "ReflexMode") return "Reflex";
+  if (key == "RayReconstructionPreset") return "Ray Reconstruction";
+  return nullptr;
+}
+
 bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state) {
   // The panel draws at BaseFontSize(), one push for the whole overlay: every row measures itself in font
   // sizes, so the layout scales with the text. StyleScope pops it on every return path.
@@ -746,6 +757,11 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
       if (section == SettingSection::ADVANCED && descriptor.key == "ShowFaceMask" && settings->keep_faces && !face_heading) {
         widgets::SubCaption("Face tuning");
         face_heading = true;
+      }
+      if (section == SettingSection::DLSS_REFLEX) {
+        if (const char* const group = DlssReflexGroup(descriptor.key); group != nullptr) {
+          widgets::SubCaption(group);
+        }
       }
       section_changed |= DrawRow(descriptor, view, settings, state);
     }
@@ -900,18 +916,24 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     changed |= draw_rows(SettingSection::FIXES_GUIDES);
   }
 
+  // The live DLSS, frame-generation and Reflex overrides: the switches players come to the panel for,
+  // not the diagnostics and tuning that stay in Advanced.
+  const bool dlss_reflex_changed = SectionChanged(*settings, SettingSection::DLSS_REFLEX);
+  bool dlss_reflex_reset = false;
+  widgets::SectionGap();
+  const bool dlss_reflex_open =
+      widgets::SectionHeader("DLSS / Reflex", "changed", "Reset", dlss_reflex_changed && !state->defaults_view, &dlss_reflex_reset);
+  if (dlss_reflex_reset) {
+    ResetSection(settings, SettingSection::DLSS_REFLEX);
+    changed = true;
+  }
+  if (dlss_reflex_open) {
+    changed |= draw_rows(SettingSection::DLSS_REFLEX);
+  }
+
   widgets::SectionGap();
   if (widgets::SectionHeader("Advanced", nullptr, nullptr, false, nullptr)) {
     changed |= draw_rows(SettingSection::ADVANCED);
-  }
-
-  // The latency numbers and the driver's display-path state are live telemetry, not a detail of the
-  // card: they sit above the closed header.
-  if (!view.latency_line.empty()) {
-    gui::TextUnformatted(view.latency_line.c_str());
-  }
-  if (!view.driver_line.empty()) {
-    gui::TextUnformatted(view.driver_line.c_str());
   }
 
   // ui-review.md §2 finding 2: the wall of status text moves into one closed Details header. It always lists

@@ -91,6 +91,14 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Also smooths NR's small-scale change.", "同时平滑 NR 造成的小范围变化。"},
     {"Always", "始终"},
     {"Another NR tool is running", "检测到其他 NR 工具正在运行"},
+    {"Asks DLSS Frame Generation to detect the game's fullscreen menus and pause interpolation underneath them, which removes the menu "
+     "stutter and smearing. Like UI recomposition it needs the game to hand DLSS-G its UI colour-and-alpha buffer; without that tag the flag "
+     "has nothing to detect. Game keeps the game's own value.",
+     "要求 DLSS 帧生成识别游戏的全屏菜单，并在菜单下暂停插帧，从而消除菜单卡顿和拖影。与 UI 重组一样，这需要游戏向 DLSS-G 提供 UI 颜色与 alpha 缓冲区；没有该标记时这个标志没有可检测的对象。“游戏默认”保持游戏自身的设置。"},
+    {"Asks DLSS Frame Generation to interpolate the HUD and game UI separately from the 3D image (UI recomposition) -- the fix for HUD "
+     "ghosting and jitter at 3x/4x and above. It only works when the game hands DLSS-G its HUD-less and UI colour buffers, so a game that "
+     "does not tag them shows no change. Game keeps the game's own value (an NVIDIA App override can still win).",
+     "要求 DLSS 帧生成把 HUD 与游戏界面从 3D 画面中分离出来单独插帧（UI 重组）——这是解决 3x/4x 及以上倍率下 HUD 重影与抖动的办法。仅当游戏向 DLSS-G 提供 HUD-less 与 UI 颜色缓冲区时才有效，未提供这些通道的游戏不会有任何变化。“游戏默认”保持游戏自身的设置（NVIDIA App 的覆盖仍可能优先）。"},
     {"Asks ReShade to create the game's Direct3D 9 device as 9Ex, so frames reach NR on the GPU. Some games misbehave on 9Ex: if this one does not start, Uplift turns this off by itself.", "请 ReShade 将游戏的 Direct3D 9 设备创建为 9Ex，使帧可通过 GPU 传给 NR。部分游戏无法正常使用 9Ex；如果游戏因此无法启动，Uplift 会自动关闭此选项。"},
     {"Auto", "自动"},
     {"Auto (UPLIFT_MASK)", "自动（UPLIFT_MASK）"},
@@ -173,7 +181,9 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"DLSS placements latched off after a device removal (DlssPlacementBlocked = 1)", "设备移除后已锁定关闭 DLSS 阶段（DlssPlacementBlocked = 1）"},
     {"DLSS placements unavailable: {}", "DLSS 阶段不可用：{}"},
     {"DLSS placements: {}", "DLSS 阶段运行状态：{}"},
+    {"DLSS presets", "DLSS 预设"},
     {"DLSS quality mode", "DLSS 质量模式"},
+    {"DLSS render scale", "DLSS 渲染比例"},
     {"DLSS runs on a compute queue", "DLSS 正在计算队列上运行"},
     {"DLSS size diagnostic first evaluate: handle {}, serial {}; stored create render {}x{} -> output {}x{}; active render {}x{}; color region ({},{}) {}x{}, motion region ({},{}) {}x{}, output region ({},{}) {}x{}; color [{}], output [{}], motion [{}]", "DLSS 尺寸诊断（首次评估）：句柄 {}，序号 {}；创建时记录的渲染尺寸 {}x{} → 输出 {}x{}；当前渲染尺寸 {}x{}；色彩区域 ({},{}) {}x{}，运动矢量区域 ({},{}) {}x{}，输出区域 ({},{}) {}x{}；色彩 [{}]，输出 [{}]，运动矢量 [{}]"},
     {"DLSS vectors need a 64-bit Direct3D 11, Direct3D 12 or Vulkan game", "DLSS 运动矢量需要 64 位 Direct3D 11、Direct3D 12 或 Vulkan 游戏"},
@@ -288,6 +298,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Forces DLSS-SR's auto-exposure on or off. Applies when the game next creates its DLSS feature.", "强制开启或关闭 DLSS-SR 的自动曝光。游戏下次创建 DLSS 功能时生效。"},
     {"Forwarded as DLSSNR.DepthInverted. NR 310.8 reads depth but never uses it.", "作为 DLSSNR.DepthInverted 传递。NR 310.8 会读取深度信息，但不会使用。"},
     {"Foveated edges", "边缘缩放"},
+    {"Frame generation", "帧生成"},
     {"Frame generation is on: turn on Present with frame generation (Advanced)", "帧生成已开启：请在“高级”中启用“帧生成期间处理后处理”"},
     {"Frame generation is on: {} NR passes can push it past its frame budget; one pass is safest", "帧生成已开启：运行 {} 层 NR 可能超出帧预算；建议使用 1 层"},
     {"Frame generation: off", "帧生成：关闭"},
@@ -296,6 +307,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Full protection at (% of brightness)", "完全保护阈值（亮度百分比）"},
     {"Full-density centre height (%)", "全密度中心高度（%）"},
     {"Full-density centre width (%)", "全密度中心宽度（%）"},
+    {"Fullscreen menu detection", "全屏菜单检测"},
     {"GL_EXT_memory_object_win32 is not offered, so the context cannot import Uplift's textures", "驱动未提供 GL_EXT_memory_object_win32 扩展，无法导入 Uplift 纹理"},
     {"GL_EXT_memory_object_win32 is offered but its functions are missing:", "驱动已提供 GL_EXT_memory_object_win32 扩展，但缺少相应函数："},
     {"GRACE", "宽限期"},
@@ -894,6 +906,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Turn on", "启用"},
     {"Turn on Keep faces (Look) first", "请先在“外观”中启用“保护面部”。"},
     {"UI correction", "UI 校正"},
+    {"UI recomposition", "UI 重组"},
     {"UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, HRESULT {:#010x})", "无法向 Uplift 辅助进程共享 UPLIFT_MASK（DXGI_FORMAT {}，HRESULT {:#010x}）"},
     {"UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, {})", "无法向 Uplift 辅助进程共享 UPLIFT_MASK（DXGI_FORMAT {}，{}）"},
     {"UPLIFT_MASK could not be shared with the Direct3D 11 relay (DXGI_FORMAT {}, HRESULT {:#010x})", "无法向 Direct3D 11 中继共享 UPLIFT_MASK（DXGI_FORMAT {}，HRESULT {:#010x}）"},
