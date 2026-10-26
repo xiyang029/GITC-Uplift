@@ -13,7 +13,8 @@ namespace uplift::addon {
 // first read, so a change lands at the process's next start (MFG-Unlocker's "live switching" needs
 // pattern-scanning the provider's cached reader; deliberately not ported).
 //
-// ABI facts (public NVAPI: NVDRS_SETTING_V1, and the discovered setting id) after MFG-Unlocker, MIT.
+// The driver setting is NVDRS_SETTING_V1, NVIDIA's own structure from nvapi.h (nothing hand-copied);
+// the setting id is the discovered one, after MFG-Unlocker, MIT.
 
 // The panel's choice: 0 = the game's/driver's own, 1 = A, 2 = B, 3 = C (C is DLSS-G 310.9.16+'s
 // "performance mode"; older providers ignore it). Pushed by the add-on at init and on SaveAndApply.

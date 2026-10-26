@@ -41,6 +41,8 @@ struct OverlayView {
   std::string dlss_mode_line;  // "DLSS mode: Ultra Performance (1536x864 of 2560x1440)"; the game feature's create-time mode, empty before its DLSS is seen
   std::string work_line;       // "Working at 1920x1080 of 3840x2160 (Edge-aware)"; empty before a frame
   std::string exposure_line;   // Plan 17: "Input exposure: metered (the game's exposure was 6.3 stops off)"; empty when none is used
+  std::string latency_line;    // addon/reflex_override.cpp: "Latency: 9.4 ms PC, 6.1 ms input, ..." from the driver's frame report; empty until the game marks frames
+  std::string driver_line;     // addon/reflex_override.cpp: "Driver: VRR on, fullscreen i-flip on, panel vsync off"; empty until the first sleep-status sample
   std::string chain_line;      // split chain: "Chain: pass 1 before upscaling (960x540), 2 at Present (1920x1080)", and the chain's note; empty otherwise
   std::string mask_note;       // "NR mask: UPLIFT_MASK (1920x1080)", or why not
   std::string frame_generation_warning;  // shown under Pass count when it applies; empty otherwise

@@ -16,6 +16,9 @@ if not exist "%VSDIR%\VC\Auxiliary\Build\%VCVARS%" (
 )
 call "%VSDIR%\VC\Auxiliary\Build\%VCVARS%" >nul || exit /b 1
 cd /d "%~dp0"
+rem Known trap: this toolchain's cl prints /showIncludes notes in the localized form, so Ninja never
+rem records header dependencies and editing only a header keeps the previous object files. After a
+rem header-only edit, touch a .cpp of the same target (VSLANG=1033 does not change cl's language here).
 call tools\fetch_deps.cmd || exit /b 1
 cmake --preset %PRESET% || exit /b 1
 cmake --build --preset %PRESET% || exit /b 1

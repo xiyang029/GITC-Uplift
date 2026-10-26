@@ -2,66 +2,53 @@
 
 // The shared, read-mostly NvAPI resolver (addon/nvapi_query.hpp).
 //
-// The Reflex override (addon/reflex_override.cpp) needs nvapi_QueryInterface to reach
-// NvAPI_D3D_SetSleepMode's internal implementation, and the Streamline FG hooks
-// (addon/sl_fg_hooks.cpp) read the live frame-generation multiplier through
-// NvAPI_D3D_GetSleepStatus. Both interface ids resolve through the same
-// nvapi_QueryInterface export, cached once per process like the FG preset hook's
-// DRS resolver (addon/fg_preset.cpp).
+// The Reflex override (addon/reflex_override.cpp) is the only caller: it needs nvapi_QueryInterface
+// to reach NvAPI_D3D_SetSleepMode's internal implementation, reads the driver's own state through
+// NvAPI_D3D_GetSleepStatus, and samples NvAPI_D3D_GetLatency for the panel's latency line. Every id
+// resolves through the same nvapi_QueryInterface export, cached once per process like the FG preset
+// hook's DRS resolver (addon/fg_preset.cpp).
+//
+// The structures are NVIDIA's own (nvapi.h, shipped by the pinned Streamline commit): nothing
+// here is a hand-copied ABI. NV_SET_SLEEP_MODE_PARAMS' version a caller sends is
+// MAKE_NVAPI_VERSION(NV_SET_SLEEP_MODE_PARAMS_V1, 1) = sizeof | 1 << 16 = 0x1002c, which is what
+// KnownSleepModeVersion in reflex_override.cpp checks against.
 
 #include <windows.h>
 #include <unknwn.h>
 
+#include <nvapi.h>
+#include <nvapi_interface.h>  // NVIDIA's own { "NvAPI_...", id } table, the source of the ids below
+
 #include <cstdint>
+#include <cstring>
 
 namespace uplift::addon::nvapi {
 
-using Status = int32_t;
-constexpr Status kOk = 0;
-constexpr Status kUnavailable = INT32_MIN;  // the library or the interface is not there
+using Status = NvAPI_Status;
+constexpr Status kOk = NVAPI_OK;
+// Not an NvAPI_Status: this project's own "the library or the interface is not there".
+constexpr Status kUnavailable = static_cast<Status>(INT32_MIN);
 
 using QueryInterfaceFn = void*(__cdecl*)(uint32_t);
 
-// Public interface ids from NVIDIA's NvAPI SDK.
-constexpr uint32_t kGetSleepStatusId = 0xAEF96CA1;
-constexpr uint32_t kSetSleepModeId = 0xAC1CA9E0;
-
-// NV_GET_SLEEP_STATUS_PARAMS_V1, 136 bytes. The fields this project reads are named; the
-// live frame-generation multiplier is `frame_generation_multiplier` (MFGAdaUnlock's verified ABI).
-#pragma pack(push, 8)
-struct SleepStatus {
-  uint32_t version;
-  uint8_t low_latency_mode;
-  uint8_t fullscreen_vrr;
-  uint8_t control_panel_vsync;
-  uint32_t sleep_interval_us;
-  uint8_t game_sleep;
-  uint8_t fullscreen_independent_flip;
-  uint8_t frame_generation_multiplier;
-  uint8_t dynamic_frame_generation_control;
-  uint32_t dynamic_frame_time_target_us;
-  uint8_t reserved[114];
-};
-#pragma pack(pop)
-static_assert(sizeof(SleepStatus) == 136, "NV_GET_SLEEP_STATUS_PARAMS_V1 is 136 bytes");
-
-constexpr uint32_t SleepStatusVersion() {
-  return static_cast<uint32_t>(sizeof(SleepStatus)) | (1u << 16u);
+// The NvAPI_QueryInterface ids come from NVIDIA's own table instead of being transcribed here:
+// nvapi_interface.h (MIT, shipped by the pinned Streamline commit next to nvapi.h) is a plain
+// { "NvAPI_...", id } list, so the names this file needs are looked up in it. nvapi.h declares the
+// functions and their structures but carries no ids, and nvapi64.dll exports only nvapi_QueryInterface.
+inline uint32_t InterfaceId(const char* name) {
+  for (const NVAPI_INTERFACE_TABLE& entry : nvapi_interface_table) {
+    if (entry.func != nullptr && std::strcmp(entry.func, name) == 0) return entry.id;
+  }
+  return 0u;  // not in the table: Interface() then resolves no entry point
 }
 
-// NV_SET_SLEEP_MODE_PARAMS_V1: NvU32 version, then five NvU32 booleans/interval, then 30 reserved
-// bytes -- 54 bytes of fields, 56 once the structure's 4-byte alignment rounds it up. Field order
-// matters; see NvAPI_D3D_SetSleepMode in nvapi.h.
-struct SleepModeParams {
-  uint32_t version;
-  uint32_t b_low_latency_mode;
-  uint32_t b_low_latency_boost;
-  uint32_t minimum_interval_us;
-  uint32_t b_use_markers_to_optimize;
-  uint32_t b_use_min_queue_time;
-  uint8_t reserved[30];
-};
-static_assert(sizeof(SleepModeParams) == 56, "NV_SET_SLEEP_MODE_PARAMS_V1 pads to 56 bytes");
+inline const uint32_t kGetSleepStatusId = InterfaceId("NvAPI_D3D_GetSleepStatus");
+inline const uint32_t kSetSleepModeId = InterfaceId("NvAPI_D3D_SetSleepMode");
+inline const uint32_t kGetLatencyId = InterfaceId("NvAPI_D3D_GetLatency");
+
+using SleepStatus = NV_GET_SLEEP_STATUS_PARAMS;
+using SleepModeParams = NV_SET_SLEEP_MODE_PARAMS;
+using LatencyResult = NV_LATENCY_RESULT_PARAMS;
 
 // The system's nvapi64.dll, or null when the driver has not loaded it into this process yet.
 inline HMODULE Module() {
@@ -95,9 +82,19 @@ inline SleepSample GetSleepStatus(IUnknown* device) {
   if (device == nullptr) return sample;
   const auto get = Interface<Status(__cdecl*)(IUnknown*, SleepStatus*)>(kGetSleepStatusId);
   if (get == nullptr) return sample;
-  sample.sleep.version = SleepStatusVersion();
+  sample.sleep.version = NV_GET_SLEEP_STATUS_PARAMS_VER;
   sample.status = get(device, &sample.sleep);
   return sample;
+}
+
+// The latency report: the newest completed frame sits at element 63 (nvapi.h's NvAPI_D3D_GetLatency
+// comment), and every frame is zeroed until the game has marked at least that many frames.
+inline Status GetLatency(IUnknown* device, LatencyResult* out) {
+  if (device == nullptr || out == nullptr) return kUnavailable;
+  const auto get = Interface<Status(__cdecl*)(IUnknown*, LatencyResult*)>(kGetLatencyId);
+  if (get == nullptr) return kUnavailable;
+  out->version = NV_LATENCY_RESULT_PARAMS_VER;
+  return get(device, out);
 }
 
 }  // namespace uplift::addon::nvapi

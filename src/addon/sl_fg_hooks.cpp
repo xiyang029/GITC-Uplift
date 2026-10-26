@@ -1,6 +1,7 @@
 #include "addon/sl_fg_hooks.hpp"
 
 #include <MinHook.h>
+#include <sl_dlss_g.h>
 
 #include <atomic>
 #include <cstring>
@@ -17,119 +18,15 @@
 namespace uplift::addon::slfg {
 namespace {
 
-// ---- The Streamline ABI this file speaks (sl.h / sl_dlss_g.h, SDK 2.x) ----
-// The layouts are copied field-for-field from the SDK headers so the game's structures can be
-// read and rebuilt byte-compatibly. Every unknown version is refused (forwarded unchanged),
-// never guessed at.
+// ---- The Streamline ABI this file speaks (sl_dlss_g.h, the pinned SDK's own headers) ----
+// The structures, enums, GUIDs and signatures below are the SDK's, not copies of it: the game's
+// own sl::DLSSGOptions/sl::DLSSGState/sl::ViewportHandle are read and rebuilt exactly as NVIDIA
+// declares them, including DLSSGOptions' own field defaults (bReserved15 = eInvalid). Every
+// unknown structVersion is refused (forwarded unchanged), never guessed at.
 
-enum class SlResult : uint32_t {
-  eOk = 0,
-  eErrorDeviceNotCreated = 5,
-  eErrorNGXFailed = 15,
-  eErrorNotInitialized = 21,
-  eErrorInitNotCalled = 23,
-  eErrorInvalidParameter = 25,
-  eErrorUnsupportedInterface = 30,
-  eErrorFeatureNotSupported = 32,
-  eErrorFeatureManagerInvalidState = 37,
-  eErrorInvalidState = 38,
-};
-
-constexpr uint32_t kFeatureDLSS_G = 1000u;
-
-enum class SlDlssgMode : uint32_t {
-  eOff = 0,
-  eOn = 1,
-  eAuto = 2,
-  eDynamic = 3,
-};
-
-enum class SlBoolean : char {
-  eFalse = 0,
-  eTrue = 1,
-  eInvalid = 2,
-};
-
-// sl::BaseStructure: a chained pointer, the structure's GUID, and its version.
-struct SlGuid {
-  uint32_t data1;
-  uint16_t data2;
-  uint16_t data3;
-  uint8_t data4[8];
-};
-static_assert(sizeof(SlGuid) == 16);
-
-struct SlBaseStructure {
-  void* next;
-  SlGuid struct_type;
-  size_t struct_version;
-};
-static_assert(sizeof(SlBaseStructure) == 32);
-
-// sl::DLSSGState's StructType GUID {CC8AC8E1-A179-44F5-97FA-E74112F9BC61}, for the addon-owned
-// probe structures (sl_dlss_g.h).
-constexpr SlGuid kDlssgStateGuid{0xcc8ac8e1, 0xa179, 0x44f5, {0x97, 0xfa, 0xe7, 0x41, 0x12, 0xf9, 0xbc, 0x61}};
-
-constexpr size_t kOptionsVersion1 = 1;
-constexpr size_t kOptionsVersion2 = 2;
-constexpr size_t kOptionsVersion3 = 3;
-constexpr size_t kOptionsVersion4 = 4;
-constexpr size_t kOptionsVersion5 = 5;
-
-struct SlViewportHandle : SlBaseStructure {
-  uint32_t value;
-};
-static_assert(sizeof(SlViewportHandle) == 40);
-
-// sl::DLSSGOptions, kStructVersion5.
-struct SlDlssgOptions : SlBaseStructure {
-  SlDlssgMode mode;
-  uint32_t num_frames_to_generate;  // generated frames: 2x -> 1, 3x -> 2, 4x -> 3
-  uint32_t flags;
-  uint32_t dynamic_res_width;
-  uint32_t dynamic_res_height;
-  uint32_t num_back_buffers;
-  uint32_t mvec_depth_width;
-  uint32_t mvec_depth_height;
-  uint32_t color_width;
-  uint32_t color_height;
-  uint32_t color_buffer_format;
-  uint32_t mvec_buffer_format;
-  uint32_t depth_buffer_format;
-  uint32_t hudless_buffer_format;
-  uint32_t ui_buffer_format;
-  void* on_error_callback;
-  // kStructVersion2
-  SlBoolean b_reserved15;
-  // kStructVersion3
-  uint32_t queue_parallelism_mode;
-  // kStructVersion4
-  SlBoolean enable_user_interface_recomposition;
-  // kStructVersion5
-  float dynamic_target_frame_rate;
-};
-static_assert(sizeof(SlDlssgOptions) == 120);
-
-// sl::DLSSGState, kStructVersion4.
-struct SlDlssgState : SlBaseStructure {
-  uint64_t estimated_vram_usage_in_bytes;
-  uint32_t status;
-  uint32_t min_width_or_height;
-  uint32_t num_frames_actually_presented;
-  // kStructVersion2
-  uint32_t num_frames_to_generate_max;
-  SlBoolean b_reserved4;
-  SlBoolean b_is_vsync_support_available;
-  void* inputs_processing_completion_fence;
-  uint64_t last_present_inputs_processing_completion_fence_value;
-  // kStructVersion4
-  SlBoolean b_is_dynamic_mfg_supported;
-};
-static_assert(sizeof(SlDlssgState) == 88);
-
-using GetFeatureFunctionFn = SlResult(__cdecl*)(uint32_t feature, const char* function_name, void** function);
-using SetOptionsFn = SlResult(__cdecl*)(const SlViewportHandle&, const SlDlssgOptions&);
-using GetStateFn = SlResult(__cdecl*)(const SlViewportHandle&, SlDlssgState&, const SlDlssgOptions*);
+using SetOptionsFn = PFun_slDLSSGSetOptions*;
+using GetStateFn = PFun_slDLSSGGetState*;
+using GetFeatureFunctionFn = PFun_slGetFeatureFunction*;
 
 // ---- The panel's choices ----
 
@@ -154,31 +51,16 @@ std::atomic<uint32_t> g_dynamic_set_failures{0u};
 std::atomic<uint32_t> g_dynamic_probe_failures{0u};
 std::atomic<uint32_t> g_state_logs{0u};
 
-// ---- The release-stack allowlist (Dynamic MFG) ----
-// NVIDIA's Dynamic MFG is only release-supported on Streamline 2.14.1/2.14.16 with DLSS-G
-// 310.9.1/310.9.16 (MFGAdaUnlock's verified pairs); anything else keeps fixed MFG.
+// ---- The version stack gate (Dynamic MFG) ----
+// NVIDIA releases Dynamic MFG on Streamline 2.14.1/2.14.16 with DLSS-G 310.9.1/310.9.16, but this
+// project does not gate on those numbers: the authoritative gate is the provider's own
+// bIsDynamicMFGSupported (see DynamicVersionStackReady). All that is needed here is the file
+// version, as proof that the two modules were actually found.
 
 struct SlVersion {
   uint16_t major = 0, minor = 0, patch = 0, revision = 0;
   bool valid = false;
 };
-
-constexpr uint64_t Pack(const SlVersion& v) {
-  return v.valid ? (uint64_t{v.major} << 48) | (uint64_t{v.minor} << 32) | (uint64_t{v.patch} << 16) | v.revision : 0;
-}
-
-constexpr bool IsAllowlisted(uint64_t packed, uint16_t major, uint16_t minor, uint16_t patch) {
-  return packed != 0
-         && packed == ((uint64_t{major} << 48) | (uint64_t{minor} << 32) | (uint64_t{patch} << 16));
-}
-
-constexpr bool IsDynamicDlssgVersion(uint64_t packed) {
-  return IsAllowlisted(packed, 310, 9, 1) || IsAllowlisted(packed, 310, 9, 16);
-}
-
-constexpr bool IsDynamicStreamlineVersion(uint64_t packed) {
-  return IsAllowlisted(packed, 2, 14, 1) || IsAllowlisted(packed, 2, 14, 16);
-}
 
 bool IsMappedImage(HMODULE module) {
   if (module == nullptr) return false;
@@ -255,10 +137,8 @@ void ObserveStreamlineFunctionOwner(const void* function) {
     return;
   }
   if (g_streamline_version_seen.exchange(true, std::memory_order_acq_rel)) return;  // keep the first observation
-  const bool supported = IsDynamicStreamlineVersion(Pack(version));
-  nr::Logf(nr::LogLevel::INFO, "the FG multiplier hooks observed Streamline {}.{}.{}.{} ({}; version readable, Dynamic support itself is gated on the provider's bIsDynamicMFGSupported)",
-           version.major, version.minor, version.patch, version.revision,
-           supported ? "Dynamic MFG release stack" : "outside the 2.14.1/2.14.16 release pairs");
+  nr::Logf(nr::LogLevel::INFO, "the FG multiplier hooks observed Streamline {}.{}.{}.{} (version readable; Dynamic MFG itself is gated on the provider's bIsDynamicMFGSupported)",
+           version.major, version.minor, version.patch, version.revision);
 }
 
 // The DLSS-G provider (sl.dlss_g) module, found by name among the mapped images. Dynamic MFG's
@@ -304,30 +184,27 @@ void ObserveDlssgProviderVersion() {
   }
   const SlVersion version = VersionFromModule(provider);
   if (!version.valid) return;
-  const bool supported = IsDynamicDlssgVersion(Pack(version));
   g_dlssg_version_seen.store(true, std::memory_order_release);
-  nr::Logf(nr::LogLevel::INFO, "the FG multiplier hooks observed the DLSS-G provider {}.{}.{}.{} ({}; version readable, Dynamic support itself is gated on the provider's bIsDynamicMFGSupported)",
-           version.major, version.minor, version.patch, version.revision,
-           supported ? "release stack" : "outside the 310.9.1/310.9.16 release pairs");
+  nr::Logf(nr::LogLevel::INFO, "the FG multiplier hooks observed the DLSS-G provider {}.{}.{}.{} (version readable; Dynamic MFG itself is gated on the provider's bIsDynamicMFGSupported)",
+           version.major, version.minor, version.patch, version.revision);
 }
 
 bool DynamicVersionStackReady() {
-  // The release allowlist (310.9.1/16 with 2.14.1/16) is logged for context, but the
-  // authoritative gate is the provider's own bIsDynamicMFGSupported from GetState: this project
-  // ships no kernel patches whose safety the exact versions would guard, and the OTA override
-  // tree reports versions the fixed allowlist never anticipated. Both versions must merely be
-  // readable, proving the modules were actually found.
+  // The authoritative gate is the provider's own bIsDynamicMFGSupported from GetState: this project
+  // ships no kernel patches whose safety exact versions would guard, and the OTA override tree
+  // reports versions a fixed list would never anticipate. Both versions must merely be readable,
+  // proving the modules were actually found.
   return g_streamline_version_seen.load(std::memory_order_acquire) && g_dlssg_version_seen.load(std::memory_order_acquire);
 }
 
-bool IsTransientDynamicFailure(SlResult result) {
+bool IsTransientDynamicFailure(sl::Result result) {
   switch (result) {
-    case SlResult::eErrorDeviceNotCreated:
-    case SlResult::eErrorNGXFailed:
-    case SlResult::eErrorNotInitialized:
-    case SlResult::eErrorInitNotCalled:
-    case SlResult::eErrorFeatureManagerInvalidState:
-    case SlResult::eErrorInvalidState:
+    case sl::Result::eErrorDeviceNotCreated:
+    case sl::Result::eErrorNGXFailed:
+    case sl::Result::eErrorNotInitialized:
+    case sl::Result::eErrorInitNotCalled:
+    case sl::Result::eErrorFeatureManagerInvalidState:
+    case sl::Result::eErrorInvalidState:
       return true;
     default:
       return false;
@@ -336,47 +213,47 @@ bool IsTransientDynamicFailure(SlResult result) {
 
 // ---- The addon-owned options copy (hdr_compat.hpp's BuildAdvancedOptions) ----
 
-bool BuildForwardedOptions(const SlDlssgOptions& source, SlDlssgOptions& destination,
+bool BuildForwardedOptions(const sl::DLSSGOptions& source, sl::DLSSGOptions& destination,
                            uint32_t generated_frames, bool override_generated, bool enable_dynamic,
-                           float dynamic_target_frame_rate) {
-  const size_t version = source.struct_version;
-  if (version < kOptionsVersion1 || version > kOptionsVersion5) return false;
-  if (dynamic_target_frame_rate < 0.0f || dynamic_target_frame_rate > 1000.0f) return false;
+                           float dynamicTargetFrameRate) {
+  const size_t version = source.structVersion;
+  if (version < sl::kStructVersion1 || version > sl::kStructVersion5) return false;
+  if (dynamicTargetFrameRate < 0.0f || dynamicTargetFrameRate > 1000.0f) return false;
 
-  destination = SlDlssgOptions{};
+  destination = sl::DLSSGOptions{};
   destination.next = source.next;
-  // The interposer validates the structure GUID on entry: a zeroed struct_type is refused with
+  // The interposer validates the structure GUID on entry: a zeroed structType is refused with
   // eErrorMissingInputParameter no matter what else the copy says. Always carry the game's own.
-  destination.struct_type = source.struct_type;
+  destination.structType = source.structType;
   // Generating more than one frame needs the newer options fields (the OTA override provider
   // refuses a v2 request with eErrorMissingInputParameter for 3x/4x): promote to v5 whenever the
   // request is modified, with the added fields at their defaults. eDynamic needs v5 anyway.
   const bool modified = enable_dynamic || (override_generated && generated_frames > 0u);
-  const size_t required_version = modified ? kOptionsVersion5 : kOptionsVersion1;
-  destination.struct_version = version > required_version ? version : required_version;
+  const size_t required_version = modified ? sl::kStructVersion5 : sl::kStructVersion1;
+  destination.structVersion = version > required_version ? version : required_version;
 
-  destination.mode = enable_dynamic && source.mode != SlDlssgMode::eOff ? SlDlssgMode::eDynamic : source.mode;
-  destination.num_frames_to_generate = override_generated ? generated_frames : source.num_frames_to_generate;
+  destination.mode = enable_dynamic && source.mode != sl::DLSSGMode::eOff ? sl::DLSSGMode::eDynamic : source.mode;
+  destination.numFramesToGenerate = override_generated ? generated_frames : source.numFramesToGenerate;
   destination.flags = source.flags;
-  destination.dynamic_res_width = source.dynamic_res_width;
-  destination.dynamic_res_height = source.dynamic_res_height;
-  destination.num_back_buffers = source.num_back_buffers;
-  destination.mvec_depth_width = source.mvec_depth_width;
-  destination.mvec_depth_height = source.mvec_depth_height;
-  destination.color_width = source.color_width;
-  destination.color_height = source.color_height;
-  destination.color_buffer_format = source.color_buffer_format;
-  destination.mvec_buffer_format = source.mvec_buffer_format;
-  destination.depth_buffer_format = source.depth_buffer_format;
-  destination.hudless_buffer_format = source.hudless_buffer_format;
-  destination.ui_buffer_format = source.ui_buffer_format;
-  destination.on_error_callback = source.on_error_callback;
-  if (version >= kOptionsVersion2) destination.b_reserved15 = source.b_reserved15;
-  if (version >= kOptionsVersion3) destination.queue_parallelism_mode = source.queue_parallelism_mode;
-  destination.enable_user_interface_recomposition =
-      version >= kOptionsVersion4 ? source.enable_user_interface_recomposition : SlBoolean::eFalse;
-  if (version >= kOptionsVersion5) destination.dynamic_target_frame_rate = source.dynamic_target_frame_rate;
-  if (enable_dynamic) destination.dynamic_target_frame_rate = dynamic_target_frame_rate;
+  destination.dynamicResWidth = source.dynamicResWidth;
+  destination.dynamicResHeight = source.dynamicResHeight;
+  destination.numBackBuffers = source.numBackBuffers;
+  destination.mvecDepthWidth = source.mvecDepthWidth;
+  destination.mvecDepthHeight = source.mvecDepthHeight;
+  destination.colorWidth = source.colorWidth;
+  destination.colorHeight = source.colorHeight;
+  destination.colorBufferFormat = source.colorBufferFormat;
+  destination.mvecBufferFormat = source.mvecBufferFormat;
+  destination.depthBufferFormat = source.depthBufferFormat;
+  destination.hudLessBufferFormat = source.hudLessBufferFormat;
+  destination.uiBufferFormat = source.uiBufferFormat;
+  destination.onErrorCallback = source.onErrorCallback;
+  if (version >= sl::kStructVersion2) destination.bReserved15 = source.bReserved15;
+  if (version >= sl::kStructVersion3) destination.queueParallelismMode = source.queueParallelismMode;
+  destination.enableUserInterfaceRecomposition =
+      version >= sl::kStructVersion4 ? source.enableUserInterfaceRecomposition : sl::Boolean::eFalse;
+  if (version >= sl::kStructVersion5) destination.dynamicTargetFrameRate = source.dynamicTargetFrameRate;
+  if (enable_dynamic) destination.dynamicTargetFrameRate = dynamicTargetFrameRate;
   return true;
 }
 
@@ -384,7 +261,7 @@ bool BuildForwardedOptions(const SlDlssgOptions& source, SlDlssgOptions& destina
 // Every wrapper decision logs once per distinct shape: these lines are how a live test says WHY
 // an override did or did not land (called at all? which ABI? which branch? what result?).
 
-void LogSlResult(const char* what, SlResult result) {
+void LogSlResult(const char* what, sl::Result result) {
   nr::Logf(nr::LogLevel::INFO, "sl-fg: {} -> sl result {}", what, static_cast<uint32_t>(result));
 }
 
@@ -401,13 +278,13 @@ std::atomic<bool> g_override_applied_logged{false};
 // re-submitted from the add-on's Present poll (the game's present thread), once per change; a
 // refused replay fails safe back to waiting for the game's own next call.
 SRWLOCK g_replay_lock = SRWLOCK_INIT;
-SlViewportHandle g_replay_viewport{};
-SlDlssgOptions g_replay_options{};
+sl::ViewportHandle g_replay_viewport{};
+sl::DLSSGOptions g_replay_options{};
 bool g_replay_valid = false;
 std::atomic<bool> g_replay_pending{false};
 
-void CacheReplaySubmission(const SlViewportHandle& viewport, const SlDlssgOptions& options) {
-  if (options.mode == SlDlssgMode::eOff) return;
+void CacheReplaySubmission(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options) {
+  if (options.mode == sl::DLSSGMode::eOff) return;
   AcquireSRWLockExclusive(&g_replay_lock);
   g_replay_viewport = viewport;
   g_replay_options = options;
@@ -425,18 +302,18 @@ bool DynamicReady(bool game_enabled) {
 // Submits `options` (an addon-owned copy when generated_frames is overridden or dynamic is on),
 // owning the Dynamic retry ladder. Fixed-multiplier retries and native fallback live in
 // HookedSetOptions, so a rejected fixed override is never masked as a success here.
-SlResult CallSetOptions(const SlViewportHandle& viewport, const SlDlssgOptions& options,
+sl::Result CallSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options,
                         uint32_t generated_frames = 0u, bool override_generated = false) {
   const auto real = g_real_set_options.load(std::memory_order_acquire);
-  if (real == nullptr) return SlResult::eErrorNotInitialized;
+  if (real == nullptr) return sl::Result::eErrorNotInitialized;
 
-  const bool game_enabled = options.mode != SlDlssgMode::eOff;
+  const bool game_enabled = options.mode != sl::DLSSGMode::eOff;
   const bool dynamic = DynamicReady(game_enabled);
 
   if (!dynamic && !override_generated) return real(viewport, options);
 
   const float target = static_cast<float>(g_dynamic_target_fps.load(std::memory_order_relaxed));
-  SlDlssgOptions forwarded{};
+  sl::DLSSGOptions forwarded{};
   if (!BuildForwardedOptions(options, forwarded, generated_frames, override_generated, dynamic, target)) {
     if (override_generated) {
       static std::atomic<bool> warned{false};
@@ -454,12 +331,12 @@ SlResult CallSetOptions(const SlViewportHandle& viewport, const SlDlssgOptions& 
     return real(viewport, options);
   }
 
-  const SlResult result = real(viewport, forwarded);
+  const sl::Result result = real(viewport, forwarded);
   if (dynamic) {
     nr::Logf(nr::LogLevel::INFO, "sl-fg: dynamic submission (eDynamic, target {}) -> sl result {}", target == 0.0f ? "active-display refresh" : std::to_string(static_cast<unsigned>(target)) + " FPS",
              static_cast<uint32_t>(result));
   }
-  if (result == SlResult::eOk) {
+  if (result == sl::Result::eOk) {
     if (dynamic) {
       g_dynamic_set_failures.store(0u, std::memory_order_relaxed);
       g_dynamic_fell_back.store(false, std::memory_order_relaxed);
@@ -474,10 +351,10 @@ SlResult CallSetOptions(const SlViewportHandle& viewport, const SlDlssgOptions& 
   if (dynamic) {
     // One bounded retry without the dynamic mode: if plain options also fail, the failure is the
     // game's own request, not eDynamic.
-    SlDlssgOptions plain{};
+    sl::DLSSGOptions plain{};
     if (BuildForwardedOptions(options, plain, generated_frames, override_generated, false, 0.0f)) {
-      const SlResult retry = real(viewport, plain);
-      if (retry == SlResult::eOk) {
+      const sl::Result retry = real(viewport, plain);
+      if (retry == sl::Result::eOk) {
         if (!g_dynamic_fell_back.exchange(true, std::memory_order_relaxed)) {
           nr::Logf(nr::LogLevel::WARN, "NVIDIA Dynamic MFG was rejected with sl result {}; fixed mode was restored and accepted",
                    static_cast<uint32_t>(result));
@@ -503,11 +380,11 @@ SlResult CallSetOptions(const SlViewportHandle& viewport, const SlDlssgOptions& 
   return result;
 }
 
-SlResult __cdecl HookedSetOptions(const SlViewportHandle& viewport, const SlDlssgOptions& options) {
+sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options) {
   const auto real = g_real_set_options.load(std::memory_order_acquire);
-  if (real == nullptr) return SlResult::eErrorNotInitialized;
+  if (real == nullptr) return sl::Result::eErrorNotInitialized;
 
-  const bool game_enabled = options.mode != SlDlssgMode::eOff;
+  const bool game_enabled = options.mode != sl::DLSSGMode::eOff;
   if (!game_enabled) {
     // A game-side off/on cycle is a safe retry boundary after a rejection.
     g_dynamic_declined.store(false, std::memory_order_release);
@@ -517,11 +394,11 @@ SlResult __cdecl HookedSetOptions(const SlViewportHandle& viewport, const SlDlss
 
   const bool dynamic_ready = DynamicReady(game_enabled);
   const uint32_t multiplier = g_force_multiplier.load(std::memory_order_relaxed);
-  const uint32_t requested = options.num_frames_to_generate;
+  const uint32_t requested = options.numFramesToGenerate;
   if (game_enabled) CacheReplaySubmission(viewport, options);
   nr::Logf(nr::LogLevel::INFO,
            "sl-fg: slDLSSGSetOptions(mode {}, v{}, numFramesToGenerate {} = {}x); panel: multiplier {}, dynamic {} -> {}",
-           static_cast<uint32_t>(options.mode), options.struct_version, requested, requested + 1u, multiplier,
+           static_cast<uint32_t>(options.mode), options.structVersion, requested, requested + 1u, multiplier,
            g_dynamic_enabled.load(std::memory_order_relaxed) ? "on" : "off",
            dynamic_ready ? "eligible" : "not eligible");
   if (!dynamic_ready && g_dynamic_enabled.load(std::memory_order_relaxed)) {
@@ -538,43 +415,43 @@ SlResult __cdecl HookedSetOptions(const SlViewportHandle& viewport, const SlDlss
   // Fixed-multiplier force policy (force_policy.hpp): Off is never rewritten; Dynamic owns the
   // selection while it is eligible; otherwise 2..6 replaces the game's count with multiplier-1.
   if (!game_enabled || dynamic_ready) {
-    const SlResult result = !game_enabled ? real(viewport, options) : CallSetOptions(viewport, options);
+    const sl::Result result = !game_enabled ? real(viewport, options) : CallSetOptions(viewport, options);
     LogSlResult(!game_enabled ? "forwarded the game's Off request unchanged" : "dynamic-priority passthrough", result);
     return result;
   }
 
   if (multiplier < 2u || multiplier > kMaxMultiplier) {
-    const SlResult result = real(viewport, options);
+    const sl::Result result = real(viewport, options);
     LogSlResult("no panel multiplier selected; forwarded unchanged", result);
     return result;
   }
 
   const uint32_t desired = multiplier - 1u;
   if (desired == requested) {
-    const SlResult result = real(viewport, options);
+    const sl::Result result = real(viewport, options);
     LogSlResult("the game's request already equals the panel's multiplier", result);
     return result;
   }
 
-  if (options.struct_version < kOptionsVersion1 || options.struct_version > kOptionsVersion5) {
+  if (options.structVersion < sl::kStructVersion1 || options.structVersion > sl::kStructVersion5) {
     static std::atomic<bool> warned{false};
     if (!warned.exchange(true, std::memory_order_relaxed)) {
       nr::Logf(nr::LogLevel::WARN, "the FG multiplier override refuses an unknown DLSSGOptions ABI; forwarding the game's request unchanged");
     }
-    const SlResult result = real(viewport, options);
+    const sl::Result result = real(viewport, options);
     LogSlResult("unknown DLSSGOptions ABI; forwarded unchanged", result);
     return result;
   }
 
-  SlResult result = CallSetOptions(viewport, options, desired, true);
+  sl::Result result = CallSetOptions(viewport, options, desired, true);
   LogSlResult("override submission (attempt 1)", result);
-  if (result != SlResult::eOk) {
+  if (result != sl::Result::eOk) {
     // eErrorFeatureManagerInvalidState can simply mean DLSS-G was not ready yet. Retry once
     // with the SAME overridden count before giving the count up as refused (MFGAdaUnlock's
     // lesson: dropping straight back would silently discard a working 4x).
-    const SlResult retry = CallSetOptions(viewport, options, desired, true);
+    const sl::Result retry = CallSetOptions(viewport, options, desired, true);
     LogSlResult("override submission (retry)", retry);
-    if (retry == SlResult::eOk) {
+    if (retry == sl::Result::eOk) {
       nr::Logf(nr::LogLevel::INFO, "slDLSSGSetOptions returned {} on the first attempt but accepted the override on retry; that first failure was feature-manager state",
                static_cast<uint32_t>(result));
       result = retry;
@@ -584,7 +461,7 @@ SlResult __cdecl HookedSetOptions(const SlViewportHandle& viewport, const SlDlss
                  desired, static_cast<uint32_t>(result), static_cast<uint32_t>(retry), requested);
       }
       // Never leave the player without FG: put the game's own request through.
-      const SlResult fallback = real(viewport, options);
+      const sl::Result fallback = real(viewport, options);
       LogSlResult("fallback to the game's own request after a refused override", fallback);
       return fallback;
     }
@@ -597,23 +474,23 @@ SlResult __cdecl HookedSetOptions(const SlViewportHandle& viewport, const SlDlss
   return result;
 }
 
-SlResult __cdecl HookedGetState(const SlViewportHandle& viewport, SlDlssgState& state, const SlDlssgOptions* options) {
+sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& state, const sl::DLSSGOptions* options) {
   // Another addon or a reloaded wrapper can hand out a pointer that calls back into this
   // wrapper; re-entering would overflow the stack.
   thread_local bool call_active = false;
-  if (call_active) return SlResult::eErrorInvalidState;
+  if (call_active) return sl::Result::eErrorInvalidState;
 
   const auto real = g_real_get_state.load(std::memory_order_acquire);
-  if (real == nullptr) return SlResult::eErrorNotInitialized;
+  if (real == nullptr) return sl::Result::eErrorNotInitialized;
 
-  const size_t caller_version = state.struct_version;
-  SlResult result;
-  SlDlssgState extended{};
+  const size_t caller_version = state.structVersion;
+  sl::Result result;
+  sl::DLSSGState extended{};
   constexpr uint32_t kMaxDynamicProbeFailures = 8u;
   // Games older than the v4 state ABI cannot see bIsDynamicMFGSupported; query v4 into
   // addon-owned storage and copy back only what the caller's ABI guarantees.
   const bool probe_dynamic_state =
-      caller_version >= kOptionsVersion1 && caller_version < kOptionsVersion4
+      caller_version >= sl::kStructVersion1 && caller_version < sl::kStructVersion4
       && g_dynamic_probe_failures.load(std::memory_order_relaxed) < kMaxDynamicProbeFailures;
   // Some games poll GetState every frame: log the first few calls only.
   const uint32_t logged = g_state_logs.fetch_add(1u, std::memory_order_relaxed);
@@ -621,34 +498,34 @@ SlResult __cdecl HookedGetState(const SlViewportHandle& viewport, SlDlssgState& 
     nr::Logf(nr::LogLevel::INFO, "sl-fg: slDLSSGGetState(v{}), probing v4 for Dynamic support: {}", caller_version,
              probe_dynamic_state ? "yes" : "no");
   }
-  const SlDlssgState* observed = &state;
+  const sl::DLSSGState* observed = &state;
   if (probe_dynamic_state) {
     // Query v4 into addon-owned storage: the header must name the v4 ABI (a zero-initialized
-    // struct_version would query nothing and no dynamic flag would ever come back).
+    // structVersion would query nothing and no dynamic flag would ever come back).
     extended.next = state.next;
-    extended.struct_type = state.struct_type;
-    extended.struct_version = kOptionsVersion4;
+    extended.structType = state.structType;
+    extended.structVersion = sl::kStructVersion4;
     call_active = true;
     result = real(viewport, extended, options);
     call_active = false;
-    if (result == SlResult::eOk) {
+    if (result == sl::Result::eOk) {
       g_dynamic_probe_failures.store(0u, std::memory_order_relaxed);
       observed = &extended;
-      state.estimated_vram_usage_in_bytes = extended.estimated_vram_usage_in_bytes;
+      state.estimatedVRAMUsageInBytes = extended.estimatedVRAMUsageInBytes;
       state.status = extended.status;
-      state.min_width_or_height = extended.min_width_or_height;
-      state.num_frames_actually_presented = extended.num_frames_actually_presented;
-      if (caller_version >= kOptionsVersion2) {
-        state.num_frames_to_generate_max = extended.num_frames_to_generate_max;
-        state.b_reserved4 = extended.b_reserved4;
-        state.b_is_vsync_support_available = extended.b_is_vsync_support_available;
-        state.inputs_processing_completion_fence = extended.inputs_processing_completion_fence;
-        state.last_present_inputs_processing_completion_fence_value = extended.last_present_inputs_processing_completion_fence_value;
+      state.minWidthOrHeight = extended.minWidthOrHeight;
+      state.numFramesActuallyPresented = extended.numFramesActuallyPresented;
+      if (caller_version >= sl::kStructVersion2) {
+        state.numFramesToGenerateMax = extended.numFramesToGenerateMax;
+        state.bReserved4 = extended.bReserved4;
+        state.bIsVsyncSupportAvailable = extended.bIsVsyncSupportAvailable;
+        state.inputsProcessingCompletionFence = extended.inputsProcessingCompletionFence;
+        state.lastPresentInputsProcessingCompletionFenceValue = extended.lastPresentInputsProcessingCompletionFenceValue;
       }
     } else {
-      const bool structurally_unsupported = result == SlResult::eErrorInvalidParameter
-                                            || result == SlResult::eErrorUnsupportedInterface
-                                            || result == SlResult::eErrorFeatureNotSupported;
+      const bool structurally_unsupported = result == sl::Result::eErrorInvalidParameter
+                                            || result == sl::Result::eErrorUnsupportedInterface
+                                            || result == sl::Result::eErrorFeatureNotSupported;
       g_dynamic_probe_failures.store(structurally_unsupported ? kMaxDynamicProbeFailures : g_dynamic_probe_failures.load(std::memory_order_relaxed) + 1u,
                                      std::memory_order_relaxed);
       call_active = true;
@@ -662,14 +539,14 @@ SlResult __cdecl HookedGetState(const SlViewportHandle& viewport, SlDlssgState& 
   }
 
   if (logged < 10u) {
-    const int dynamic_flag = observed->struct_version >= kOptionsVersion4 ? static_cast<int>(observed->b_is_dynamic_mfg_supported) : -1;
+    const int dynamic_flag = observed->structVersion >= sl::kStructVersion4 ? static_cast<int>(observed->bIsDynamicMFGSupported) : -1;
     nr::Logf(nr::LogLevel::INFO, "sl-fg: slDLSSGGetState -> result {}, max generated {}, dynamic flag {} (state v{})",
-             static_cast<uint32_t>(result), observed->num_frames_to_generate_max, dynamic_flag, observed->struct_version);
+             static_cast<uint32_t>(result), observed->numFramesToGenerateMax, dynamic_flag, observed->structVersion);
   }
-  if (result == SlResult::eOk) {
-    if (observed->struct_version >= kOptionsVersion4
-        && (observed->b_is_dynamic_mfg_supported == SlBoolean::eTrue || observed->b_is_dynamic_mfg_supported == SlBoolean::eFalse)) {
-      const bool supported = observed->b_is_dynamic_mfg_supported == SlBoolean::eTrue;
+  if (result == sl::Result::eOk) {
+    if (observed->structVersion >= sl::kStructVersion4
+        && (observed->bIsDynamicMFGSupported == sl::Boolean::eTrue || observed->bIsDynamicMFGSupported == sl::Boolean::eFalse)) {
+      const bool supported = observed->bIsDynamicMFGSupported == sl::Boolean::eTrue;
       const bool previous = g_dynamic_supported.exchange(supported, std::memory_order_acq_rel);
       const bool was_seen = g_dynamic_support_seen.exchange(true, std::memory_order_release);
       if (!was_seen || previous != supported) {
@@ -681,8 +558,8 @@ SlResult __cdecl HookedGetState(const SlViewportHandle& viewport, SlDlssgState& 
 
   // The runtime's own ceiling, before this add-on advertises more (max-so-far: a runtime may report
   // less until DLSS-G is enabled). The FG row's 5x/6x and the advertisement below stop above it.
-  if (result == SlResult::eOk && (observed != &state || caller_version >= kOptionsVersion2)) {
-    const uint32_t provider_max = observed->num_frames_to_generate_max;
+  if (result == sl::Result::eOk && (observed != &state || caller_version >= sl::kStructVersion2)) {
+    const uint32_t provider_max = observed->numFramesToGenerateMax;
     uint32_t known = g_provider_max_generated.load(std::memory_order_relaxed);
     while (known < provider_max
            && !g_provider_max_generated.compare_exchange_weak(known, provider_max, std::memory_order_relaxed)) {
@@ -691,37 +568,38 @@ SlResult __cdecl HookedGetState(const SlViewportHandle& viewport, SlDlssgState& 
 
   // Raise the ceiling for games that build their native 2x/3x/4x selector from
   // numFramesToGenerateMax (STALKER 2), never above what the runtime itself reports.
-  if (result != SlResult::eOk || caller_version < kOptionsVersion2) return result;
+  if (result != sl::Result::eOk || caller_version < sl::kStructVersion2) return result;
   const uint32_t wanted = g_advertised_max.load(std::memory_order_relaxed);
   const uint32_t provider_max = g_provider_max_generated.load(std::memory_order_relaxed);
   const uint32_t advertised = (provider_max != 0u && wanted > provider_max) ? provider_max : wanted;
-  if (advertised < 2u || state.num_frames_to_generate_max >= advertised) return result;
-  state.num_frames_to_generate_max = advertised;
+  if (advertised < 2u || state.numFramesToGenerateMax >= advertised) return result;
+  state.numFramesToGenerateMax = advertised;
   return result;
 }
 
-SlResult __cdecl HookedGetFeatureFunction(uint32_t feature, const char* function_name, void** function) {
+sl::Result HookedGetFeatureFunction(sl::Feature feature, const char* function_name, void*& function) {
   const auto real = reinterpret_cast<GetFeatureFunctionFn>(g_real_get_feature_function.load(std::memory_order_acquire));
-  if (real == nullptr || function == nullptr) return SlResult::eErrorInvalidParameter;
-  const SlResult result = real(feature, function_name, function);
+  if (real == nullptr) return sl::Result::eErrorInvalidParameter;
+  const sl::Result result = real(feature, function_name, function);
   // Log every DLSS-G / Reflex function the game asks for: if the wrapper never fires, these lines
   // show what names this integration actually queries (OptiScaler and other shims included).
-  if (function_name != nullptr && (feature == kFeatureDLSS_G || strstr(function_name, "Reflex") != nullptr)) {
-    nr::Logf(nr::LogLevel::INFO, "sl-fg: slGetFeatureFunction(feature {}, '{}') -> {} (result {})", feature,
-             function_name, *function != nullptr ? "a pointer" : "null", static_cast<uint32_t>(result));
+  if (function_name != nullptr && (feature == sl::kFeatureDLSS_G || strstr(function_name, "Reflex") != nullptr)) {
+    nr::Logf(nr::LogLevel::INFO, "sl-fg: slGetFeatureFunction(feature {}, '{}') -> {} (result {})",
+             static_cast<uint32_t>(feature), function_name, function != nullptr ? "a pointer" : "null",
+             static_cast<uint32_t>(result));
   }
-  if (result != SlResult::eOk || function_name == nullptr || *function == nullptr) return result;
-  if (feature == kFeatureDLSS_G && strcmp(function_name, "slDLSSGSetOptions") == 0
-      && *function != reinterpret_cast<void*>(&HookedSetOptions)) {
-    ObserveStreamlineFunctionOwner(*function);
-    g_real_set_options.store(reinterpret_cast<SetOptionsFn>(*function), std::memory_order_release);
-    *function = reinterpret_cast<void*>(&HookedSetOptions);
+  if (result != sl::Result::eOk || function_name == nullptr || function == nullptr) return result;
+  if (feature == sl::kFeatureDLSS_G && strcmp(function_name, "slDLSSGSetOptions") == 0
+      && function != reinterpret_cast<void*>(&HookedSetOptions)) {
+    ObserveStreamlineFunctionOwner(function);
+    g_real_set_options.store(reinterpret_cast<SetOptionsFn>(function), std::memory_order_release);
+    function = reinterpret_cast<void*>(&HookedSetOptions);
     nr::Logf(nr::LogLevel::INFO, "wrapped slDLSSGSetOptions; the FG multiplier override is live");
-  } else if (feature == kFeatureDLSS_G && strcmp(function_name, "slDLSSGGetState") == 0
-             && *function != reinterpret_cast<void*>(&HookedGetState)) {
-    ObserveStreamlineFunctionOwner(*function);
-    g_real_get_state.store(reinterpret_cast<GetStateFn>(*function), std::memory_order_release);
-    *function = reinterpret_cast<void*>(&HookedGetState);
+  } else if (feature == sl::kFeatureDLSS_G && strcmp(function_name, "slDLSSGGetState") == 0
+             && function != reinterpret_cast<void*>(&HookedGetState)) {
+    ObserveStreamlineFunctionOwner(function);
+    g_real_get_state.store(reinterpret_cast<GetStateFn>(function), std::memory_order_release);
+    function = reinterpret_cast<void*>(&HookedGetState);
     nr::Logf(nr::LogLevel::INFO, "wrapped slDLSSGGetState; the multiplier-menu ceiling and Dynamic MFG probing are live");
   }
   return result;
@@ -785,7 +663,7 @@ void SetForceMultiplier(uint32_t multiplier) {
 
 void SetDynamicMfg(bool enabled, uint32_t target_fps) {
   const bool was = g_dynamic_enabled.exchange(enabled, std::memory_order_relaxed);
-  g_dynamic_target_fps.store(target_fps > 1000u ? 0u : target_fps, std::memory_order_relaxed);
+  g_dynamic_target_fps.store(target_fps > 600u ? 0u : target_fps, std::memory_order_relaxed);
   g_replay_pending.store(true, std::memory_order_release);
   if (was != enabled) {
     // A toggle is a safe retry boundary: clear every declined/fallback latch.
@@ -833,32 +711,32 @@ void EnsureSlFgHooks() {
 // Probes the provider's Dynamic-MFG support flag directly: many games call GetState once, before
 // enabling FG, so the wrapper's in-transit probe alone never sees the flag. Bounded to a handful
 // of attempts; called from the Present poll while Dynamic is wanted but unsupported-unseen.
-void ProbeDynamicSupport(const SlViewportHandle& viewport) {
+void ProbeDynamicSupport(const sl::ViewportHandle& viewport) {
   static std::atomic<uint32_t> active_probes{0u};
   if (active_probes.load(std::memory_order_relaxed) >= 8u) return;
   const auto real = g_real_get_state.load(std::memory_order_acquire);
   if (real == nullptr) return;
-  SlDlssgState probe{};
-  probe.struct_type = kDlssgStateGuid;
-  probe.struct_version = kOptionsVersion4;
+  sl::DLSSGState probe{};
+  probe.structType = sl::DLSSGState::s_structType;
+  probe.structVersion = sl::kStructVersion4;
   thread_local bool call_active = false;
   if (call_active) return;
   call_active = true;
-  const SlResult result = real(viewport, probe, nullptr);
+  const sl::Result result = real(viewport, probe, nullptr);
   call_active = false;
   active_probes.fetch_add(1u, std::memory_order_relaxed);
-  const bool flag_valid = probe.struct_version >= kOptionsVersion4
-                          && (probe.b_is_dynamic_mfg_supported == SlBoolean::eTrue
-                              || probe.b_is_dynamic_mfg_supported == SlBoolean::eFalse);
-  if (result == SlResult::eOk && flag_valid) {
-    const bool supported = probe.b_is_dynamic_mfg_supported == SlBoolean::eTrue;
+  const bool flag_valid = probe.structVersion >= sl::kStructVersion4
+                          && (probe.bIsDynamicMFGSupported == sl::Boolean::eTrue
+                              || probe.bIsDynamicMFGSupported == sl::Boolean::eFalse);
+  if (result == sl::Result::eOk && flag_valid) {
+    const bool supported = probe.bIsDynamicMFGSupported == sl::Boolean::eTrue;
     g_dynamic_supported.store(supported, std::memory_order_release);
     g_dynamic_support_seen.store(true, std::memory_order_release);
     nr::Logf(nr::LogLevel::INFO, "sl-fg: active Dynamic support probe: {} (provider max generated {})",
-             supported ? "supported" : "not supported", probe.num_frames_to_generate_max);
+             supported ? "supported" : "not supported", probe.numFramesToGenerateMax);
   } else {
     nr::Logf(nr::LogLevel::INFO, "sl-fg: active Dynamic support probe: result {}, state v{}, flag {}",
-             static_cast<uint32_t>(result), probe.struct_version, static_cast<int>(probe.b_is_dynamic_mfg_supported));
+             static_cast<uint32_t>(result), probe.structVersion, static_cast<int>(probe.bIsDynamicMFGSupported));
   }
 }
 
@@ -867,8 +745,8 @@ void ProbeDynamicSupport(const SlViewportHandle& viewport) {
 // thread). A refusal inside the wrapper fails safe exactly as a game-side call would.
 void RefreshFromPanel() {
   if (!g_replay_pending.exchange(false, std::memory_order_acq_rel)) return;
-  SlViewportHandle viewport{};
-  SlDlssgOptions options{};
+  sl::ViewportHandle viewport{};
+  sl::DLSSGOptions options{};
   bool valid = false;
   AcquireSRWLockShared(&g_replay_lock);
   if (g_replay_valid) {

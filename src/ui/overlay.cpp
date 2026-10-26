@@ -905,6 +905,15 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     changed |= draw_rows(SettingSection::ADVANCED);
   }
 
+  // The latency numbers and the driver's display-path state are live telemetry, not a detail of the
+  // card: they sit above the closed header.
+  if (!view.latency_line.empty()) {
+    gui::TextUnformatted(view.latency_line.c_str());
+  }
+  if (!view.driver_line.empty()) {
+    gui::TextUnformatted(view.driver_line.c_str());
+  }
+
   // ui-review.md §2 finding 2: the wall of status text moves into one closed Details header. It always lists
   // everything, so its content does not depend on the card's state; a working card repeats its details lines.
   if (widgets::SectionHeader("Details", nullptr, nullptr, false, nullptr)) {

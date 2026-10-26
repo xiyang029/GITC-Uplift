@@ -29,6 +29,15 @@ if(NOT EXISTS "${UPLIFT_RESHADE_INCLUDE}/reshade.hpp" OR NOT EXISTS "${UPLIFT_IM
   message(FATAL_ERROR "ReShade/ImGui headers not found; run tools\\fetch_deps.cmd")
 endif()
 
+# The Streamline SDK headers and the NVAPI headers the same pinned commit bundles: the FG hooks
+# (addon/sl_fg_hooks.cpp) and the Reflex override (addon/reflex_override.cpp) speak the sl:: and
+# NV_ structures the SDK ships, so no ABI is hand-copied. x64 only, like the code that uses them.
+set(UPLIFT_SL_INCLUDE "${CMAKE_SOURCE_DIR}/third_party/_deps/streamline/include" CACHE PATH "Streamline SDK headers (pinned commit)")
+set(UPLIFT_NVAPI_INCLUDE "${CMAKE_SOURCE_DIR}/third_party/_deps/streamline/external/nvapi" CACHE PATH "NVAPI headers the pinned Streamline commit bundles")
+if(NOT EXISTS "${UPLIFT_SL_INCLUDE}/sl_dlss_g.h" OR NOT EXISTS "${UPLIFT_NVAPI_INCLUDE}/nvapi.h")
+  message(FATAL_ERROR "Streamline/NVAPI headers not found; run tools\\fetch_deps.cmd")
+endif()
+
 # Plan 11: the Vulkan SDK's headers, for both halves. Nothing links a Vulkan library (vulkan-1.dll is loaded at run time) and nothing from
 # the SDK is copied into the repository.
 find_path(UPLIFT_VULKAN_INCLUDE vulkan/vulkan.h HINTS "$ENV{VULKAN_SDK}/Include" DOC "the Vulkan SDK's Include folder")
@@ -286,6 +295,9 @@ add_library(uplift_addon_core STATIC
   src/addon/launchpad_link.cpp
   src/addon/nr_heartbeat.cpp
   src/addon/dred.cpp)
+# The official sl::/NV_ structures, for the two files that speak those ABIs (SlFgHooks and
+# ReflexOverride); /external:W0 keeps the SDK headers' own warnings out of the build.
+target_include_directories(uplift_addon_core SYSTEM PRIVATE "${UPLIFT_SL_INCLUDE}" "${UPLIFT_NVAPI_INCLUDE}")
 target_link_libraries(uplift_addon_core PUBLIC uplift_sources uplift_ui uplift_ngx_hooks uplift_state bcrypt)
 # The FG preset override hooks NvAPI's DRS reads with the shared MinHook (fg_preset.cpp); the FG
 # multiplier hooks (sl_fg_hooks.cpp) and the Reflex override (reflex_override.cpp) hook Streamline's

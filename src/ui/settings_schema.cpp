@@ -949,7 +949,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .label = "Dynamic MFG target FPS",
         .tooltip = "The frame rate NVIDIA's Dynamic MFG paces toward. 0 follows the active display refresh rate.",
         .min = 0.0,
-        .max = 1000.0,
+        .max = 600.0,
         .step = 1,
         .fast_step = 32,
         // One live SetSleepMode / MFG submission per edit, not one per digit.
@@ -976,8 +976,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::ADVANCED,
         .label = "Reflex FPS cap",
         .tooltip = "A final output-FPS ceiling (after frame generation) submitted through Reflex. Needs the game to call the Reflex "
-                   "sleep each frame, which some games never do -- the log says so. 0 leaves the game's own limiter alone; a lower "
-                   "cap than the game's is always kept.",
+                   "sleep each frame and the driver to honour the submitted interval -- the log says which one is missing. 0 "
+                   "leaves the game's own limiter alone; a lower cap than the game's is always kept.",
         .min = 0.0,
         .max = 1000.0,
         .step = 1,
@@ -985,6 +985,28 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.reflex_fps_cap); },
         .set = [](Settings& s, double v) { s.reflex_fps_cap = static_cast<uint32_t>(v); },
+    },
+    // The two advanced SetSleepMode bits (2026-10-26). They are opt-in: ticked they are forced on in
+    // the rewrite, unticked the game's own value stands.
+    {
+        .key = "ReflexMarkers",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::ADVANCED,
+        .label = "Reflex markers",
+        .tooltip = "Sets bUseMarkersToOptimize in the Reflex sleep submission: the driver may then use the game's latency markers "
+                   "for runtime optimizations. Only worth ticking when the game marks its frames; unticked keeps what the game sent.",
+        .get = [](const Settings& s) { return Flag(s.reflex_use_markers); },
+        .set = [](Settings& s, double v) { s.reflex_use_markers = v != 0.0; },
+    },
+    {
+        .key = "ReflexMinQueueTime",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::ADVANCED,
+        .label = "Reflex min queue time",
+        .tooltip = "Sets bUseMinQueueTime in the Reflex sleep submission: every submission overlap counts toward the queue time, "
+                   "not only the ones between frames. Unticked keeps what the game sent.",
+        .get = [](const Settings& s) { return Flag(s.reflex_use_min_queue_time); },
+        .set = [](Settings& s, double v) { s.reflex_use_min_queue_time = v != 0.0; },
     },
     // The Ray Reconstruction render preset (2026-10-25): one choice for every mode -- RR's default
     // model does not vary by mode (all modes default to F/RR2). The live preset swap writes all six

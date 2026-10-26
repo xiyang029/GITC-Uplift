@@ -61,6 +61,11 @@ using VulkanShutdownFn = NVSDK_NGX_Result(NVSDK_CONV*)(VkDevice);
 // bridge), so the core is never initialised twice for one device.
 constexpr GUID UPLIFT_CORE_INIT_GUID = {0xfb71ea06, 0xb99c, 0x4d65, {0x9e, 0x59, 0x26, 0x19, 0x63, 0x62, 0x8b, 0x74}};
 
+// No header states either a log-callback offset or an image size: both figures were measured on the
+// shipped snippet images themselves (the NGX payload the driver drops beside the game), one pair
+// per DLSS build. The values below are DLSS 310.8 and 310.9.16 as this project has seen them; a
+// build outside them simply is not recognised, and nothing is patched in it.
+//
 // The 310.8 image keeps its NGX log callback in this .data slot. The layout is
 // identified by SizeOfImage, which every known 310.8 build shares (the user's,
 // the compat and the ADA build); TimeDateStamp is not pinned.

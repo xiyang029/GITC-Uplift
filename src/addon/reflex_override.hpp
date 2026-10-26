@@ -10,6 +10,7 @@
 // the game's own request, and a frame limit is only ever tightened, never relaxed.
 
 #include <cstdint>
+#include <string>
 
 namespace uplift::addon::reflex {
 
@@ -34,5 +35,22 @@ void RefreshFromPanel();
 // Diagnostics: samples NvAPI_D3D_GetSleepStatus at most once every two seconds -- the interval
 // the driver holds, whether the game actually calls the Reflex sleep, and the live FG multiplier.
 void LogSleepStatusThrottled();
+
+// The two advanced SetSleepMode bits the panel can force on (NV_SET_SLEEP_MODE_PARAMS'
+// bUseMarkersToOptimize / bUseMinQueueTime). Either one raises the rewrite's own condition, so a
+// ticked box is submitted even with Game mode and no cap; an unticked box leaves the game's value.
+void SetAdvanced(bool use_markers, bool use_min_queue_time);
+
+// The latency readout: samples NvAPI_D3D_GetLatency at most once a second, and formats the newest
+// completed frame (element 63) as one overlay line. Empty until the game marks its frames, which
+// is also when every reported frame is zeroed.
+void PollLatency();
+std::string LatencyLine();
+
+// The driver's display-path state from the same read (NV_GET_SLEEP_STATUS_PARAMS' bFsVrr,
+// bFullscreenIFlip and bCplVsyncOn), as one overlay line. Empty until the first successful sample.
+// bFsVrr is only meaningful while the game is in the foreground; bCplVsyncOn is the Control Panel's
+// VSYNC ON override, whose 0 cannot tell "forced off" from "decided by the 3D application".
+std::string DriverLine();
 
 }  // namespace uplift::addon::reflex

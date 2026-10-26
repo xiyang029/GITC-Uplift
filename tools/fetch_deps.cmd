@@ -16,6 +16,21 @@ git -C "%DEPS%\dlss" fetch --quiet --depth 1 --filter=blob:none https://github.c
 git -C "%DEPS%\dlss" checkout --quiet FETCH_HEAD || exit /b 1
 :dlss_done
 
+rem NVIDIA Streamline SDK headers (never committed) at a pinned commit: the 2.14.16 runtime whose
+rem sl:: ABI the FG multiplier hooks speak, plus the NVAPI headers that commit bundles
+rem (external/nvapi), whose NV_SET_SLEEP_MODE_PARAMS the Reflex override speaks. Both are the
+rem official structures; nothing here is hand-copied.
+set "SL_COMMIT=625db07d4bca5abc67d781c42af7e7fb0761f1b6"
+set "FETCHED_SL="
+if exist "%DEPS%\streamline\include\sl_dlss_g.h" if exist "%DEPS%\streamline\external\nvapi\nvapi.h" for /f %%c in ('git -C "%DEPS%\streamline" rev-parse HEAD 2^>nul') do set "FETCHED_SL=%%c"
+if "!FETCHED_SL!"=="%SL_COMMIT%" goto streamline_done
+if exist "%DEPS%\streamline" rmdir /s /q "%DEPS%\streamline"
+git init --quiet "%DEPS%\streamline" || exit /b 1
+git -C "%DEPS%\streamline" sparse-checkout set --no-cone /include/ /external/nvapi/ || exit /b 1
+git -C "%DEPS%\streamline" fetch --quiet --depth 1 --filter=blob:none https://github.com/NVIDIA-RTX/Streamline.git %SL_COMMIT% || exit /b 1
+git -C "%DEPS%\streamline" checkout --quiet FETCH_HEAD || exit /b 1
+:streamline_done
+
 rem ReShade add-on API headers at the pinned tag, plus the Dear ImGui commit that tag's
 rem deps/imgui submodule pins (reshade_overlay.hpp only compiles against that exact version).
 set "FETCHED_TAG="
@@ -59,6 +74,8 @@ git -C "%DEPS%\minhook" checkout --quiet FETCH_HEAD || exit /b 1
 :minhook_done
 
 echo NGX SDK headers (%DLSS_COMMIT%): %DEPS%\dlss\include
+echo Streamline SDK %SL_COMMIT% headers: %DEPS%\streamline\include
+echo NVAPI headers (Streamline's external/nvapi): %DEPS%\streamline\external\nvapi
 echo ReShade %RESHADE_TAG% headers: %DEPS%\reshade\include
 echo Dear ImGui: %DEPS%\imgui
 echo MinHook: %DEPS%\minhook

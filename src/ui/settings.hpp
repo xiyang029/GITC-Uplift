@@ -282,6 +282,9 @@ struct Settings {
   uint32_t dynamic_mfg_target_fps = 0u;  // 0 = the display's refresh rate
   ReflexOverride reflex_mode = ReflexOverride::GAME;
   uint32_t reflex_fps_cap = 0u;  // 0 = no cap; an output-FPS cap submitted through Reflex
+  // The two advanced SetSleepMode bits, forced on through the same rewrite while ticked.
+  bool reflex_use_markers = false;
+  bool reflex_use_min_queue_time = false;
   AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
   bool present_with_frame_gen = false;
   bool allow_cross_queue_passes = false;

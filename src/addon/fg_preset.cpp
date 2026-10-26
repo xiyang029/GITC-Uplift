@@ -1,6 +1,7 @@
 #include "addon/fg_preset.hpp"
 
 #include <MinHook.h>
+#include <nvapi.h>
 
 #include <atomic>
 #include <cstring>
@@ -16,37 +17,16 @@
 namespace uplift::addon {
 namespace {
 
-// ---- The NVAPI ABI of one driver setting (public NVAPI: NVDRS_SETTING_V1, pack(4)) ----
+// ---- The driver setting is NVIDIA's own structure (nvapi.h): NVDRS_SETTING_V1, pack(4), 12320 bytes ----
 
-#pragma pack(push, 4)
-union SettingValue {
-  uint32_t dword;
-  struct {
-    uint32_t length;
-    uint8_t data[4096];
-  } binary;
-  uint16_t text[2048];
-  uint64_t qword;
-};
-struct DrsSetting {
-  uint32_t version;
-  uint16_t name[2048];
-  uint32_t id;
-  uint32_t type;
-  uint32_t location;
-  uint32_t current_predefined;
-  uint32_t predefined_valid;
-  SettingValue predefined;
-  SettingValue current;
-};
-#pragma pack(pop)
-static_assert(sizeof(DrsSetting) == 12320);
-constexpr uint32_t SETTING_VERSION = sizeof(DrsSetting) | (1u << 16u);
+using DrsSetting = NVDRS_SETTING;
+constexpr uint32_t SETTING_VERSION = NVDRS_SETTING_VER;
 
 // The DLSS-FG preset setting, and the values the provider understands (MFG-Unlocker's findings).
+// The setting id itself is not in nvapi.h: NVIDIA documents the DRS API
+// (https://docs.nvidia.com/nvapi/group__drsapi.html), not the per-feature setting ids, which each
+// feature's own integration introduces. The id was read out of the runtime, not guessed.
 constexpr uint32_t FG_PRESET_ID = 0x10E41DF1u;
-constexpr int32_t NVAPI_OK = 0;
-constexpr int32_t NVAPI_SETTING_NOT_FOUND = -160;
 
 // ---- The filter: rewrite the FG preset id's answer after the driver's ----
 
@@ -62,10 +42,10 @@ void** FindConfigSlot(HMODULE module, uintptr_t helper0, uintptr_t helper1);
 // else (other ids, other versions, driver errors) passes through untouched.
 // The driver's own answer, logged once: the evidence that the FG provider's read actually crosses one
 // of the hooked paths, and what the driver said before any override.
-bool CompatibleRead(uint32_t id, int32_t result, const DrsSetting& setting) {
+bool CompatibleRead(uint32_t id, NvAPI_Status result, const DrsSetting& setting) {
   return id == FG_PRESET_ID && setting.version == SETTING_VERSION
          && (result == NVAPI_SETTING_NOT_FOUND
-             || (result == NVAPI_OK && setting.id == FG_PRESET_ID && setting.type == 0u));
+             || (result == NVAPI_OK && setting.settingId == FG_PRESET_ID && setting.settingType == NVDRS_DWORD_TYPE));
 }
 
 // Writes `preset` into `setting` as a current-profile DWORD value; a not-found answer is fabricated
@@ -74,16 +54,17 @@ void OverrideRead(DrsSetting& setting, uint32_t preset) {
   if (setting.version != SETTING_VERSION) {
     setting = {};
     setting.version = SETTING_VERSION;
-    setting.id = FG_PRESET_ID;
+    setting.settingId = FG_PRESET_ID;
+    setting.settingType = NVDRS_DWORD_TYPE;
     constexpr char name[] = "Override DLSS-FG preset";
     for (size_t i = 0; i < sizeof(name); ++i) {
-      setting.name[i] = static_cast<uint16_t>(name[i]);
+      setting.settingName[i] = static_cast<uint16_t>(name[i]);
     }
   }
-  setting.location = 0;  // NVDRS_CURRENT_PROFILE, for this returned value only
-  setting.current_predefined = 0;
-  std::memset(&setting.current, 0, sizeof(setting.current));
-  setting.current.dword = preset;
+  setting.settingLocation = NVDRS_CURRENT_PROFILE_LOCATION;  // for this returned value only
+  setting.isCurrentPredefined = 0;
+  std::memset(&setting.binaryCurrentValue, 0, sizeof(setting.binaryCurrentValue));
+  setting.u32CurrentValue = preset;
 }
 
 // ---- The provider's cached preset reader (the live switch) ----
@@ -109,6 +90,21 @@ bool __cdecl CachedReaderDetour(uint32_t id, uint32_t* value) {
   if (result && id == FG_PRESET_ID && desired >= 1u && desired <= 3u && value != nullptr) {
     *value = desired;
     g_last_served.store(desired, std::memory_order_relaxed);
+  }
+  // Diagnostics: what this read answered, at most once a second, so a rebuild that asks again shows
+  // up as another line. It runs after the rewrite, so `value given` is what the provider sees.
+  if (id == FG_PRESET_ID) {
+    static std::atomic<uint64_t> reported_ms{0};
+    const uint64_t now = GetTickCount64();
+    uint64_t last = reported_ms.load(std::memory_order_relaxed);
+    if (now - last >= 1000u
+        && reported_ms.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+      nr::Logf(nr::LogLevel::INFO,
+               "the FG preset override answered the provider's cached preset read: cache hit {}, value given {}, panel {}, last served {}, caller {}",
+               result, value == nullptr ? 0u : *value, desired,
+               g_last_served.load(std::memory_order_relaxed),
+               reinterpret_cast<void*>(_ReturnAddress()));
+    }
   }
   return result;
 }
@@ -324,13 +320,24 @@ void** FindConfigSlot(HMODULE module, uintptr_t helper0, uintptr_t helper1) {
 
 // The shared detour body for both entry points: the original ran already; `id` and `result` are its
 // inputs and result. Returns the result the caller sees.
-int32_t FilterRead(const void* caller, uint32_t id, int32_t result, DrsSetting* setting) {
+NvAPI_Status FilterRead(const void* caller, uint32_t id, NvAPI_Status result, DrsSetting* setting) {
   if (id == FG_PRESET_ID) {
     // The provider reads this id once and caches it: this call is the one chance to find its module
     // (from the read's return address) and hook the cached reader behind it.
     AdoptProviderFrom(caller);
   }
   const uint32_t desired = g_desired.load(std::memory_order_relaxed);
+  if (id == FG_PRESET_ID) {
+    // One line per run: whether the read even crosses a hooked path, and what it carried -- the
+    // difference between "no override" and "the override never saw the read".
+    static std::atomic<bool> seen{false};
+    if (!seen.exchange(true)) {
+      nr::Logf(nr::LogLevel::INFO,
+               "the FG preset override saw a read of the preset id: result {}, panel {}, version {:#x}, setting id {:#x}, type {}",
+               static_cast<int32_t>(result), desired, setting != nullptr ? setting->version : 0u,
+               setting != nullptr ? setting->settingId : 0u, setting != nullptr ? setting->settingType : 0u);
+    }
+  }
   if (desired == 0u || desired > 3u || setting == nullptr) return result;
   if (!CompatibleRead(id, result, *setting)) return result;
   OverrideRead(*setting, desired);
@@ -344,26 +351,25 @@ int32_t FilterRead(const void* caller, uint32_t id, int32_t result, DrsSetting* 
 
 // ---- The two hooked entry points ----
 
-using GetSettingFn = int32_t(__cdecl*)(void* session, void* profile, uint32_t unknown, DrsSetting* setting);
-using PublicGetSettingFn = int32_t(__cdecl*)(void* session, void* profile, DrsSetting* setting);
+// NvAPI_DRS_GetSetting(hSession, hProfile, settingId, pSetting) -- nvapi.h's own signature, both
+// entry points: the public export and the internal dispatcher implementation share it.
+using GetSettingFn = NvAPI_Status(__cdecl*)(void* session, void* profile, uint32_t id, DrsSetting* setting);
+using PublicGetSettingFn = NvAPI_Status(__cdecl*)(void* session, void* profile, uint32_t id, DrsSetting* setting);
 
 std::atomic<GetSettingFn> g_internal_original{nullptr};
 std::atomic<PublicGetSettingFn> g_public_original{nullptr};
 
-int32_t __cdecl InternalGetSettingDetour(void* session, void* profile, uint32_t id, DrsSetting* setting) {
+NvAPI_Status __cdecl InternalGetSettingDetour(void* session, void* profile, uint32_t id, DrsSetting* setting) {
   const GetSettingFn original = g_internal_original.load(std::memory_order_acquire);
   if (original == nullptr) return NVAPI_SETTING_NOT_FOUND;
-  const int32_t result = original(session, profile, id, setting);
+  const NvAPI_Status result = original(session, profile, id, setting);
   return FilterRead(_ReturnAddress(), id, result, setting);
 }
 
-int32_t __cdecl PublicGetSettingDetour(void* session, void* profile, DrsSetting* setting) {
+NvAPI_Status __cdecl PublicGetSettingDetour(void* session, void* profile, uint32_t id, DrsSetting* setting) {
   const PublicGetSettingFn original = g_public_original.load(std::memory_order_acquire);
   if (original == nullptr) return NVAPI_SETTING_NOT_FOUND;
-  // The caller names the setting it wants in `setting->id` before the call, and the driver leaves it
-  // there on a not-found, so the id is read before the original can be trusted to keep it.
-  const uint32_t id = (setting != nullptr ? setting->id : 0u);
-  const int32_t result = original(session, profile, setting);
+  const NvAPI_Status result = original(session, profile, id, setting);
   return FilterRead(_ReturnAddress(), id, result, setting);
 }
 
@@ -429,8 +435,11 @@ void InstallFgPresetHook() {
     public_hooked = (MH_EnableHook(reinterpret_cast<void*>(public_target)) == MH_OK);
   }
 
-  // The internal dispatcher implementation (nvapi_QueryInterface 0x73BF8338): callers that resolve
-  // NvAPI through the interface table bypass the public export. The same filter covers both.
+  // The internal dispatcher implementation (nvapi_QueryInterface 0x73BF8338, NvAPI_DRS_GetSetting's
+  // published interface number -- see "Driver Settings (DRS) APIs",
+  // https://docs.nvidia.com/nvapi/group__drsapi.html; nvapi.h declares the function but not the id):
+  // callers that resolve NvAPI through the interface table bypass the public export. The same filter
+  // covers both.
   const auto query = reinterpret_cast<void* (__cdecl*)(uint32_t)>(GetProcAddress(nvapi, "nvapi_QueryInterface"));
   void* internal_original = nullptr;
   bool internal_hooked = false;
