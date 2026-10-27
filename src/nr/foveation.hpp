@@ -42,6 +42,13 @@ inline constexpr float kMaxEdge = 1.f;
 // the NR pixels they remove: the grid stands down to uniform.
 inline constexpr double kMinSaving = 0.05;
 
+// shaders/encode_cs.hlsl's MAX_TAPS: the widest footprint is one source pixel over the coarsest work texel, which is
+// kMinEdge times the smallest Resolution = Custom (25 %, settings_schema.cpp's resolution_scale rows), plus one for a
+// fractional phase. A loop bound below that silently averages a corner of the footprint, so the two move together.
+inline constexpr double kMinWorkScale = 0.25;
+static_assert(1.0 / (static_cast<double>(kMinEdge) * kMinWorkScale) + 1.0 <= 17.0,
+              "encode_cs.hlsl's MAX_TAPS no longer covers the widest footprint: raise it with kMinEdge or the Custom floor");
+
 // The foveation geometry in output pixels: FromPercent builds it from the player's sliders,
 // MapToWork carries it to the working grid.
 struct Params {
@@ -111,8 +118,10 @@ inline Decoded Decode(uint32_t packed) {
   return p;
 }
 
-// One axis: the packed dword (0 = identity) and the mean density G(1), which
-// is both the working-size factor and the shader's normalizer.
+// One axis: the packed dword (0 = identity) and the mean density G(1).  MakeAxis leaves the ideal value, which sizes
+// the working grid; MakePlan replaces it with the realized extent / uniform, which is what the shaders must divide
+// by.  The two differ by the extent's rounding, and that difference is a phase drift: the plateau is only an exact
+// 1:1 copy when the normalizer is the realized ratio.
 struct Axis {
   uint32_t packed = 0;
   float gmax = 1.f;
@@ -165,9 +174,46 @@ inline Grid MakeGrid(bool enabled, const Params& params, uint32_t full_width, ui
 
 // Working extent on one axis: the uniform extent times the mean density, so the
 // centre keeps the uniform density exactly.
+//
+// Its parity matches the uniform extent's, rounding down (never up: the extent must
+// stay below the uniform one).  A work texel on the plateau covers exactly one
+// uniform texel, and its preimage on the full grid starts at 0.5*(full - work)
+// (foveation.hlsli's affine plateau); an odd difference puts that edge half a
+// source pixel off, so every full-density texel blends two source pixels 50/50
+// instead of copying one.  Full resolution is the common case and the one the
+// centre is judged by, so the parity is the fix, not the rounding.
 inline uint32_t WarpedExtent(uint32_t uniform, const Axis& axis) {
   if (axis.packed == 0u) return uniform;
-  return std::max<uint32_t>(16u, static_cast<uint32_t>(std::lround(static_cast<double>(uniform) * axis.gmax)));
+  uint32_t extent = std::max<uint32_t>(16u, static_cast<uint32_t>(std::lround(static_cast<double>(uniform) * axis.gmax)));
+  if (((extent ^ uniform) & 1u) != 0u && extent > 16u) --extent;
+  return extent;
+}
+
+// The frame's grid and working extent together, with `gmax` in both axes replaced by the realized
+// extent / uniform: the axis dword is already packed from the ideal value, and only the normalizer the shaders
+// divide by needs the realized one, so this is the last step that may touch `gmax`.
+//
+// Without it the plateau's footprint on the full grid is r = full * gmax / work wide, r != 1 by the rounding and
+// its phase drifting across the centre -- so the full-density zone blurs instead of copying, and no work texel
+// takes the encode's single-tap path.  With it r is 1 to fp32 and the plateau is a 1:1 copy to within 5.3e-5 px.
+struct Plan {
+  Grid grid;
+  uint32_t width = 0;
+  uint32_t height = 0;
+};
+
+inline Plan MakePlan(bool enabled, const Params& params, uint32_t uniform_width, uint32_t uniform_height) {
+  Plan plan;
+  plan.grid = MakeGrid(enabled, params, uniform_width, uniform_height);
+  plan.width = WarpedExtent(uniform_width, plan.grid.x);
+  plan.height = WarpedExtent(uniform_height, plan.grid.y);
+  if (plan.grid.x.packed != 0u && uniform_width != 0u) {
+    plan.grid.x.gmax = static_cast<float>(plan.width) / static_cast<float>(uniform_width);
+  }
+  if (plan.grid.y.packed != 0u && uniform_height != 0u) {
+    plan.grid.y.gmax = static_cast<float>(plan.height) / static_cast<float>(uniform_height);
+  }
+  return plan;
 }
 
 }  // namespace uplift::nr::foveation

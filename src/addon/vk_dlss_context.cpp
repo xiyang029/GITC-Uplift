@@ -665,8 +665,8 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
       nr::foveation::FromPercent(config_.foveation_width, config_.foveation_height, config_.foveation_falloff_x, config_.foveation_falloff_y,
                                  config_.foveation_edge, output.width, output.height),
       output.width, output.height, uniform.width, uniform.height);
-  const nr::foveation::Grid grid = nr::foveation::MakeGrid(config_.foveation, foveation_params, uniform.width, uniform.height);
-  const nr::Size image = {nr::foveation::WarpedExtent(uniform.width, grid.x), nr::foveation::WarpedExtent(uniform.height, grid.y)};
+  const nr::foveation::Plan plan = nr::foveation::MakePlan(config_.foveation, foveation_params, uniform.width, uniform.height);
+  const nr::Size image = {plan.width, plan.height};
   const nr::Size canvas = ((before_upscaling && !nr::MeetsNrFloor(image)) ? sources::CanvasSize(image) : image);
   state.work = image;
   state.canvas = canvas;
@@ -675,7 +675,7 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
     canvas_size_ = canvas;
   }
   session_->NoteFrameSize(static_cast<uint8_t>(stage), canvas);
-  return {.image = image, .canvas = canvas, .upsampling = config_.upsampling, .foveation = grid};
+  return {.image = image, .canvas = canvas, .upsampling = config_.upsampling, .foveation = plan.grid};
 }
 
 void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {

@@ -23,7 +23,7 @@ namespace uplift::color {
 namespace {
 
 constexpr uint32_t ROOT_CONSTANTS = 32u;     // the root signature's; each pass sets only what its shader reads
-constexpr uint32_t PASS_CONSTANTS = 22u;     // Plans 2-4's passes, the foveated grid's four dwords, Guided's two gains
+constexpr uint32_t PASS_CONSTANTS = 24u;     // Plans 2-4's passes, the foveated grid's four dwords, Guided's two gains, the decode's target size
 constexpr uint32_t SHADER_RESOURCES = 5u;    // t0-t4
 constexpr uint32_t UNORDERED_ACCESSES = 2u;  // u0, u1
 constexpr uint32_t TABLE_SIZE = SHADER_RESOURCES + UNORDERED_ACCESSES;
@@ -369,9 +369,10 @@ bool ColorPipeline::RecordDecode(ID3D12GraphicsCommandList* list, uint32_t slot,
   const D3D12_CPU_DESCRIPTOR_HANDLE target_handle = target_heap_->GetCPUDescriptorHandleForHeapStart();
   device_->CreateRenderTargetView(pass.target, &target_view, target_handle);
   const std::array<uint32_t, PASS_CONSTANTS> constants = {
+      // A Present region is the whole target, so the origin is (0, 0) and the target is the region.
       static_cast<uint32_t>(pass.encoding), (pass.target_view_srgb ? 1u : 0u), Bits(pass.input_scale),
       Bits(pass.transfer_strength), Bits(pass.color_strength), (pass.exposure != nullptr ? 1u : 0u),
-      Bits(pass.exposure_factor), 0u, 0u, pass.width, pass.height,
+      Bits(pass.exposure_factor), 0u, 0u, pass.width, pass.height, pass.width, pass.height,
       (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u), 0u, 0u,
       pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u), Bits(pass.chroma_clamp),
       pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
@@ -403,7 +404,8 @@ bool ColorPipeline::RecordComputeDecode(ID3D12GraphicsCommandList* list, uint32_
   const std::array<uint32_t, PASS_CONSTANTS> constants = {
       static_cast<uint32_t>(pass.encoding), 0u, Bits(pass.input_scale), Bits(pass.transfer_strength),
       Bits(pass.color_strength), (pass.exposure != nullptr ? 1u : 0u), Bits(pass.exposure_factor), pass.origin_x,
-      pass.origin_y, pass.width, pass.height, (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u),
+      pass.origin_y, pass.target_width, pass.target_height, pass.width, pass.height,
+      (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u),
       pass.source_x, pass.source_y, pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u), Bits(pass.chroma_clamp),
       pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
       Bits(pass.guided_low_gain), Bits(pass.guided_high_gain),

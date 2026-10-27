@@ -579,7 +579,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Guided detail gain",
         .tooltip = "Guided's gain on the change's detail band, its small edits that hug an edge. Below 1 eases NR's sharpening at a reduced "
-                   "resolution; 1 leaves it unchanged. The foveated grid's edges always keep this band at full weight.",
+                   "resolution; 1 leaves it unchanged. Under the foveated grid a density ceiling already lowers this band toward the "
+                   "edges, and this gain applies within that ceiling.",
         .min = 0.5,
         .max = 1.0,
         .flags = SLIDER_RANGE_ONLY,  // a shaping, not a state: it applies when the slider is released

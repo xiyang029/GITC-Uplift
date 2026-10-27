@@ -59,9 +59,9 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"<path too long to log>", "<路径过长，无法写入日志>"},
     {"A 32-bit game: NR always runs in Uplift's helper process", "32 位游戏的 NR 始终在 Uplift 辅助进程中运行"},
     {"A final output-FPS ceiling (after frame generation) submitted through Reflex. Needs the game to call the Reflex "
-     "sleep each frame, which some games never do -- the log says so. 0 leaves the game's own limiter alone; a lower "
-     "cap than the game's is always kept.",
-     "通过 Reflex 提交的最终输出帧率上限（插帧之后的帧数）。需要游戏每帧调用 Reflex 等待，部分游戏从不调用——日志会提示这种情况。设为 0 时不干涉游戏自己的限制；若游戏的限制更严格，则始终保持游戏的限制。"},
+     "sleep each frame and the driver to honour the submitted interval -- the log says which one is missing. 0 "
+     "leaves the game's own limiter alone; a lower cap than the game's is always kept.",
+     "通过 Reflex 提交的最终输出帧率上限（插帧之后的帧数）。需要游戏每帧调用 Reflex 等待，且驱动遵守提交的间隔——日志会说明缺的是哪一项。设为 0 时不干涉游戏自己的限制；若游戏的限制更严格，则始终保持游戏的限制。"},
     {"A soft cap on colour movement, in normalised chroma; 0 is no cap.", "限制颜色移动幅度，以归一化色度表示；0 表示不限制。"},
     {"A soft cap on how far a pixel is brightened; 0 is no cap.", "限制单个像素可被提亮的最大幅度；0 表示不限制。"},
     {"A soft cap on how far a pixel is darkened; 0 is no cap.", "限制单个像素可被压暗的最大幅度；0 表示不限制。"},
@@ -323,7 +323,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Guided base gain", "引导升采样基频增益"},
     {"Guided detail gain", "引导升采样细节增益"},
     {"Guided's gain on the change's base band, its large and gradual edits. Below 1 steadies NR's broadening at a reduced resolution; 1 leaves it unchanged. Applies when Upsampling = Guided below Full.", "引导升采样对变化基频段（大而平缓的调整）的增益。低于 1 可减轻降分辨率下 NR 的画面扩张；1 表示不变。仅在“升采样”为“引导升采样”且低于全分辨率时生效。"},
-    {"Guided's gain on the change's detail band, its small edits that hug an edge. Below 1 eases NR's sharpening at a reduced resolution; 1 leaves it unchanged. The foveated grid's edges always keep this band at full weight.", "引导升采样对变化细节段（贴着边缘的细小调整）的增益。低于 1 可减轻降分辨率下 NR 的锐化；1 表示不变。边缘压缩（Foveation）的边缘区域始终保持该频段的完整权重。"},
+    {"Guided's gain on the change's detail band, its small edits that hug an edge. Below 1 eases NR's sharpening at a reduced resolution; 1 leaves it unchanged. Under the foveated grid a density ceiling already lowers this band toward the edges, and this gain applies within that ceiling.", "引导升采样对变化细节段（贴着边缘的细小调整）的增益。低于 1 可减轻降分辨率下 NR 的锐化；1 表示不变。边缘压缩（Foveation）下，密度上限本身已使该频段越靠边缘越低，本增益在该上限之内生效。"},
     {"HDR10 HLG output is not supported", "不支持 HDR10 HLG 输出"},
     {"Halo suppression", "光晕抑制"},
     {"Hands multiplier selection to NVIDIA's Dynamic MFG (DLSS-G 4.5): the provider picks the per-scene multiplier and owns pacing. Needs "

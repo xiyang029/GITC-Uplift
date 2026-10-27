@@ -19,7 +19,7 @@ cbuffer MotionConstants : register(b0) {
   uint reserved3;
   uint reserved4;
   uint reserved5;
-  uint foveation_x;    // foveated grid: the packed per-axis warp (0 = identity) and G(1), its mean density
+  uint foveation_x;    // foveated grid: the packed per-axis warp (0 = identity) and its realized density
   uint foveation_y;
   float foveation_gmax_x;
   float foveation_gmax_y;

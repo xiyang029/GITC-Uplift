@@ -76,6 +76,8 @@ struct ComputeDecodePass {
   DXGI_FORMAT target_uav_format = DXGI_FORMAT_UNKNOWN;
   uint32_t origin_x = 0u;  // the region's top-left corner in the target
   uint32_t origin_y = 0u;
+  uint32_t target_width = 0u;  // the target's size: the mask covers it, not the region
+  uint32_t target_height = 0u;
   uint32_t width = 0u;
   uint32_t height = 0u;
   Encoding encoding = Encoding::SRGB;
