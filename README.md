@@ -1,10 +1,12 @@
 # GITC Uplift
 
-GITC Uplift is a virtual photography focused version of the DLSS 5 mod: NVIDIA's DLSS Neural Rendering (DLSS-NR) through ReShade,
-with greater flexibility, ease of use, stability and hassle-free compatibility across APIs (DirectX 9, 10, 11 and 12, Vulkan and
-OpenGL, 64-bit and 32-bit). Drop it in, switch it on, and it works out the rest. Switch it off and it gives its video memory back.
+**DLSS Neural Rendering through ReShade, built for performance and ease of use.**
 
-GITC Uplift is not affiliated with NVIDIA or with ReShade.
+Drop it in, switch it on, and tune the look to suit your gameplay or shot.
+
+Supports DirectX 9–12, Vulkan and OpenGL, in both 64-bit and 32-bit games.
+
+**[Download](https://github.com/ghostinthecamera/GITC-Uplift/releases/latest)** · [Illustrated guide](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide) · [Get help](https://github.com/ghostinthecamera/GITC-Uplift/issues)
 
 Plug of my website and camera mods (which this mod works great with)! Take shots and much more with these:  
 Documentation: https://ghostinthecamera.co.uk/  
@@ -12,47 +14,33 @@ Mods: https://www.patreon.com/ghostinthecamera
 
 ## What you need
 
-- An NVIDIA GeForce RTX graphics card with an up-to-date driver.
-- [ReShade](https://reshade.me) **with full add-on support** (the "Addon" version). Use the latest one: Vulkan and OpenGL games need
-  6.8 or newer.
-- NVIDIA's DLSS-NR runtime, `nvngx_dlssnr.dll`, which **you supply**. Version 310.8 remains the tested runtime for older RTX cards;
-  310.9.16 has experimental controls below and contains GPU kernels for 50-series cards only. Uplift never includes NVIDIA files.
-  You need a version appropriate for your video card.
+- An **NVIDIA GeForce RTX** graphics card with up-to-date drivers.
+- [ReShade](https://reshade.me) **with full add-on support**. Vulkan and OpenGL require version 6.8 or newer.
+- **`nvngx_dlssnr.dll`** compatible with your graphics card, supplied separately. NVIDIA files are not included.
 
-## Other DLSS5 add-ons
-
-- **Use GITC Uplift instead of other DLSS-NR add-ons**, for example RenoDX's DLSS and DLSS5 add-ons (`renodx-dlss*.addon64`): remove them
-  from ReShade's add-on folder. If one is still loaded, Uplift will not work.
-
-## Before you start
-
-- **Single-player only.** Uplift hooks into the game, and anti-cheat systems may not like that. Don't use it in online games.
-- **Antivirus** tools sometimes flag ReShade add-ons. Every release lists the SHA-256 of its files in `SHA256SUMS.txt`, or you can build
-  Uplift yourself (see "Building from source").
+Use in **single-player games only**, and remove other DLSS-NR add-ons before installing.
 
 ## Install
 
-Installation is really simple:
-1) Download the latest release from [GitHub Releases](https://github.com/ghostinthecamera/GITC-Uplift/releases).
-2) Copy everything in the release's `Addons` folder (the files and the `GITC-Uplift` folder) to where your ReShade add-ons are.
-3) Copy the `nvngx_dlssnr.dll` file into that `GITC-Uplift` folder!
-4) Copy the files in the release's `Shaders` folder to your ReShade `Shaders` folder.
+1. Download and extract the latest release.
+2. Copy everything inside **`Addons`** into your ReShade add-on folder.
+3. Put **`nvngx_dlssnr.dll`** inside the copied **`GITC-Uplift`** subfolder.
+4. Copy the contents of **`Shaders`** into your ReShade shader folder.
 
-Done!
+Your add-on folder is usually the game's folder, unless you changed `AddonPath` in `ReShade.ini`. Keep the NVIDIA DLL inside `GITC-Uplift`, not beside the game's executable.
 
-- Updating from an earlier Uplift build? Delete its `uplift.addon64`, `uplift.addon32` and `uplift-helper64.exe` first, so that two
-  copies don't load. Copy the new `Uplift.fx` over the old one too.
-- ReShade's add-on folder is the game's folder, unless `AddonPath` in the game's `ReShade.ini` points somewhere else.
+**Updating?** Replace the existing files with the new release. If you have the older files named `uplift.addon64`, `uplift.addon32` or `uplift-helper64.exe`, delete those too.
 
-## Using it
+## Switch it on
 
-1) Start the game and open ReShade (the Home key).
-2) Go to the **GITC Uplift** tab and tick **Enable**.
+1. Start the game and press **Home** to open ReShade.
+2. Open **GITC Uplift** and tick **Enable**.
 
-That's it. The card at the top always tells you what NR is doing right now. It's green when NR is working; when it isn't, the card
-says why and what to do.
+That's it.
 
-A picture guide to every setting: [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide)
+Adjust **Look** to taste. Enable **Keep faces** to help preserve facial detail, or lower **Resolution** for better performance and lower memory use.
+
+The status card tells you whether Uplift is working and what to do if something needs attention. For more control, see the [illustrated guide](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide).
 
 **Setup** contains these controls:
 
@@ -154,22 +142,6 @@ To contribute or update translations, see [Contributing translations](CONTRIBUTI
 | **64-bit** | ✓ + DLSS | ✓ + DLSS | ✓ | ✓ | ✓ + DLSS | ✓ |
 | **32-bit** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-- **✓** NR runs on the finished image, with everything in the Uplift tab.
-- **+ DLSS** In games that use DLSS, NR can also run right after DLSS inside the game's frame and use the game's own motion vectors. On
-  DX12 and Vulkan it also works with frame generation. On Vulkan, pick After DLSS yourself: Auto stays at Present (see "If you know what
-  you are doing").
-- DX11 games with DLSS added by a mod work too. If the mod runs DLSS on a DirectX 12 device of its own, NR stays at Present, and the
-  Uplift tab says so.
-- **64-bit Vulkan:** NR runs on the game's own Vulkan device. If it can't there, Uplift moves NR to a private DX12 device, and if that
-  can't either, to its helper process, by itself; **Details** says where and why. **Vulkan NR at Present** (Advanced) picks one yourself.
-  Only the game's own device (**Native**) runs NR inside the game's DLSS. Pick Direct3D 12 or Helper and NR moves to Present, with After
-  DLSS and Before upscaling greyed out. If native NR fails only at Present, After DLSS and Before upscaling stay available.
-  Devices using either KHR or EXT buffer device addresses support the same native stages and DLSS motion vectors. Device feature additions require a game restart.
-- DXVK games count as Vulkan. dgVoodoo2 games count as 32-bit DX11 or DX12.
-
-**Tested with:** Onimusha: Way of the Sword (DX12), Final Fantasy XV (DX11), No Man's Sky (Vulkan), Lightning Returns: Final Fantasy
-XIII (32-bit DX9, and DX11 through dgVoodoo2).
-
 ## If something's wrong
 
 The card at the top of the Uplift tab tells you what's wrong. The usual ones:
@@ -187,7 +159,7 @@ The card at the top of the Uplift tab tells you what's wrong. The usual ones:
 | NR costs a lot at a very low resolution | Set **Pass count** to 1. Below about 720p, NR's cost hardly shrinks with the image, so **Resolution** helps little there. |
 | At **Present** with **Motion vectors** on DLSS, the image shimmers when the camera moves | The game keeps its images upside down (many Unity games do). Set `RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN` to 1 in ReShade's global preprocessor definitions, as for depth effects: Uplift then turns DLSS's motion vectors the right way up. |
 | With **Keep faces** on, characters get specks or glowing spots | Tick **Show the face mask** (Advanced) and tune it: see [the wiki](https://github.com/ghostinthecamera/GITC-Uplift/wiki/Guide#keep-faces). |
-| "Another NR tool is running" | Remove the other DLSS5 add-on (see "Other DLSS5 add-ons") and restart the game. |
+| "Another NR tool is running" | Remove other DLSS-NR add-ons and restart the game. |
 | "The Vulkan swap chain cannot take NR's result" | Update ReShade to 6.8 (choose **Update ReShade only** in the installer). If it mentions exclusive fullscreen, use borderless or windowed mode. |
 | "Not enough address space in this 32-bit game" | Apply a 4 GB (large-address-aware) patch to the game. |
 
@@ -198,9 +170,9 @@ Still stuck? [Open an issue](https://github.com/ghostinthecamera/GITC-Uplift/iss
 - your graphics card, driver and ReShade version;
 - the game.
 
-## Known limitations
+---
 
-- If NVIDIA's NR crashes on the GPU, the game can crash too (as with any GPU crash). Restart the game, and please report it with `ReShade.log`.
+[MIT licence](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md) · [Contributing](CONTRIBUTING.md) · GITC Uplift is not affiliated with NVIDIA or ReShade.
 
 ## If you know what you are doing
 
@@ -414,8 +386,3 @@ build.cmd release-x86
 - `build.cmd release` makes `build\release\gitc-uplift.addon64` and `build\release\gitc-uplift-helper64.exe`.
 - `build.cmd release-x86` makes `build\release-x86\gitc-uplift.addon32`.
 - The add-ons and the helper check each other's build id, so always use the ones from the same build.
-
-## Licence
-
-GITC Uplift is released under the MIT licence: see [LICENSE](LICENSE). The licences of the code it derives from or builds against are in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). NVIDIA, GeForce RTX and DLSS are trademarks of NVIDIA Corporation.
