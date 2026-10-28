@@ -36,8 +36,7 @@ bool KnownSleepModeVersion(uint32_t version) {
 // it was. False means no choice is active and the block is the game's own; the detour hands that
 // one straight through, while a live refresh submits it either way (that is how a cleared cap or
 // mode returns the game's values to the driver).
-bool ApplyPanelChoices(nvapi::SleepModeParams* params, uint32_t mode, uint32_t cap_us, bool force_markers,
-                       bool force_min_queue) {
+bool ApplyPanelChoices(nvapi::SleepModeParams* params, uint32_t mode, uint32_t cap_us) {
   const bool rewrite_mode = mode != static_cast<uint32_t>(ReflexModeOverride::GAME);
   if (rewrite_mode) {
     params->bLowLatencyMode = (mode == static_cast<uint32_t>(ReflexModeOverride::ON)
@@ -53,10 +52,7 @@ bool ApplyPanelChoices(nvapi::SleepModeParams* params, uint32_t mode, uint32_t c
   const uint32_t limit_us = cap_us == 0u || native_interval > cap_us ? native_interval : cap_us;
   const bool rewrite_limit = limit_us != native_interval;
   if (rewrite_limit) params->minimumIntervalUs = limit_us;
-  // The two advanced bits are opt-in: ticked they are forced on, unticked the game's value stands.
-  if (force_markers) params->bUseMarkersToOptimize = 1u;
-  if (force_min_queue) params->bUseMinQueueTime = 1u;
-  return rewrite_mode || rewrite_limit || force_markers || force_min_queue;
+  return rewrite_mode || rewrite_limit;
 }
 
 // The cached game submission: the device and the game's own params from the last observed call,
@@ -66,11 +62,6 @@ std::atomic<IUnknown*> g_seen_device{nullptr};
 std::atomic<uint32_t> g_seen_version{0u};
 nvapi::SleepModeParams g_seen_params{};  // written only inside the detour (the game's calling thread)
 std::atomic<bool> g_refresh_pending{false};
-
-// The panel's advanced SetSleepMode bits: forced to 1 while ticked, left to the game's own value
-// otherwise (an unticked box must not clear what the game set).
-std::atomic<bool> g_desired_use_markers{false};
-std::atomic<bool> g_desired_use_min_queue_time{false};
 
 nvapi::Status __cdecl SetSleepModeDetour(IUnknown* device, nvapi::SleepModeParams* params) {
   const SetSleepModeFn original = g_original.load(std::memory_order_acquire);
@@ -129,10 +120,9 @@ nvapi::Status __cdecl SetSleepModeDetour(IUnknown* device, nvapi::SleepModeParam
   const uint32_t cap_us = CapToIntervalUs(cap_fps);
   // Rewrite a copy, so the game's own block is only ever handed back untouched on a passthrough.
   nvapi::SleepModeParams rewritten = *params;
-  if (!ApplyPanelChoices(&rewritten, mode, cap_us, g_desired_use_markers.load(std::memory_order_relaxed),
-                         g_desired_use_min_queue_time.load(std::memory_order_relaxed))) {
+  if (!ApplyPanelChoices(&rewritten, mode, cap_us)) {
     const nvapi::Status result = original(device, params);
-    if (log_this_call) nr::Logf(nr::LogLevel::INFO, "reflex: nothing to rewrite (Game mode, no tighter cap, no advanced bit); passed through -> {}", static_cast<int32_t>(result));
+    if (log_this_call) nr::Logf(nr::LogLevel::INFO, "reflex: nothing to rewrite (Game mode, no tighter cap); passed through -> {}", static_cast<int32_t>(result));
     g_refresh_pending.store(false, std::memory_order_relaxed);
     return result;
   }
@@ -168,7 +158,7 @@ void InstallReflexHook() {
   if (state == 1u || state == 2u) return;
   if (!g_install.compare_exchange_strong(state, 3u, std::memory_order_acq_rel)) return;
 
-  const auto target = nvapi::Interface<SetSleepModeFn>(nvapi::kSetSleepModeId);
+  const auto target = nvapi::Interface<SetSleepModeFn>(nvapi::SetSleepModeId());
   if (target == nullptr) {
     // The interface id is public SDK ABI; a null here means this driver has no Reflex at all.
     g_install.store(2u, std::memory_order_release);
@@ -227,9 +217,7 @@ void RefreshFromPanel() {
   // Output-FPS semantics, like the detour above: the interval is the output frame interval.
   nvapi::SleepModeParams fields = g_seen_params;
   ApplyPanelChoices(&fields, g_desired_mode.load(std::memory_order_relaxed),
-                    CapToIntervalUs(g_desired_cap_fps.load(std::memory_order_relaxed)),
-                    g_desired_use_markers.load(std::memory_order_relaxed),
-                    g_desired_use_min_queue_time.load(std::memory_order_relaxed));
+                    CapToIntervalUs(g_desired_cap_fps.load(std::memory_order_relaxed)));
   const nvapi::Status result = original(device, &fields);
   // Once per panel save: the values submitted live and the driver's verdict.
   nr::Logf(nr::LogLevel::INFO,
@@ -283,9 +271,7 @@ void LogSleepStatusThrottled() {
   // Still only while the panel overrides something: untouched, the driver's own numbers are noise.
   if (status_changed
       && (g_desired_mode.load(std::memory_order_relaxed) != static_cast<uint32_t>(ReflexModeOverride::GAME)
-          || g_desired_cap_fps.load(std::memory_order_relaxed) != 0u
-          || g_desired_use_markers.load(std::memory_order_relaxed)
-          || g_desired_use_min_queue_time.load(std::memory_order_relaxed))) {
+          || g_desired_cap_fps.load(std::memory_order_relaxed) != 0u)) {
     seen.store(true, std::memory_order_relaxed);
     last_mode.store(sample.sleep.bLowLatencyMode, std::memory_order_relaxed);
     last_sleep.store(sample.sleep.bUseGameSleep, std::memory_order_relaxed);
@@ -311,13 +297,6 @@ void LogSleepStatusThrottled() {
                "reflex: the game has not called the Reflex sleep in the last three samples, so the FPS cap cannot take effect; use the game's own limiter or RTSS's Reflex mode instead");
     }
   }
-}
-
-void SetAdvanced(bool use_markers, bool use_min_queue_time) {
-  const bool previous_markers = g_desired_use_markers.exchange(use_markers, std::memory_order_relaxed);
-  const bool previous_queue = g_desired_use_min_queue_time.exchange(use_min_queue_time, std::memory_order_relaxed);
-  if (previous_markers == use_markers && previous_queue == use_min_queue_time) return;
-  g_refresh_pending.store(true, std::memory_order_release);
 }
 
 void EnsureReflexHook() {

@@ -97,11 +97,20 @@ NVSDK_NGX_Handle* DlssSwap::CreateSwap(ngx_hooks::NgxApi api, ID3D12GraphicsComm
   // needs none of these keys.
   if (record.feature == NVSDK_NGX_Feature_RayReconstruction && evaluate != nullptr) {
     constexpr const char* RR_CREATE_KEYS[] = {
-        NVSDK_NGX_Parameter_DiffuseAlbedo, NVSDK_NGX_Parameter_SpecularAlbedo,
-        NVSDK_NGX_Parameter_DLSS_Input_DiffuseAlbedo_Subrect_Base_X, NVSDK_NGX_Parameter_DLSS_Input_DiffuseAlbedo_Subrect_Base_Y,
-        NVSDK_NGX_Parameter_DLSS_Input_SpecularAlbedo_Subrect_Base_X, NVSDK_NGX_Parameter_DLSS_Input_SpecularAlbedo_Subrect_Base_Y,
-        NVSDK_NGX_Parameter_Depth, NVSDK_NGX_Parameter_ExposureTexture, "DLSS.Input.NormalZ", "DLSS.Input.MotionVectors",
-        "DLSS.Input.TransparencyMask", NVSDK_NGX_Parameter_GBuffer_Emissive,
+        NVSDK_NGX_Parameter_DiffuseAlbedo,
+        NVSDK_NGX_Parameter_SpecularAlbedo,
+        NVSDK_NGX_Parameter_DLSS_Input_Normals_Subrect_Base_X,
+        NVSDK_NGX_Parameter_DLSS_Input_Normals_Subrect_Base_Y,
+        NVSDK_NGX_Parameter_DLSS_Input_Roughness_Subrect_Base_X,
+        NVSDK_NGX_Parameter_DLSS_Input_Roughness_Subrect_Base_Y,
+        NVSDK_NGX_Parameter_DLSS_Input_DiffuseAlbedo_Subrect_Base_X,
+        NVSDK_NGX_Parameter_DLSS_Input_DiffuseAlbedo_Subrect_Base_Y,
+        NVSDK_NGX_Parameter_DLSS_Input_SpecularAlbedo_Subrect_Base_X,
+        NVSDK_NGX_Parameter_DLSS_Input_SpecularAlbedo_Subrect_Base_Y,
+        NVSDK_NGX_Parameter_Depth,
+        NVSDK_NGX_Parameter_ExposureTexture,
+        NVSDK_NGX_Parameter_TransparencyMask,
+        NVSDK_NGX_Parameter_GBuffer_Emissive,
     };
     auto* const source = const_cast<NVSDK_NGX_Parameter*>(evaluate);
     for (const char* key : RR_CREATE_KEYS) {
@@ -115,8 +124,8 @@ NVSDK_NGX_Handle* DlssSwap::CreateSwap(ngx_hooks::NgxApi api, ID3D12GraphicsComm
     // after MFG-Unlocker's list): node masks, the output-subrects switch and the denoise/roughness/HW-depth
     // modes. The evaluate's block still carries them from the game's create (Streamline replays the same set).
     for (const char* key : {NVSDK_NGX_Parameter_CreationNodeMask, NVSDK_NGX_Parameter_VisibilityNodeMask,
-                            NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects, "DLSS.Denoise.Mode", "DLSS.Roughness.Mode",
-                            "DLSS.Use.HW.Depth"}) {
+                            NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects, NVSDK_NGX_Parameter_DLSS_Denoise_Mode,
+                            NVSDK_NGX_Parameter_DLSS_Roughness_Mode, NVSDK_NGX_Parameter_Use_HW_Depth}) {
       if (unsigned int value = 0u; source->Get(key, &value) == NVSDK_NGX_Result_Success) {
         block->Set(key, value);
       } else if (int svalue = 0; source->Get(key, &svalue) == NVSDK_NGX_Result_Success) {

@@ -142,7 +142,6 @@ add_library(uplift_ngx_hooks STATIC
   src/ngx_hooks/ngx_parameters.cpp
   src/ngx_hooks/feature_registry.cpp
   src/ngx_hooks/dlss_capture.cpp
-  src/ngx_hooks/dlss_overrides.cpp
   src/ngx_hooks/frame_generation.cpp)
 target_link_libraries(uplift_ngx_hooks PUBLIC uplift_nr PRIVATE uplift_minhook uplift_minhook_once)
 
@@ -284,6 +283,7 @@ add_library(uplift_addon_core STATIC
   src/addon/dlss_settings.cpp
   src/addon/dlss_swap.cpp
   src/addon/dlss_ratio.cpp
+  src/addon/nvapi_ids.cpp
   src/addon/fg_preset.cpp
   src/addon/sl_fg_hooks.cpp
   src/addon/reflex_override.cpp

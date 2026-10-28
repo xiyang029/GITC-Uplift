@@ -3,9 +3,9 @@
 // The Reflex override (addon/reflex_override.{hpp,cpp}).
 //
 // The panel's Reflex mode and output-FPS cap, applied by rewriting the game's
-// NvAPI_D3D_SetSleepMode calls in transit (nvapi_QueryInterface 0xAC1CA9E0's internal
-// implementation, like the FG preset hook reaches NvAPI_DRS_GetSetting's). Native Reflex
-// games and Streamline's sl.reflex both funnel into this call, so one hook covers both.
+// NvAPI_D3D_SetSleepMode calls in transit (the implementation nvapi_QueryInterface resolves for
+// that id, like the FG preset hook reaches NvAPI_DRS_GetSetting's). Native Reflex games and
+// Streamline's sl.reflex both funnel into this call, so one hook covers both.
 // The rewrite is fail-safe: an unknown params version or a rejected call falls back to
 // the game's own request, and a frame limit is only ever tightened, never relaxed.
 
@@ -34,10 +34,5 @@ void RefreshFromPanel();
 // Diagnostics: samples NvAPI_D3D_GetSleepStatus at most once every two seconds -- the interval
 // the driver holds, whether the game actually calls the Reflex sleep, and the live FG multiplier.
 void LogSleepStatusThrottled();
-
-// The two advanced SetSleepMode bits the panel can force on (NV_SET_SLEEP_MODE_PARAMS'
-// bUseMarkersToOptimize / bUseMinQueueTime). Either one raises the rewrite's own condition, so a
-// ticked box is submitted even with Game mode and no cap; an unticked box leaves the game's value.
-void SetAdvanced(bool use_markers, bool use_min_queue_time);
 
 }  // namespace uplift::addon::reflex

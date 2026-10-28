@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <optional>
 #include <shared_mutex>
-#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,21 +18,6 @@
 #include "nr/ngx.hpp"
 
 namespace uplift::ngx_hooks {
-
-// One value the create hook changed on the game's parameter block, with the game's own value to
-// put back (0 when the game never set it: NGX's default for every key Uplift overrides).
-struct SavedParameter {
-  enum class Type : uint8_t {
-    INT,
-    UINT,
-  };
-  const char* key = nullptr;
-  Type type = Type::INT;
-  int64_t value = 0;
-};
-
-// Writes the saved values back, last change first, with the type each was read with.
-void RestoreParameters(NVSDK_NGX_Parameter* parameters, std::span<const SavedParameter> saved);
 
 // One hooked CreateFeature call as the observer sees it.
 struct CreateCall {
@@ -45,8 +29,6 @@ struct CreateCall {
   // The outermost call's return address. MinHook enters the detour by a jump, so this is the code
   // that called the export: the game, an interposer, or a runtime Uplift loaded itself.
   const void* caller = nullptr;
-  std::vector<SavedParameter> saved;  // BeforeCreate records every value it changes here
-  bool override_rejected = false;     // the create failed with the overrides, so it ran again without them
   std::optional<CreateSnapshot> submitted;  // dimensions submitted for the final original-call attempt; other metadata is read after creation
 };
 
@@ -71,8 +53,7 @@ struct EvaluateCall {
 class NgxObserver {
  public:
   virtual ~NgxObserver() = default;
-  // Before the original CreateFeature. May change `call->parameters`, recording each change in
-  // `call->saved`; the detour restores them after the create.
+  // Before the original CreateFeature. May change `call->parameters` (e.g. the preset swap's keys).
   virtual void BeforeCreate(CreateCall* call) = 0;
   // After the original CreateFeature, also when it failed (`handle` is then null).
   virtual void AfterCreate(const CreateCall& call, NVSDK_NGX_Handle* handle, NVSDK_NGX_Result result) = 0;

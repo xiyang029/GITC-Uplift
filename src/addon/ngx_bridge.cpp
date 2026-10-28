@@ -93,16 +93,11 @@ const void* NgxBridge::DeviceOf(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList
 void NgxBridge::BeforeCreate(ngx_hooks::CreateCall* call) {
   // New hardening (fix round 1): never take the add-on's lock for Uplift's own NGX creates. Checked
   // before anything else, whatever the feature, so a create from Uplift's own runtime can never
-  // reach Overrides() below and re-lock the add-on's non-recursive mutex if the calling thread
-  // already holds it (spec §6.1: Uplift's runtime creates no SuperSampling feature today, but this
-  // must hold even if a future NR version ever did).
+  // re-lock the add-on's non-recursive mutex if the calling thread already holds it (spec §6.1:
+  // Uplift's runtime creates no SuperSampling feature today, but this must hold even if a future NR
+  // version ever did).
   if (routing_.IsOwnCode(call->caller)) return;
   EnsureFgPresetHook();  // early: the FG provider's single preset read can precede the first present
-  if (call->feature != NVSDK_NGX_Feature_SuperSampling || call->parameters == nullptr) return;
-  const ngx_hooks::SrOverrides overrides = routing_.Overrides();
-  if (overrides.Any()) {
-    ngx_hooks::ApplySrOverrides(call->parameters, overrides, &call->saved);
-  }
 }
 
 void NgxBridge::AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle* handle, NVSDK_NGX_Result result) {
@@ -313,8 +308,8 @@ std::optional<ngx_hooks::FeatureRecord> NgxBridge::AdoptD3D11Upscaler(const NVSD
   ID3D11Resource* const motion = ngx_hooks::ReadD3D11Resource(parameters, NVSDK_NGX_Parameter_MotionVectors);
   ID3D11Resource* const depth = ngx_hooks::ReadD3D11Resource(parameters, NVSDK_NGX_Parameter_Depth);
   // Ray Reconstruction's guide buffers (nvsdk_ngx_defs_dlssd.h): not on Direct3D 11, so a block that has them is not a DLSS-SR one.
-  const bool albedo = (ngx_hooks::ReadD3D11Resource(parameters, "DLSS.Input.DiffuseAlbedo") != nullptr
-                       || ngx_hooks::ReadD3D11Resource(parameters, "DLSS.Input.SpecularAlbedo") != nullptr);
+  const bool albedo = (ngx_hooks::ReadD3D11Resource(parameters, NVSDK_NGX_Parameter_DiffuseAlbedo) != nullptr
+                       || ngx_hooks::ReadD3D11Resource(parameters, NVSDK_NGX_Parameter_SpecularAlbedo) != nullptr);
   if (color == nullptr || output == nullptr || (motion == nullptr && depth == nullptr) || albedo) {
     registry_.NoteNotAdopted(handle);
     return std::nullopt;

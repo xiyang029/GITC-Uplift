@@ -11,6 +11,7 @@
 
 #include <psapi.h>
 
+#include "addon/nvapi_query.hpp"
 #include "ngx_hooks/minhook_once.hpp"
 #include "nr/log.hpp"
 
@@ -127,8 +128,9 @@ bool FindAndHookCachedReader(HMODULE module) {
   const auto* sections = IMAGE_FIRST_SECTION(nt);
   const size_t image_size = nt->OptionalHeader.SizeOfImage;
   if (image_size < 4096u || image_size > 1024u * 1024u * 1024u) return false;
-  // mov ecx,0x10E41DF1; call rel32 -- test al,al; jz rel32
-  constexpr uint8_t PREFIX[]{0xB9, 0xF1, 0x1D, 0xE4, 0x10, 0xE8};
+  // mov ecx,<FG preset id>; call rel32 -- test al,al; jz rel32
+  constexpr uint8_t PREFIX[]{0xB9, static_cast<uint8_t>(FG_PRESET_ID & 0xFFu), static_cast<uint8_t>((FG_PRESET_ID >> 8) & 0xFFu),
+                             static_cast<uint8_t>((FG_PRESET_ID >> 16) & 0xFFu), static_cast<uint8_t>((FG_PRESET_ID >> 24) & 0xFFu), 0xE8};
   constexpr uint8_t SUFFIX[]{0x84, 0xC0, 0x0F, 0x84};
   constexpr uint8_t PROLOGUE[]{0x48, 0x89, 0x5C, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x08, 0x57,
                                0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xFA, 0x8B, 0xD9};
@@ -258,8 +260,10 @@ void AdoptProviderFrom(const void* caller) {
     }
     loaded.resize(count);
   }
+  // Every module that exports the NGX create entry points is a candidate provider. The one the read came
+  // from is not skipped: it was cheap-rejected above (no slot yet), and its reader may still be unhooked.
   for (const HMODULE candidate : loaded) {
-    if (candidate == nullptr || candidate == module) continue;
+    if (candidate == nullptr) continue;
     if (GetProcAddress(candidate, "NVSDK_NGX_D3D12_CreateFeature") == nullptr
         && GetProcAddress(candidate, "NVSDK_NGX_VULKAN_CreateFeature") == nullptr) continue;
     if (FindAndHookCachedReader(candidate)) return;
@@ -351,13 +355,12 @@ NvAPI_Status FilterRead(const void* caller, uint32_t id, NvAPI_Status result, Dr
 
 // ---- The two hooked entry points ----
 
-// NvAPI_DRS_GetSetting(hSession, hProfile, settingId, pSetting) -- nvapi.h's own signature, both
-// entry points: the public export and the internal dispatcher implementation share it.
+// NvAPI_DRS_GetSetting(hSession, hProfile, settingId, pSetting) -- nvapi.h's own signature, the same
+// for the public export and the internal dispatcher implementation, so one alias serves both.
 using GetSettingFn = NvAPI_Status(__cdecl*)(void* session, void* profile, uint32_t id, DrsSetting* setting);
-using PublicGetSettingFn = NvAPI_Status(__cdecl*)(void* session, void* profile, uint32_t id, DrsSetting* setting);
 
 std::atomic<GetSettingFn> g_internal_original{nullptr};
-std::atomic<PublicGetSettingFn> g_public_original{nullptr};
+std::atomic<GetSettingFn> g_public_original{nullptr};
 
 NvAPI_Status __cdecl InternalGetSettingDetour(void* session, void* profile, uint32_t id, DrsSetting* setting) {
   const GetSettingFn original = g_internal_original.load(std::memory_order_acquire);
@@ -367,7 +370,7 @@ NvAPI_Status __cdecl InternalGetSettingDetour(void* session, void* profile, uint
 }
 
 NvAPI_Status __cdecl PublicGetSettingDetour(void* session, void* profile, uint32_t id, DrsSetting* setting) {
-  const PublicGetSettingFn original = g_public_original.load(std::memory_order_acquire);
+  const GetSettingFn original = g_public_original.load(std::memory_order_acquire);
   if (original == nullptr) return NVAPI_SETTING_NOT_FOUND;
   const NvAPI_Status result = original(session, profile, id, setting);
   return FilterRead(_ReturnAddress(), id, result, setting);
@@ -426,25 +429,24 @@ void InstallFgPresetHook() {
 
   // The public export: every caller that goes through nvapi64.dll's own NvAPI_DRS_GetSetting. The
   // trampoline is stored before the hook is enabled: a call racing the enable must find the original.
-  const auto public_target = reinterpret_cast<PublicGetSettingFn>(GetProcAddress(nvapi, "NvAPI_DRS_GetSetting"));
+  const auto public_target = reinterpret_cast<GetSettingFn>(GetProcAddress(nvapi, "NvAPI_DRS_GetSetting"));
   void* public_original = nullptr;
   bool public_hooked = false;
   if (public_target != nullptr
       && MH_CreateHook(reinterpret_cast<void*>(public_target), reinterpret_cast<void*>(&PublicGetSettingDetour), &public_original) == MH_OK) {
-    g_public_original.store(reinterpret_cast<PublicGetSettingFn>(public_original), std::memory_order_release);
+    g_public_original.store(reinterpret_cast<GetSettingFn>(public_original), std::memory_order_release);
     public_hooked = (MH_EnableHook(reinterpret_cast<void*>(public_target)) == MH_OK);
   }
 
-  // The internal dispatcher implementation (nvapi_QueryInterface 0x73BF8338, NvAPI_DRS_GetSetting's
-  // published interface number -- see "Driver Settings (DRS) APIs",
-  // https://docs.nvidia.com/nvapi/group__drsapi.html; nvapi.h declares the function but not the id):
-  // callers that resolve NvAPI through the interface table bypass the public export. The same filter
-  // covers both.
+  // The internal dispatcher implementation (nvapi_QueryInterface with NvAPI_DRS_GetSetting's id, from
+  // NVIDIA's own nvapi_interface.h table next to nvapi.h -- nvapi.h declares the function but not the
+  // id): callers that resolve NvAPI through the interface table bypass the public export. The same
+  // filter covers both.
   const auto query = reinterpret_cast<void* (__cdecl*)(uint32_t)>(GetProcAddress(nvapi, "nvapi_QueryInterface"));
   void* internal_original = nullptr;
   bool internal_hooked = false;
   if (query != nullptr) {
-    const auto target = reinterpret_cast<GetSettingFn>(query(0x73BF8338u));
+    const auto target = reinterpret_cast<GetSettingFn>(query(nvapi::DrsGetSettingId()));
     if (target != nullptr
         && MH_CreateHook(reinterpret_cast<void*>(target), reinterpret_cast<void*>(&InternalGetSettingDetour), &internal_original) == MH_OK) {
       g_internal_original.store(reinterpret_cast<GetSettingFn>(internal_original), std::memory_order_release);

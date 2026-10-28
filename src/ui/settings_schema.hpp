@@ -39,7 +39,6 @@ enum class SettingSection : uint8_t {
 namespace setting_flags {
 inline constexpr uint32_t RESTARTS_HISTORY = 1u << 0u;  // a change restarts NR's temporal history
 inline constexpr uint32_t NEXT_START = 1u << 1u;        // applies from the next game start
-inline constexpr uint32_t NEXT_DLSS_CREATE = 1u << 2u;  // applies when the game next creates its DLSS feature
 inline constexpr uint32_t GREYED = 1u << 3u;            // shown read-only: no effect in NR 310.8
 inline constexpr uint32_t PASS_SWITCH = 1u << 4u;       // a pass's look-sharing, stage or network selection: always written, shown while it follows pass 1
 inline constexpr uint32_t BOOKKEEPING = 1u << 5u;       // hidden state Uplift writes itself: Restore all keeps it

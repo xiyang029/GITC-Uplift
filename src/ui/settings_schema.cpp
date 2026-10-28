@@ -16,15 +16,12 @@ constexpr std::array<std::string_view, 3> NR_NETWORKS = {"Runtime default", "A: 
 constexpr std::array<std::string_view, 3> PASS_NETWORKS = {"Same as pass 1", "A: Legacy", "B: Small FP8"};
 constexpr std::array<std::string_view, 3> SOURCES = {"Auto", "After DLSS", "Present"};
 constexpr std::array<std::string_view, 5> MOTION_VECTORS = {"Auto", "DLSS", "Launchpad", "None", "Lumenite"};  // stored-index order (Setup shows Lumenite after Launchpad)
-constexpr std::array<std::string_view, 7> QUALITY_MODES = {"Game", "Performance", "Balanced", "Quality",
-                                                           "Ultra Performance", "Ultra Quality", "DLAA"};
 constexpr std::array<std::string_view, 5> PRESETS = {"Game", "J", "K", "L", "M"};
 constexpr std::array<std::string_view, 4> FG_PRESETS = {"Game", "A", "B", "C"};
 constexpr std::array<std::string_view, 6> FG_MULTIPLIERS = {"Game", "2x", "3x", "4x", "5x", "6x"};
 constexpr std::array<std::string_view, 3> FG_OPTION_CHOICES = {"Game", "On", "Off"};
 constexpr std::array<std::string_view, 4> REFLEX_MODES = {"Game", "On", "Boost", "Off"};
 constexpr std::array<std::string_view, 4> RR_PRESETS = {"Game", "D", "E", "F"};
-constexpr std::array<std::string_view, 3> AUTO_EXPOSURE = {"Game", "Off", "On"};
 constexpr std::array<std::string_view, 6> ENCODINGS = {"Auto", "Linear BT.709", "sRGB", "BT.2100 PQ", "scRGB", "scRGB-nl"};
 constexpr std::array<std::string_view, 3> DEPTH_DIRECTIONS = {"Game", "Normal", "Inverted"};
 constexpr std::array<std::string_view, 2> STATE_RESTORE_MODES = {"Full", "Minimal"};
@@ -75,7 +72,6 @@ constexpr std::string_view REFLEX_MODE_TOOLTIP =
 using setting_flags::APPLY_ON_RELEASE;
 using setting_flags::BOOKKEEPING;
 using setting_flags::GREYED;
-using setting_flags::NEXT_DLSS_CREATE;
 using setting_flags::NEXT_START;
 using setting_flags::NETWORK_PRESET;
 using setting_flags::PASS_STAGE;
@@ -767,19 +763,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     // rows are in the DLSS / Reflex card. A preset cannot reach a game feature that already exists --
     // DLSS reads it once, at creation -- so the addon's swap (dlss_swap.hpp) evaluates its own feature
     // with the chosen presets instead of the game's, created on demand through the game's NGX core.
-    // DLSSQualityMode and DLSSAutoExposure stay hidden: they still need a game re-create.
-    {
-        .key = "DLSSQualityMode",
-        .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
-        .label = "DLSS quality mode",
-        .tooltip = "Overrides the quality mode the game creates DLSS-SR with. Applies when the game next creates its DLSS "
-                   "feature; a restart or a resolution change may be needed.",
-        .choices = QUALITY_MODES,
-        .flags = NEXT_DLSS_CREATE,
-        .get = [](const Settings& s) { return Index(s.dlss_quality_mode); },
-        .set = [](Settings& s, double v) { s.dlss_quality_mode = FromIndex<DlssQualityOverride>(v); },
-    },
     {
         .key = "DLSSPresetDLAA",
         .kind = SettingKind::CHOICE,
@@ -1021,28 +1004,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return static_cast<double>(s.reflex_fps_cap); },
         .set = [](Settings& s, double v) { s.reflex_fps_cap = static_cast<uint32_t>(v); },
     },
-    // The two advanced SetSleepMode bits (2026-10-26). They are opt-in: ticked they are forced on in
-    // the rewrite, unticked the game's own value stands.
-    {
-        .key = "ReflexMarkers",
-        .kind = SettingKind::BOOL,
-        .section = SettingSection::DLSS_REFLEX,
-        .label = "Reflex markers",
-        .tooltip = "Sets bUseMarkersToOptimize in the Reflex sleep submission: the driver may then use the game's latency markers "
-                   "for runtime optimizations. Only worth ticking when the game marks its frames; unticked keeps what the game sent.",
-        .get = [](const Settings& s) { return Flag(s.reflex_use_markers); },
-        .set = [](Settings& s, double v) { s.reflex_use_markers = v != 0.0; },
-    },
-    {
-        .key = "ReflexMinQueueTime",
-        .kind = SettingKind::BOOL,
-        .section = SettingSection::DLSS_REFLEX,
-        .label = "Reflex min queue time",
-        .tooltip = "Sets bUseMinQueueTime in the Reflex sleep submission: every submission overlap counts toward the queue time, "
-                   "not only the ones between frames. Unticked keeps what the game sent.",
-        .get = [](const Settings& s) { return Flag(s.reflex_use_min_queue_time); },
-        .set = [](Settings& s, double v) { s.reflex_use_min_queue_time = v != 0.0; },
-    },
     // The Ray Reconstruction render preset (2026-10-25): one choice for every mode -- RR's default
     // model does not vary by mode (all modes default to F/RR2). The live preset swap writes all six
     // RayReconstruction.* keys with it for an RR feature.
@@ -1055,17 +1016,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .choices = RR_PRESETS,
         .get = [](const Settings& s) { return static_cast<double>(s.rr_preset); },
         .set = [](Settings& s, double v) { s.rr_preset = FromIndex<RrPresetOverride>(v); },
-    },
-    {
-        .key = "DLSSAutoExposure",
-        .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
-        .label = "DLSS auto-exposure",
-        .tooltip = "Forces DLSS-SR's auto-exposure on or off. Applies when the game next creates its DLSS feature.",
-        .choices = AUTO_EXPOSURE,
-        .flags = NEXT_DLSS_CREATE,
-        .get = [](const Settings& s) { return Index(s.dlss_auto_exposure); },
-        .set = [](Settings& s, double v) { s.dlss_auto_exposure = FromIndex<AutoExposureOverride>(v); },
     },
     {
         .key = "PresentWithFrameGen",

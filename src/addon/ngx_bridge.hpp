@@ -25,12 +25,10 @@
 namespace uplift::addon {
 
 // What the add-on supplies to the NGX observer; unit tests supply a fake. Every method is called on a
-// game thread, after (or, for Overrides, before) the original NGX call, never across it.
+// game thread, after the original NGX call, never across it.
 class NgxRouting {
  public:
   virtual ~NgxRouting() = default;
-  // The DLSS-SR overrides to apply to a SuperSampling create now.
-  [[nodiscard]] virtual ngx_hooks::SrOverrides Overrides() = 0;
   // The panel's DLSSPreset<Mode> choices (the live preset swap's target, addon/dlss_swap.hpp): one
   // J-M render preset per mode, 0 where the panel says Game. The add-on's lock is taken and released
   // inside; never called under another lock of the add-on's.
@@ -99,7 +97,7 @@ class NgxRouting {
   virtual void LogFirstEvaluate(ngx_hooks::NgxApi /*api*/, ID3D12GraphicsCommandList* /*list*/, const ngx_hooks::DlssFrame& /*frame*/) {}
 };
 
-// The add-on's NgxObserver (v2 design §3.1, §3.5, §3.6, §3.19): the DLSS-SR overrides, the feature
+// The add-on's NgxObserver (v2 design §3.1, §3.5, §3.6, §3.19): the live DLSS preset swap, the feature
 // registry (frame generation and foreign NR included), and the main handle's evaluates. Thread-safe.
 class NgxBridge final : public ngx_hooks::NgxObserver {
  public:

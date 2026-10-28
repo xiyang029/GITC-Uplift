@@ -323,7 +323,6 @@ void LogHeartbeat(DeviceEntry& entry, api::device* device, std::string_view lead
 // The bridge's view of the add-on (v2 design §3.1). Defined after AddonState.
 class AddonRouting final : public addon::NgxRouting {
  public:
-  ngx_hooks::SrOverrides Overrides() override;
   ngx_hooks::SrOverrides DlssPresetOverrides() override;
   ngx_hooks::SrOverrides RrPresetOverrides() override;
   const void* DeviceOf(ID3D12GraphicsCommandList* list) override;
@@ -502,7 +501,6 @@ void PushFgRuntimeChoices(const ui::Settings& settings) {
   addon::slfg::SetAdvertisedMaxGenerated(settings.dynamic_mfg || multiplier >= 3u ? 5u : 0u);
   addon::reflex::SetDesired(static_cast<addon::reflex::ReflexModeOverride>(static_cast<uint32_t>(settings.reflex_mode)),
                             settings.reflex_fps_cap);
-  addon::reflex::SetAdvanced(settings.reflex_use_markers, settings.reflex_use_min_queue_time);
 }
 
 // After the overlay or the hotkey changed a setting.
@@ -595,11 +593,6 @@ void NoteLatchIfTripped(AddonState* state, Context* context) {
   }
   // Minor (fix round 2): the ini mirror runs only on the present thread now (see latch_save_pending).
   state->latch_save_pending = true;
-}
-
-ngx_hooks::SrOverrides AddonRouting::Overrides() {
-  const std::unique_lock lock(g_state->mutex);
-  return addon::ToSrOverrides(g_state->settings);
 }
 
 ngx_hooks::SrOverrides AddonRouting::DlssPresetOverrides() {

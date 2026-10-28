@@ -66,17 +66,6 @@ enum class MotionPick : uint32_t {
   LUMENITE,  // 2026-10-08
 };
 
-// The stored index is NVSDK_NGX_PerfQuality_Value + 1; GAME keeps the game's own mode.
-enum class DlssQualityOverride : uint32_t {
-  GAME = 0u,
-  PERFORMANCE = 1u,
-  BALANCED = 2u,
-  QUALITY = 3u,
-  ULTRA_PERFORMANCE = 4u,
-  ULTRA_QUALITY = 5u,
-  DLAA = 6u,
-};
-
 // GAME keeps the game's preset; J..M are DLSS render presets 10..13 (spec §10).
 enum class DlssPresetOverride : uint32_t {
   GAME = 0u,
@@ -141,12 +130,6 @@ enum class ReflexOverride : uint32_t {
   ON = 1u,
   BOOST = 2u,
   OFF = 3u,
-};
-
-enum class AutoExposureOverride : uint32_t {
-  GAME = 0u,
-  OFF = 1u,
-  ON = 2u,
 };
 
 // DLSSNR.DepthInverted: GAME forwards DLSS's DepthInverted create flag (no effect in NR 310.8, E8).
@@ -272,7 +255,6 @@ struct Settings {
   std::string snippet_path;  // UTF-8; empty = next to the add-on, then the game folder
   PlacementSource source = PlacementSource::AUTO;
   MotionVectorSource motion_vectors = MotionVectorSource::AUTO;
-  DlssQualityOverride dlss_quality_mode = DlssQualityOverride::GAME;
   std::array<DlssPresetOverride, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_presets = {};
   // The render scale override (2026-10-25, addon/dlss_ratio.hpp): each mode's render size as percent of
   // the output, 100 = the game's choice. Applied at the game's next OptimalSettings query.
@@ -294,10 +276,6 @@ struct Settings {
   FgOptionOverride fg_menu_detection = FgOptionOverride::GAME;
   ReflexOverride reflex_mode = ReflexOverride::GAME;
   uint32_t reflex_fps_cap = 0u;  // 0 = no cap; an output-FPS cap submitted through Reflex
-  // The two advanced SetSleepMode bits, forced on through the same rewrite while ticked.
-  bool reflex_use_markers = false;
-  bool reflex_use_min_queue_time = false;
-  AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
   bool present_with_frame_gen = false;
   bool allow_cross_queue_passes = false;
   float motion_scale_x = 1.f;  // multiplies DLSSNR.MVecScaleX; negative flips the axis

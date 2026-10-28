@@ -2,10 +2,11 @@
 
 // The shared, read-mostly NvAPI resolver (addon/nvapi_query.hpp).
 //
-// The Reflex override (addon/reflex_override.cpp) is the only caller: it needs nvapi_QueryInterface
-// to reach NvAPI_D3D_SetSleepMode's internal implementation, and reads the driver's own state through
-// NvAPI_D3D_GetSleepStatus for its status log. Every id resolves through the same nvapi_QueryInterface
-// export, cached once per process like the FG preset hook's DRS resolver (addon/fg_preset.cpp).
+// Two callers resolve through it: the Reflex override (addon/reflex_override.cpp) reaches
+// NvAPI_D3D_SetSleepMode's internal implementation and reads the driver's own state through
+// NvAPI_D3D_GetSleepStatus; the FG preset override (addon/fg_preset.cpp) hooks NvAPI_DRS_GetSetting's
+// internal implementation beside its public export. Every id resolves through the same
+// nvapi_QueryInterface export, cached once per process (Module() below).
 //
 // The structures are NVIDIA's own (nvapi.h, shipped by the pinned Streamline commit): nothing
 // here is a hand-copied ABI. NV_SET_SLEEP_MODE_PARAMS' version a caller sends is
@@ -16,7 +17,6 @@
 #include <unknwn.h>
 
 #include <nvapi.h>
-#include <nvapi_interface.h>  // NVIDIA's own { "NvAPI_...", id } table, the source of the ids below
 
 #include <cstdint>
 #include <cstring>
@@ -32,17 +32,14 @@ using QueryInterfaceFn = void*(__cdecl*)(uint32_t);
 
 // The NvAPI_QueryInterface ids come from NVIDIA's own table instead of being transcribed here:
 // nvapi_interface.h (MIT, shipped by the pinned Streamline commit next to nvapi.h) is a plain
-// { "NvAPI_...", id } list, so the names this file needs are looked up in it. nvapi.h declares the
+// { "NvAPI_...", id } list, so the names are looked up in it (addon/nvapi_ids.cpp -- one definition of
+// that table per process, so the header declares and never includes it). nvapi.h declares the
 // functions and their structures but carries no ids, and nvapi64.dll exports only nvapi_QueryInterface.
-inline uint32_t InterfaceId(const char* name) {
-  for (const NVAPI_INTERFACE_TABLE& entry : nvapi_interface_table) {
-    if (entry.func != nullptr && std::strcmp(entry.func, name) == 0) return entry.id;
-  }
-  return 0u;  // not in the table: Interface() then resolves no entry point
-}
+[[nodiscard]] uint32_t InterfaceId(const char* name);
 
-inline const uint32_t kGetSleepStatusId = InterfaceId("NvAPI_D3D_GetSleepStatus");
-inline const uint32_t kSetSleepModeId = InterfaceId("NvAPI_D3D_SetSleepMode");
+[[nodiscard]] uint32_t GetSleepStatusId();
+[[nodiscard]] uint32_t SetSleepModeId();
+[[nodiscard]] uint32_t DrsGetSettingId();
 
 using SleepStatus = NV_GET_SLEEP_STATUS_PARAMS;
 using SleepModeParams = NV_SET_SLEEP_MODE_PARAMS;
@@ -78,7 +75,7 @@ struct SleepSample {
 inline SleepSample GetSleepStatus(IUnknown* device) {
   SleepSample sample{};
   if (device == nullptr) return sample;
-  const auto get = Interface<Status(__cdecl*)(IUnknown*, SleepStatus*)>(kGetSleepStatusId);
+  const auto get = Interface<Status(__cdecl*)(IUnknown*, SleepStatus*)>(GetSleepStatusId());
   if (get == nullptr) return sample;
   sample.sleep.version = NV_GET_SLEEP_STATUS_PARAMS_VER;
   sample.status = get(device, &sample.sleep);
