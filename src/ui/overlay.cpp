@@ -500,13 +500,16 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
   const std::string tip(descriptor.tooltip);
   std::array<const char*, 4> labels = {};
   std::array<std::string_view, 4> why = {};
-  for (size_t index = 0u; index < row.options.size(); ++index) {
+  // Both halves of the row (its labels and its option states) are bounded by the schema, not by each other:
+  // the two 4s are written separately, and a mismatch would read a null label into CalcTextSize.
+  const size_t count = (std::min)(row.options.size(), descriptor.choices.size());
+  for (size_t index = 0u; index < count; ++index) {
     labels[index] = descriptor.choices[index].data();  // literals and static strings: NUL-terminated
     why[index] = row.options[index].why;
   }
   widgets::RowLabel(label.c_str(), tip.empty() ? nullptr : tip.c_str());
   const int clicked = widgets::Segmented(std::format("##{}", descriptor.key).c_str(), labels.data(),
-                                         static_cast<int>(row.options.size()), static_cast<int>(shown), why.data());
+                                         static_cast<int>(count), static_cast<int>(shown), why.data());
   if (clicked >= 0 && static_cast<size_t>(clicked) != stored) {
     descriptor.set(*settings, static_cast<double>(clicked));
     changed = true;
@@ -888,6 +891,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   // ui-review.md §2 finding 5: Mask and UI correction, which handle the HUD, get their own section.
   const bool mask_changed = SectionChanged(*settings, SettingSection::MASK);
   bool mask_reset = false;
+  widgets::SectionGap();
   const bool mask_open =
       widgets::SectionHeader("Mask and HUD", "changed", "Reset", mask_changed && !state->defaults_view, &mask_reset);
   if (mask_reset) {
@@ -901,6 +905,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   const bool fixes_changed = SectionChanged(*settings, SettingSection::FIXES_COLOR)
                              || SectionChanged(*settings, SettingSection::FIXES_GUIDES);
   bool fixes_reset = false;
+  widgets::SectionGap();
   const bool fixes_open =
       widgets::SectionHeader("Fixes", "changed", "Reset", fixes_changed && !state->defaults_view, &fixes_reset);
   if (fixes_reset) {

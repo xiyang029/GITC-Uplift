@@ -1132,6 +1132,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"cannot resolve Uplift's own module for the caller-identity spoof", "无法解析 Uplift 自身模块以伪装调用方身份"},
     {"cannot restore the snippet's GetModuleFileNameW import", "无法恢复 Snippet 的 GetModuleFileNameW 导入项"},
     {"cannot restore the snippet's log-callback slot", "无法恢复 Snippet 的日志回调槽"},
+    {"changed", "已更改"},
     {"completion-token Signal failed with {:#010x}", "完成令牌 Signal 调用失败：{:#010x}"},
     {"constants binding", "常量绑定"},
     {"constants buffer", "常量缓冲区"},

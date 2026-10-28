@@ -374,7 +374,8 @@ inline bool RightLink(const char* label, float right) {
 // Returns true on the frame the link was clicked.
 inline bool SectionCaption(const char* caption, const char* reset_label, bool modified) {
   ImGui::Dummy(ImVec2(0.f, tokens::kSectionGap * 0.55f));
-  const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+  // The same inset SectionHeader keeps, so a caption's link and a header's end at one x down the panel.
+  const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x - tokens::kCardPadding * 0.75f;
   bool clicked = false;
   {
     StyleScope caption_text;
@@ -446,7 +447,7 @@ inline bool SectionHeader(const char* english, const char* hint, const char* res
       ItemTooltip("%s", reset_text.c_str());
     }
   }
-  if (!hint_text.empty()) {
+  if (modified && !hint_text.empty()) {
     const ImVec2 hint_at(title_end + font * 1.25f, lo.y + kPadY);
     const float room = hint_end - font * 1.25f - hint_at.x;
     if (room >= (std::min)(ImGui::CalcTextSize(hint_text.c_str()).x, font * 6.f)) {
@@ -636,7 +637,7 @@ inline float CardValueColumn(const char* widest_key) {
 
 // One line of the card, in one piece: cut with "..." at the card's right edge, in full as the tooltip.
 // `muted` draws it in the secondary colour.
-inline void CardLine(const std::string& source, bool muted) {
+inline void CardLineText(const std::string& source, bool muted) {
   const std::string text = gui::Display(source);
   const std::string shown = Ellipsize(text.c_str(), ImGui::GetContentRegionAvail().x);
   if (muted) {
@@ -653,7 +654,7 @@ inline void CardLine(const std::string& source, bool muted) {
 inline void CardRow(const char* key, const std::string& value, float column) {
   SecondaryText(gui::Display(key).c_str());
   gui::SameLine(column);
-  CardLine(value, false);
+  CardLineText(value, false);
 }
 
 // A card's fix step, in ImGui's own numbering: "1. Restart the game." The step's words are the card's own
@@ -747,7 +748,7 @@ inline void DrawStatusCard(const CardView& card) {
   }
   // A muted line, left out when the card's fixed height has no room left for it.
   if (!card.footer.empty() && ImGui::GetContentRegionAvail().y >= ImGui::GetTextLineHeight()) {
-    CardLine(card.footer, true);
+    CardLineText(card.footer, true);
   }
 }
 
