@@ -19,6 +19,9 @@ static const uint OPTION_PRIMARIES_MASK = 3u;    // bits 0-1: PRIMARIES_* (0 = a
 static const uint OPTION_NEAR_BLACK_GUARD = 4u;  // F16: the change pass fades NR's colour change near black
 static const uint OPTION_CONSISTENT = 8u;        // F15: the rebuild undoes Neutwo's compression
 static const uint OPTION_MASK = 16u;             // §3.13: the compose multiplies the change by the NR mask
+// 2026-10-29: the working grid's density correction lands on the base band instead of the detail band. Off by
+// default; the decode reads it, nothing else does.
+static const uint OPTION_DENSITY_ON_BASE = 32u;
 
 bool IsSdr(uint encoding) {
   return encoding == ENCODING_AUTO || encoding == ENCODING_SRGB;

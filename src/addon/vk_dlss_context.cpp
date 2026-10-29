@@ -1761,7 +1761,7 @@ ContextStatus VkDlssContext::Status() const {
     if (status.canvas != status.work) {
       detail = std::format(" (a {}x{} render, padded)", status.work.width, status.work.height);
     } else if (status.work != status.frame && !status.frame.Empty()) {
-      detail = std::format(" of {}x{} ({})", status.frame.width, status.frame.height, (config_.upsampling == color::Upsampling::GUIDED ? "Guided" : config_.upsampling == color::Upsampling::EDGE_AWARE ? "Edge-aware" : "Classic"));
+      detail = std::format(" of {}x{} ({})", status.frame.width, status.frame.height, (config_.upsampling == color::Upsampling::EDGE_AWARE ? "Edge-aware" : "Classic"));
     }
     if (match_game_waiting) {
       detail += " (Match game: waiting for DLSS)";

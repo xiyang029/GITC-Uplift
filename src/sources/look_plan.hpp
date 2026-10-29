@@ -30,8 +30,12 @@ struct ColorFixes {
   float adapt_darker = 0.7f;
   color::NeuralTransfer transfer = color::NeuralTransfer::BOUNDED_RATIO;
   float chroma_clamp = 0.f;      // stops; 0 = off
-  float guided_low_gain = 0.85f;   // Guided: the base band's gain (Upsampling = Guided only)
-  float guided_high_gain = 0.95f;  // Guided: the detail band's gain
+  float guided_low_gain = 1.f;     // Edge-aware: the base band's gain (Upsampling = Edge-aware only)
+  float guided_high_gain = 1.f;    // Edge-aware: the detail band's gain
+  // 2026-10-29: the working grid's density correction lands on the base band instead of the detail band.
+  bool density_on_base = false;
+  float edge_density_attenuation = 0.85f;  // the band ceiling per unit of extra work-grid density, 1 = none
+  float kernel_fade_in = 4.f;              // 1 / the density excess at which the detail band's correction is full
   bool near_black_guard = false;
   friend bool operator==(const ColorFixes&, const ColorFixes&) = default;
 };

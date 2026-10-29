@@ -32,7 +32,7 @@ constexpr std::array<std::string_view, 3> VRAM_CHECKS = {"Careful", "Relaxed", "
 constexpr std::array<std::string_view, 3> VULKAN_NR_MODES = {"Native", "Direct3D 12", "Helper"};  // Plan 19; T5: Helper
 constexpr std::array<std::string_view, 6> RESOLUTION_MODES = {"Full", "Quality (67 %)", "Balanced (58 %)",
                                                               "Performance (50 %)", "Match game", "Custom"};
-constexpr std::array<std::string_view, 3> UPSAMPLING_MODES = {"Classic", "Edge-aware", "Guided"};
+constexpr std::array<std::string_view, 2> UPSAMPLING_MODES = {"Classic", "Edge-aware"};
 // Split chain (2026-10-10): a pass's Runs at after its first choice, "Same as pass n-1" (PassStageChoices), in stored-index order.
 constexpr std::array<std::string_view, 3> PASS_STAGES = {"Before upscaling", "After DLSS", "Present"};
 constexpr std::array<std::string_view, 2> MASK_MODES = {"Auto (UPLIFT_MASK)", "Off"};
@@ -575,8 +575,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Upsampling",
         .tooltip = "How NR's change returns to full size below Full. Edge-aware keeps it on the side of an edge where NR "
-                   "made it; Guided splits it into a base and a detail band with their own gains, which steadies NR's "
-                   "sharpening at a reduced resolution; Classic is bilinear and slightly cheaper.",
+                   "made it, and splits it into a base and a detail band with their own gains (below); Classic is "
+                   "bilinear and slightly cheaper.",
         .choices = UPSAMPLING_MODES,
         .get = [](const Settings& s) { return Index(s.upsampling); },
         .set = [](Settings& s, double v) { s.upsampling = FromIndex<color::Upsampling>(v); },
@@ -585,9 +585,9 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "GuidedBaseGain",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::PLACEMENT,
-        .label = "Guided base gain",
-        .tooltip = "Guided's gain on the change's base band, its large and gradual edits. Below 1 steadies NR's broadening at a reduced "
-                   "resolution; 1 leaves it unchanged. Applies when Upsampling = Guided below Full.",
+        .label = "Edge-aware base gain",
+        .tooltip = "Edge-aware's gain on the change's base band, its large and gradual edits. Below 1 steadies NR's broadening at a "
+                   "reduced resolution; 1 leaves it unchanged. Applies when Upsampling = Edge-aware below Full.",
         .min = 0.5,
         .max = 1.0,
         .flags = SLIDER_RANGE_ONLY,  // a shaping, not a state: it applies when the slider is released
@@ -598,15 +598,60 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "GuidedDetailGain",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::PLACEMENT,
-        .label = "Guided detail gain",
-        .tooltip = "Guided's gain on the change's detail band, its small edits that hug an edge. Below 1 eases NR's sharpening at a reduced "
-                   "resolution; 1 leaves it unchanged. Under the foveated grid a density ceiling already lowers this band toward the "
-                   "edges, and this gain applies within that ceiling.",
+        .label = "Edge-aware detail gain",
+        .tooltip = "Edge-aware's gain on the change's detail band, its small edits that hug an edge. Below 1 eases NR's sharpening at a "
+                   "reduced resolution; 1 leaves it unchanged. Under the foveated grid a density ceiling already lowers this band "
+                   "toward the edges, and this gain applies within that ceiling.",
         .min = 0.5,
         .max = 1.0,
         .flags = SLIDER_RANGE_ONLY,  // a shaping, not a state: it applies when the slider is released
         .get = [](const Settings& s) { return static_cast<double>(s.guided_detail_gain); },
         .set = [](Settings& s, double v) { s.guided_detail_gain = static_cast<float>(v); },
+    },
+    {
+        // 2026-10-29: which band the working grid's density correction lands on. Off thins the detail band, on thins
+        // the base band and leaves the detail at full weight.
+        .key = "DensityOnBase",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::PLACEMENT,
+        .label = "Thin the base band on a coarse grid",
+        .tooltip = "Below Full, a coarser working grid normally lowers the detail band toward the edges, which keeps the correction "
+                   "from holding detail the grid could not resolve. This moves that correction to the base band instead: the "
+                   "detail keeps its full weight, so edges stay sharp, while the broad edit thins. On a foveated grid that reads "
+                   "as change fading toward the edges; turn it off if that looks like a vignette.",
+        .get = [](const Settings& s) { return Flag(s.density_on_base); },
+        .set = [](Settings& s, double v) { s.density_on_base = (v != 0.0); },
+    },
+    {
+        // 2026-10-29: the two pacing constants the upsampler used to hard-code, as sliders. They are the real
+        // sharpness/stability dial below Full: a gain scales the field, these decide how much of it survives a
+        // coarse grid.
+        .key = "EdgeDensityAttenuation",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Coarse-grid attenuation",
+        .tooltip = "How much of a band survives per unit of extra working-grid density. 1 keeps all of it, so a coarse grid "
+                   "looks as sharp as a fine one; lower leans toward steadiness. It sets a ceiling, so the band gains still "
+                   "apply beneath it.",
+        .min = 0.5,
+        .max = 1.0,
+        .flags = SLIDER_RANGE_ONLY,
+        .get = [](const Settings& s) { return static_cast<double>(s.edge_density_attenuation); },
+        .set = [](Settings& s, double v) { s.edge_density_attenuation = static_cast<float>(v); },
+    },
+    {
+        .key = "KernelFadeIn",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Kernel fade-in",
+        .tooltip = "How fast the edge-aware kernel's correction reaches full strength as the working grid gets coarser. Higher "
+                   "sharpens 90-85 % grids, which otherwise get little of it, and brings NR's per-frame churn along with it: "
+                   "raise it until you see flicker, then back off.",
+        .min = 1.0,
+        .max = 12.0,
+        .flags = SLIDER_RANGE_ONLY,
+        .get = [](const Settings& s) { return static_cast<double>(s.kernel_fade_in); },
+        .set = [](Settings& s, double v) { s.kernel_fade_in = static_cast<float>(v); },
     },
     {
         // Split chain (2026-10-10, design 4): a later stage group's own size, keyed by stage so moving a boundary pass keeps each stage's size.

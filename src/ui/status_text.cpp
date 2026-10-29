@@ -310,9 +310,7 @@ LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown) {
                                           : std::format("Custom {:.0f} %", facts.custom_scale));
       break;
   }
-  const std::string_view upsampling = (facts.upsampling == color::Upsampling::CLASSIC      ? "Classic"
-                                       : facts.upsampling == color::Upsampling::EDGE_AWARE ? "Edge-aware"
-                                                                                           : "Guided");
+  const std::string_view upsampling = (facts.upsampling == color::Upsampling::CLASSIC ? "Classic" : "Edge-aware");
   const nr::Size work = facts.work;
   const bool full_size = (facts.frame.Empty() || work == facts.frame);
   if (work.Empty()) {

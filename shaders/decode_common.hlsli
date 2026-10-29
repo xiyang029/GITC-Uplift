@@ -20,7 +20,7 @@ cbuffer DecodeConstants : register(b0) {
   uint target_height;
   uint width;          // the region: the output size
   uint height;
-  uint upsampling;     // change-field reads: 0 direct, 1 Classic, 2 Edge-aware, 3 Guided
+  uint upsampling;     // change-field reads: 0 direct, 1 Classic, 2 Edge-aware
   uint source_x;       // the region's top-left corner in the source
   uint source_y;
   uint options;        // Plan 5: OPTION_* (the primaries, Consistent transfer, the mask)
@@ -29,8 +29,10 @@ cbuffer DecodeConstants : register(b0) {
   uint foveation_y;
   float foveation_gmax_x;
   float foveation_gmax_y;
-  float guided_low_gain;   // Guided: the base band's gain (1 = the field's low frequencies unchanged)
-  float guided_high_gain;  // Guided: the detail band's gain (1 = the field's high frequencies unchanged)
+  float guided_low_gain;   // Edge-aware: the base band's gain (1 = the field's low frequencies unchanged)
+  float guided_high_gain;  // Edge-aware: the detail band's gain (1 = the field's high frequencies unchanged)
+  float edge_density_attenuation;  // the band ceiling per unit of extra work-grid density (1 = no attenuation)
+  float kernel_fade_in;            // 1 / the density excess at which the kernel's correction reaches full strength
 };
 
 // Plan 13: on Vulkan's After DLSS the decode works in place: the target (DLSS's output, u0) is also where the original pixel is read.
@@ -45,17 +47,17 @@ Texture2D<float4> change_texture : register(t1);
 Texture2D<float> exposure_texture : register(t2);
 Texture2D<float4> mask_texture : register(t3);  // Plan 5 (§3.13): Uplift's copy of UPLIFT_MASK, read with OPTION_MASK
 
-static const float SPATIAL_RADIUS = 1.5f;  // the tent's half-width, in work pixels (v2 design §3.8)
+static const float SPATIAL_RADIUS = 1.5f;  // the tent's half-width, in output pixels (v2 design §3.8; per axis since 2026-10-29)
 static const float MIN_WEIGHT = 1e-4f;     // below this total the edge-aware sample falls back to bilinear
 
 // Band shaping (2026-10-26; density scale 2026-10-27). The upsample's two bands are shaped before they are
 // combined: the detail band by how coarse the working grid is here, both bands by how dark the pixel is.
-// Unguided (Upsampling 2) the band gains are 1, so only the shaping applies; Guided (3) sets the gains, and
-// they are ceilings on the shaping rather than factors over it.
+// Edge-aware (Upsampling 2) sets the gains; they are ceilings on the shaping rather than factors over it.
 //
 // `density` covers the uniform work scale as well as the foveated grid: a Custom resolution below Full is
 // exactly as coarse as the foveated edges are, so leaving it out left the shaping inert for the common case.
-static const float EDGE_DENSITY_ATTENUATION = 0.85f;  // the detail ceiling per unit of extra work-grid density
+// The two pacing constants are the caller's now (the UI's sliders): edge_density_attenuation is the ceiling per
+// unit of extra density, kernel_fade_in the rate the detail band's correction fades in over the same density.
 static const float DARK_EDIT_FLOOR = 0.80f;           // the edit's weight in the deepest shadows
 static const float DARK_GUIDE_LOW = -7.f;             // log2 stops below diffuse white: fully dark
 static const float DARK_GUIDE_HIGH = -3.5f;           // and fully lit
@@ -63,10 +65,11 @@ static const float CLAMP_SLACK = 0.15f;               // how far past the neighb
 // -1 / (2 * sigma^2 * ln 2) for the range kernel's sigma of 0.5 stops at density 1: the exponent per stop^2.  The
 // caller divides it by the density, which widens the Gaussian as sqrt(density).
 static const float RANGE_K = -2.885390082f;
-// 1 / 0.25: the kernel's correction to the bilinear sample reaches full strength by density 1.25 (an 80 % work grid).
-// See ChangeBands: at density 1 the field is 1:1 with the output and the kernel is pure blur, so the correction has to
-// fade out there or the plateau's one-load path steps against the ramp's first texels.
-static const float KERNEL_FADE_IN = 4.f;
+// Kernel fade: the caller's kernel_fade_in, 1 / the density excess at which the correction reaches full strength.
+// 4 makes that density 1.25 (an 80 % work grid). See ChangeBands: at density 1 the field is 1:1 with the output
+// and the kernel is pure blur, so the correction has to fade out there or the plateau's one-load path steps
+// against the ramp's first texels. Higher reaches full strength sooner, which sharpens 90-85 % grids and brings
+// their churn with it -- tried at 10 on 2026-10-29 and reverted: ghosting and flicker got markedly worse.
 
 // Classic: a bilinear sample of the change field at `position` (work pixels), clamped to its texels.
 float3 ChangeBilinear(float2 position, uint2 size) {
@@ -79,10 +82,15 @@ float3 ChangeBilinear(float2 position, uint2 size) {
   return lerp(top, bottom, fraction.y);
 }
 
-// One tap's spatial weight: a tent of half-width SPATIAL_RADIUS around `position`, in work pixels.
-float TentWeight(float2 position, float2 tap) {
+// One tap's spatial weight: a tent around `position`, its half-width SPATIAL_RADIUS *output* pixels on each axis,
+// which is `radius` work texels. The two axes differ (2026-10-29): a Custom resolution may scale width and height
+// apart, and one work texel then spans 1.67 output pixels across and 1.25 down. A tent fixed at 1.5 work texels
+// would be an ellipse on screen -- flat across, tall down -- so the residual edge - classic would mean something
+// different per axis and no single density could shape both. Dividing the radius by each axis' own upsampling
+// keeps the support round in output space, which is the space the image is judged in.
+float TentWeight(float2 position, float2 tap, float2 radius) {
   const float2 gap = abs(position - tap);  // not `distance`: an HLSL intrinsic
-  return max(1.f - gap.x / SPATIAL_RADIUS, 0.f) * max(1.f - gap.y / SPATIAL_RADIUS, 0.f);
+  return max(1.f - gap.x / radius.x, 0.f) * max(1.f - gap.y / radius.y, 0.f);
 }
 
 // The change field at `tap`, clamped to the field's texels; the position a caller weights it by stays the
@@ -103,15 +111,15 @@ float4 ChangeTap(int2 tap, uint2 size) {
 // poison the sum and hand the pixel back to Compose's finite guard as an untouched source -- so they select
 // a zero weight and a zero value instead, and stay out of the hull. The change field's own writers sanitise
 // (ChangeField, ResolveStrengths), so this only guards a field read before it is written.
-void AccumulateTap(float4 change, float2 position, float2 tap, float guide, float range_k, bool want_range,
-                   inout float3 sum, inout float total, inout float3 tap_min, inout float3 tap_max) {
+void AccumulateTap(float4 change, float2 position, float2 tap, float2 radius, float guide, float range_k,
+                   bool want_range, inout float3 sum, inout float total, inout float3 tap_min, inout float3 tap_max) {
   const bool finite = all(isfinite(change));
   if (want_range && finite) {
     tap_min = min(tap_min, change.xyz);
     tap_max = max(tap_max, change.xyz);
   }
   const float difference = guide - change.w;
-  const float weight = finite ? TentWeight(position, tap) * exp2(difference * difference * range_k) : 0.f;
+  const float weight = finite ? TentWeight(position, tap, radius) * exp2(difference * difference * range_k) : 0.f;
   sum += weight * (finite ? change.xyz : float3(0.f, 0.f, 0.f));
   total += weight;
 }
@@ -132,15 +140,31 @@ void AccumulateTap(float4 change, float2 position, float2 tap, float guide, floa
 // per pixel for nothing); only the hull below reads them, for its range.
 //
 // `want_range` is ChangeBands' clamp flag. It only needs the hull when the detail gain can push the mix
-// below it, which means a Guided gain split wider than CLAMP_SLACK; the defaults and Edge-aware cannot, so
+// below it, which means a gain split wider than CLAMP_SLACK; the defaults cannot, so
 // that path skips the hull's min/max entirely. The value is uniform, so the branch costs nothing. The hull
 // is over every tap, the zero-weight ones included, so the clamp sees the range it always has: that is what
 // the second loop loads them for.
-float3 ChangeEdgeAware(float2 position, uint2 size, float density, bool want_range, out float guide,
-                       out float3 tap_min, out float3 tap_max, out float3 classic) {
+float3 ChangeEdgeAware(float2 position, uint2 size, float density, float2 axis_density, bool want_range,
+                       out float guide, out float3 tap_min, out float3 tap_max, out float3 classic, out float reach) {
   const int2 base = int2(floor(position));
   const float2 fraction = position - float2(base);
   const float range_k = RANGE_K / density;
+  // The tent's half-width per axis, in work texels: output-space round, so an axis the grid resolves less often
+  // gets a proportionally narrower one.
+  //
+  // The floor is one texel, and the band is scaled down to match rather than the tent widened to hide it. A tent
+  // narrower than 1 + fraction reaches no outer tap at all, and the nine-tap sum then collapses to its centre
+  // 2x2 -- which is the bilinear sample, so `edge` equals `classic`, the detail band is exactly zero and
+  // edge-aware quietly turns into Classic. Widening the tent past its output-space width instead would average
+  // taps the grid cannot resolve, which is a false sharpness. So the tent stops at one texel and the caller
+  // multiplies the band by how much of the intended support survived: a kernel that only reaches 60 % of 1.5
+  // pixels has seen 60 % of the neighbourhood it was going to describe, and gets 60 % of the say.
+  const float2 ideal = SPATIAL_RADIUS / max(axis_density, float2(1.f, 1.f));
+  const float2 radius = max(ideal, float2(1.f, 1.f));
+  // Reach is measured on the ideal width, not on the floored one: the floor exists to keep nine taps alive, and
+  // reading the band's scaling off it would flatten that scaling for every grid coarser than 67 % -- 50 %, 33 %
+  // and 25 % would all report the same 0.67 and lose the distinction the scale is for. This is 1 / max axis.
+  reach = saturate(min(ideal.x, ideal.y) / SPATIAL_RADIUS);
 
   const float4 c00 = ChangeTap(base, size);
   const float4 c10 = ChangeTap(base + int2(1, 0), size);
@@ -158,19 +182,20 @@ float3 ChangeEdgeAware(float2 position, uint2 size, float density, bool want_ran
   float total = 0.f;
   tap_min = float3(1e30f, 1e30f, 1e30f);
   tap_max = float3(-1e30f, -1e30f, -1e30f);
-  AccumulateTap(c00, position, float2(base), guide, range_k, want_range, sum, total, tap_min, tap_max);
-  AccumulateTap(c10, position, float2(base + int2(1, 0)), guide, range_k, want_range, sum, total, tap_min, tap_max);
-  AccumulateTap(c01, position, float2(base + int2(0, 1)), guide, range_k, want_range, sum, total, tap_min, tap_max);
-  AccumulateTap(c11, position, float2(base + int2(1, 1)), guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c00, position, float2(base), radius, guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c10, position, float2(base + int2(1, 0)), radius, guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c01, position, float2(base + int2(0, 1)), radius, guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c11, position, float2(base + int2(1, 1)), radius, guide, range_k, want_range, sum, total, tap_min, tap_max);
 
   const int2 outer = int2(fraction.x < 0.5f ? -1 : 2, fraction.y < 0.5f ? -1 : 2);
   const int2 ring[4] = {int2(outer.x, 0), int2(outer.x, 1), int2(0, outer.y), int2(1, outer.y)};
   [unroll] for (int i = 0; i < 4; ++i) {
     const int2 tap = base + ring[i];
-    AccumulateTap(ChangeTap(tap, size), position, float2(tap), guide, range_k, want_range, sum, total, tap_min, tap_max);
+    AccumulateTap(ChangeTap(tap, size), position, float2(tap), radius, guide, range_k, want_range, sum, total, tap_min,
+                  tap_max);
   }
   const int2 corner = base + outer;
-  AccumulateTap(ChangeTap(corner, size), position, float2(corner), guide, range_k, want_range, sum, total, tap_min,
+  AccumulateTap(ChangeTap(corner, size), position, float2(corner), radius, guide, range_k, want_range, sum, total, tap_min,
                 tap_max);
 
   if (want_range) {
@@ -204,40 +229,58 @@ float EditDarkness(float guide) {
 
 // The upsample's two bands, shaped and combined. `classic` is the change field's low frequencies (the
 // bilinear sample); `edge` is the joint bilateral answer, so edge - classic is the detail the guided kernel
-// holds on the correct side of an edge. The gains come from the caller: 1 and 1 unguided, the Guided
-// settings otherwise. They apply under the foveated grid too now that the density shapes the detail band
+// holds on the correct side of an edge. The gains come from the caller, both 1 by default. They apply
+// under the foveated grid too now that the density shapes the detail band
 // by itself; suppressing the setting there as well only took the control away where the grid is coarsest.
 //
-// Density: a coarser working grid means a work texel carries detail its footprint cannot resolve, so the
-// detail band is held to a ceiling per unit of extra density. At the plateau, and with the grid off, the
-// ceiling is 1 and nothing changes. The ceiling is a min, not a factor: a Guided detail gain below it
-// lowers the band further, and the two never compound.
+// Density: a coarser working grid means a work texel carries detail its footprint cannot resolve, so a band
+// is held to a ceiling per unit of extra density. At the plateau, and with the grid off, the ceiling is 1 and
+// nothing changes. The ceiling is a min, not a factor: a gain below it lowers the band further, and the two
+// never compound.
+//
+// Which band (2026-10-29, OPTION_DENSITY_ON_BASE): the detail band by default, the base band when the option
+// is set. Coarsening costs both bands -- the base loses the shape of a large edit as much as the detail loses
+// its edge -- but only the detail band was ever attenuated, so the base arrived at the coarsest grids at full
+// strength while the detail was gone. Moving the correction to the base leaves the detail at full weight and
+// instead holds back the broad edit, which is the trade the setter asks for. It is an option, not the rule,
+// because suppressing the base is visible as a fall-off in overall change strength toward a foveated edge,
+// and whether that reads as a natural softness or as a vignette depends on the scene.
 //
 // The kernel's correction fades in over the same density (2026-10-27): edge - classic is the tent's blur, which
 // only earns its keep once the field is actually coarser than the output. At density 1 there is no resample to
 // smooth, so the correction is zero and the result is `classic * low_gain` -- exactly what DecodePixel's one-load
-// path returns -- and by density 1.25 it is the full kernel, so 80 % work grids and below are untouched.
+// path returns -- and by density 1 / kernel_fade_in it is the full kernel.
+//
+// `reach` (2026-10-29) is the third gate, and the one an anisotropic Custom scale needs: the tent stops at one
+// work texel per axis, so an axis coarser than SPATIAL_RADIUS output pixels per texel cannot span the support
+// the kernel was designed around. Rather than widen the tent -- which would average taps the grid cannot resolve
+// and read as false sharpness -- ChangeEdgeAware reports how much of that support survived and the band scales
+// by it. At a square grid reach is 1 and nothing changes; at X 60 % it is about 0.6, so the detail band keeps
+// 60 % of its say, honestly, instead of the kernel pretending to see a neighbourhood it never sampled.
 //
 // Clamp: `classic * low + (edge - classic) * detail` never rises above the hull -- both bands are convex
 // combinations of the same taps and both gains are at most 1 -- so the only excursion is downward, and it
-// is the detail gain above the base gain (Guided's extrapolation) that causes it. The base band alone can
+// is the detail gain above the base gain (an extrapolation) that causes it. The base band alone can
 // sit below the hull too; that is what a base gain under 1 asks for, so the floor is the lower of the hull
 // and the base band, less CLAMP_SLACK. Clamping against the hull alone would undo the base gain wherever
 // the neighbourhood is flat, where the whole band sits below a hull only the taps occupy.
 //
-// With the defaults (0.950 against 0.850) the excursion is 0.100 of the hull's range, under CLAMP_SLACK, so
-// the caller does not hand the hull over at all; the flag is uniform. A hard cut would turn an overstep into
+// With the defaults (1 against 1) the excursion is zero, so the caller does not hand the hull over at all; the
+// flag is uniform, and only a base gain under 0.85 turns it on. A hard cut would turn an overstep into
 // a flat plateau right where the eye is looking, so the last CLAMP_SLACK rolls off continuously and a moving
 // step does not flicker as it cuts in and out. Dark multiplies after the clamp, so the shadow attenuation is
 // never undone by it.
 float3 ChangeBands(float3 classic, float3 edge, float3 tap_min, float3 tap_max, float low_gain, float high_gain,
-                   float density, float guide, bool clamp_bands) {
+                   float density, float guide, bool clamp_bands, float reach) {
   const float dark = EditDarkness(guide);
-  const float fade = saturate((density - 1.f) * KERNEL_FADE_IN);
-  const float detail = min(high_gain, pow(EDGE_DENSITY_ATTENUATION, max(density - 1.f, 0.f))) * fade;
-  const float3 bands = classic * low_gain + (edge - classic) * detail;
+  const float fade = saturate((density - 1.f) * kernel_fade_in);
+  const float ceiling = pow(edge_density_attenuation, max(density - 1.f, 0.f));
+  const bool on_base = (options & OPTION_DENSITY_ON_BASE) != 0u;
+  const float low = (on_base ? low_gain * ceiling : low_gain);
+  const float detail = min(high_gain, on_base ? 1.f : ceiling) * fade * reach;
+  const float3 bands = classic * low + (edge - classic) * detail;
   if (!clamp_bands) return dark * bands;
-  const float3 base = classic * low_gain + (edge - classic) * min(detail, low_gain);
+  const float3 base = classic * low + (edge - classic) * min(detail, low);
   const float3 slack = max((tap_max - tap_min) * CLAMP_SLACK, 1e-4f);
   const float3 floor_band = min(tap_min, base) - slack;
   const float3 over = max(floor_band - bands, 0.f);
@@ -287,30 +330,41 @@ float4 DecodePixel(uint2 pixel) {
   } else {
     uint2 size;
     change_texture.GetDimensions(size.x, size.y);
-    if (upsampling == 2u || upsampling == 3u) {
-      // The Guided settings reach the bands here; Edge-aware passes both at full weight and everything it
-      // gets is the shaping below. The guide is the change field's own ℓ_M, which ChangeEdgeAware returns
-      // from the taps it reads anyway, so this path no longer re-encodes the model to find it.
-      const bool guided = upsampling == 3u;
-      // Only a detail gain more than CLAMP_SLACK above the base gain can push the mix past the floor
-      // ChangeBands checks; the defaults (0.950 against 0.850) cannot, and the hull is skipped there.
-      const bool hull = guided && guided_high_gain - guided_low_gain > CLAMP_SLACK;
+    if (upsampling == 2u) {
+      // Edge-aware, with its two band gains. Until 2026-10-29 this branch also served Guided (3), which passed
+      // the same gains but was only reachable in that mode; the modes merged and this one now always shapes.
+      // The guide is the change field's own ℓ_M, which ChangeEdgeAware returns from the taps it reads anyway,
+      // so this path no longer re-encodes the model to find it.
+      //
+      // Only a detail gain more than CLAMP_SLACK above the base gain can push the mix past the floor ChangeBands
+      // checks; both defaults are 1, so the hull is skipped, and the UI's lowest base (0.5) is what turns it on.
+      //
+      // OPTION_DENSITY_ON_BASE widens that split on its own: it multiplies the base band by the density ceiling
+      // (down to 0.72 at a 50 % grid) while the detail band keeps its full gain, so the effective split reaches
+      // 1 - 0.72 = 0.28 there, past CLAMP_SLACK, whenever the user leaves the gains at their defaults. The
+      // ceiling is per pixel and this flag must stay uniform, so the option asks for the hull outright.
+      const bool hull = (options & OPTION_DENSITY_ON_BASE) != 0u || guided_high_gain - guided_low_gain > CLAMP_SLACK;
       // The position and the density of this output pixel's cell come out of one pass over each axis: both
       // want the axis' decoded dword and the same plateau/ramp/edge branch, and the density is that branch's
       // slope. `pixel` is the region's, as the position's own normalization is: the density is about where
       // this output pixel sits in the region, not on the screen.
       const FovSample sx = FovFullToWorkSample1(pixel.x, width, size.x, foveation_x, foveation_gmax_x);
       const FovSample sy = FovFullToWorkSample1(pixel.y, height, size.y, foveation_y, foveation_gmax_y);
-      // Full output texels per change-field texel here: the axes' slopes times the uniform scale. sx/sy measure
-      // against the warp's own normalizer (gmax is work / uniform) while ratio measures against the whole
-      // working grid, so ratio carries that normalizer's mean as well; dividing the warp's geometric mean back
-      // out leaves the local upsampling -- 1 where the field is 1:1 with the output, the field's own scale
-      // elsewhere. Without the divide a foveated Full grid read 1.17 on its plateau: the range kernel widened,
-      // the detail ceiling dropped, and the fast path below could never fire.
-      const float ratio = sqrt(float(width) * float(height) / (float(size.x) * float(size.y)));
-      const float warp = sqrt(foveation_gmax_x * foveation_gmax_y);
+      // Output texels per change-field texel, per axis: the tent's support has to be round in output space, so
+      // each axis needs its own upsampling rather than one number for both -- a Custom resolution may scale width
+      // and height apart, and then the two differ. `ratio` is the uniform scale on that axis, `warp` the foveated
+      // grid's own: sx/sy measure against the warp's normalizer (gmax is work / uniform) while ratio measures
+      // against the whole working grid, so ratio carries that normalizer's mean as well. Multiplying by the
+      // warp's factor leaves the local upsampling -- 1 where the field is 1:1 with the output, the field's own
+      // scale elsewhere. Without it a foveated Full grid read 1.17 on its plateau: the range kernel widened, the
+      // detail ceiling dropped, and the fast path below could never fire.
+      const float2 ratio = float2(float(width), float(height)) / float2(float(size.x), float(size.y));
+      const float2 warp = float2(foveation_gmax_x, foveation_gmax_y);
       // ratio >= 1 by construction: sources::WorkSize caps the work grid at the region on every side.
-      const float density = sqrt(sx.density * sy.density) * ratio * warp;
+      const float2 axis = float2(sx.density, sy.density) * ratio * warp;
+      // The shaping still needs one number: the geometric mean is the scale whose per-axis shaping matches the
+      // tent's area, which is what the band ceiling describes.
+      const float density = sqrt(axis.x * axis.y);
       // 1e-5 covers the few ulp the two sqrt'd products carry; the next real scale up (Custom 99 %) is four
       // orders of magnitude further, so nothing that resamples can slip in.
       if (density <= 1.f + 1e-5f) {
@@ -325,15 +379,16 @@ float4 DecodePixel(uint2 pixel) {
         // density excess, so they too return `classic * low_gain` at the boundary.
         const uint2 texel = min(uint2(max(float2(sx.position, sy.position) + 0.5f, 0.f)), size - 1u);
         const float4 value = change_texture.Load(int3(texel, 0));
-        change = EditDarkness(value.w) * (guided ? guided_low_gain : 1.f) * value.xyz;
+        change = EditDarkness(value.w) * guided_low_gain * value.xyz;
       } else {
         const float2 position = float2(sx.position, sy.position);
         float guide;
         float3 tap_min, tap_max;
         float3 classic;
-        const float3 edge = ChangeEdgeAware(position, size, density, hull, guide, tap_min, tap_max, classic);
-        change = ChangeBands(classic, edge, tap_min, tap_max, guided ? guided_low_gain : 1.f,
-                             guided ? guided_high_gain : 1.f, density, guide, hull);
+        float reach;
+        const float3 edge =
+            ChangeEdgeAware(position, size, density, axis, hull, guide, tap_min, tap_max, classic, reach);
+        change = ChangeBands(classic, edge, tap_min, tap_max, guided_low_gain, guided_high_gain, density, guide, hull, reach);
       }
     } else {
       change = ChangeBilinear(FovFullToWorkPos(pixel, uint2(width, height), size, uint2(foveation_x, foveation_y),

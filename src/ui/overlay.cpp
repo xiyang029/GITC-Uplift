@@ -74,9 +74,11 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   const bool below_full = (settings->resolution_mode != ResolutionMode::FULL)
                            || std::ranges::any_of(view.setup.pass_stages, later_group_scaled);
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && !below_full);
-  // Guided's two gain rows matter only while Guided itself does (below Full).
-  const bool guided_gains_hidden = ((descriptor.key == "GuidedBaseGain" || descriptor.key == "GuidedDetailGain")
-                                    && (!below_full || settings->upsampling != color::Upsampling::GUIDED));
+  // The two band gains matter only while Edge-aware itself does (below Full); Classic has no bands.
+  const bool guided_gains_hidden = ((descriptor.key == "GuidedBaseGain" || descriptor.key == "GuidedDetailGain"
+                                     || descriptor.key == "DensityOnBase" || descriptor.key == "EdgeDensityAttenuation"
+                                     || descriptor.key == "KernelFadeIn")
+                                    && (!below_full || settings->upsampling != color::Upsampling::EDGE_AWARE));
   // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
   const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
                                  || descriptor.key == "FaceLightingDensity" || descriptor.key == "FaceSpeckSize";
@@ -799,9 +801,12 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     if (settings->resolution_asymmetric) changed |= DrawRow(*FindSetting("ResolutionScaleY"), view, settings, state);
   }
   changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state);
-  // Guided's two band gains, right below the choice they depend on (DrawRow hides them unless Guided runs below Full).
+  // Edge-aware's two band gains, right below the choice they depend on (DrawRow hides them unless it runs below Full).
   changed |= DrawRow(*FindSetting("GuidedBaseGain"), view, settings, state);
   changed |= DrawRow(*FindSetting("GuidedDetailGain"), view, settings, state);
+  changed |= DrawRow(*FindSetting("DensityOnBase"), view, settings, state);
+  changed |= DrawRow(*FindSetting("EdgeDensityAttenuation"), view, settings, state);
+  changed |= DrawRow(*FindSetting("KernelFadeIn"), view, settings, state);
   // Foveated edge scaling (2026-10-21): the five rows below are the centre, its two fall-offs and the density they reach; they only matter while it is on.
   changed |= DrawRow(*FindSetting("Foveation"), view, settings, state);
   if (settings->foveation) {

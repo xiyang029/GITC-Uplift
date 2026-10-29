@@ -35,7 +35,7 @@
 namespace uplift::color {
 namespace {
 
-constexpr uint32_t PASS_CONSTANTS = 24u;  // the encode's, the decode's, the motion copy's and the stabiliser's constant buffers: 16 dwords, the foveated grid's four, Guided's two gains and the decode's target size
+constexpr uint32_t PASS_CONSTANTS = 26u;  // the encode's, the decode's, the motion copy's and the stabiliser's constant buffers: 16 dwords, the foveated grid's four, the two band gains, the density pacing pair and the decode's target size
 // Ring slots per recording (Plan 14): one per dispatch, as each dispatch reads its own constants. The encode, the decode, the motion copy, the change
 // pass, the stabiliser's scene cut, levels and detail, the shape, the meter, one resolve per later pass, then one per pyramid level (look::MakeAtlas makes at
 // most 16).
@@ -559,6 +559,8 @@ bool VkColorPipeline::RecordDecode(VkCommandBuffer buffer, uint32_t slot, const 
       Bits(pass.foveation.y.gmax),
       Bits(pass.guided_low_gain),
       Bits(pass.guided_high_gain),
+      Bits(pass.edge_density_attenuation),
+      Bits(pass.kernel_fade_in),
   };
   Bindings bindings;
   bindings.sampled = {pass.source, Own(pass.nr_output), pass.exposure, pass.mask, VkSampledView{}};

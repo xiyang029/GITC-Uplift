@@ -427,6 +427,7 @@ bool NrPipeline::EnsureLook(const LookPlan& plan) {
 uint32_t NrPipeline::ShaderOptions() const {
   return static_cast<uint32_t>(config_.fixes.primaries)  // the shaders resolve AUTO per encoding
          | (config_.fixes.near_black_guard ? color::shader_options::NEAR_BLACK_GUARD : 0u)
+         | (config_.fixes.density_on_base ? color::shader_options::DENSITY_ON_BASE : 0u)
          | (config_.fixes.transfer == color::NeuralTransfer::CONSISTENT ? color::shader_options::CONSISTENT : 0u);
 }
 
@@ -945,6 +946,8 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
        .upsampling = after.upsampling, .options = options, .chroma_clamp = config_.fixes.chroma_clamp,
        .guided_low_gain = config_.fixes.guided_low_gain,
        .guided_high_gain = config_.fixes.guided_high_gain,
+       .edge_density_attenuation = config_.fixes.edge_density_attenuation,
+       .kernel_fade_in = config_.fixes.kernel_fade_in,
        .mask = BoundMask(slot), .mask_view_format = mask_.view_format,
        .foveation = work.foveation});
   Transition(list, target.resource, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1064,6 +1067,8 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
        .upsampling = after.upsampling, .options = options, .chroma_clamp = config_.fixes.chroma_clamp,
        .guided_low_gain = config_.fixes.guided_low_gain,
        .guided_high_gain = config_.fixes.guided_high_gain,
+       .edge_density_attenuation = config_.fixes.edge_density_attenuation,
+       .kernel_fade_in = config_.fixes.kernel_fade_in,
        .mask = BoundMask(slot), .mask_view_format = mask_.view_format,
        .foveation = work.foveation});
   UavBarrier(list, target.resource);
@@ -1226,6 +1231,8 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
           .chroma_clamp = config_.fixes.chroma_clamp,
        .guided_low_gain = config_.fixes.guided_low_gain,
        .guided_high_gain = config_.fixes.guided_high_gain,
+       .edge_density_attenuation = config_.fixes.edge_density_attenuation,
+       .kernel_fade_in = config_.fixes.kernel_fade_in,
           .mask = BoundMask(slot),
           .mask_view_format = mask_.view_format,
           .foveation = work.foveation,

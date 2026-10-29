@@ -19,10 +19,13 @@ enum class Encoding : uint32_t {
 };
 
 // v2 design §3.8: how NR's change returns to the output size below Full; the Upsampling setting's index.
+//
+// GUIDED (2) was folded into EDGE_AWARE on 2026-10-29: the two shared one kernel and differed only in the gains they
+// passed, so the mode went and its two band gains stayed, now on every non-Classic upsample. A saved configuration
+// still holding Upsampling=2 is out of the Choice's range now, so ui::LoadSettings drops it to the default.
 enum class Upsampling : uint32_t {
   CLASSIC = 0u,     // a bilinear sample
-  EDGE_AWARE = 1u,  // a joint bilateral upsample guided by the original
-  GUIDED = 2u,      // guided reconstruction: a bilinear base and an edge-aware detail band, each with its own gain
+  EDGE_AWARE = 1u,  // a joint bilateral upsample, its base and detail bands each with their own gain
 };
 
 // Plan 5 (v2 design §3.14, F7): the SourcePrimaries index, which is also the shaders' primaries bits (color_common.hlsli's

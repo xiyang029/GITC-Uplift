@@ -294,9 +294,21 @@ struct Settings {
   bool resolution_asymmetric = false;
   float resolution_scale_y = 100.f;  // Custom: % of the output's height while resolution_asymmetric, 25-100
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
-  // Guided's two band gains (Upsampling = Guided below Full): the base band's and the detail band's, 1 = unchanged.
-  float guided_base_gain = 0.85f;   // after Superior Scaling's uncalibrated low-band default
-  float guided_detail_gain = 0.95f; // after Superior Scaling's uncalibrated high-band default
+  // Edge-aware's two band gains (Upsampling = Edge-aware below Full): the base band's and the detail band's, 1 = unchanged.
+  // Was Guided's until 2026-10-29, when the two modes merged; the keys keep their names so saved files still load.
+  // The defaults are 1, which is what Edge-aware passed before the merge: anyone who had Guided saved keeps the
+  // 0.85 / 0.95 the file holds, and anyone on Edge-aware sees no change at all.
+  float guided_base_gain = 1.0f;    // 0.85 was Superior Scaling's uncalibrated low-band default, now opt-in
+  float guided_detail_gain = 1.0f;  // 0.95 was Superior Scaling's uncalibrated high-band default, now opt-in
+  // 2026-10-29: put the working grid's density correction on the base band instead of the detail band. Off keeps
+  // the original shaping (a coarse grid thins the detail); on keeps the detail and thins the broad edit instead.
+  bool density_on_base = false;
+  // 2026-10-29: the two pacing constants the upsampler used to hard-code. edge_density_attenuation is the band
+  // ceiling per unit of extra work-grid density (1 = never attenuate); kernel_fade_in is 1 / the density excess
+  // at which the detail band's correction reaches full strength. Higher sharpens 90-85 % grids and brings their
+  // churn with it.
+  float edge_density_attenuation = 0.85f;
+  float kernel_fade_in = 4.f;
   // Foveated edge scaling (2026-10-21): NR's work grid keeps the centre of the output at full density and falls off toward the edges. The centre's width is a
   // share of the output's width, its height and both fall-offs shares of the output's height (whole per cent, the UI's sliders); `edge` is the density the
   // fall-off reaches (whole per cent, 25-100, where 100 is off). The two fall-offs are separate: the vertical one is the one a screen's aspect cuts short.

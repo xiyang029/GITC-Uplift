@@ -54,7 +54,7 @@ The status card tells you whether Uplift is working and what to do if something 
 
 **NR stage** and **Resolution** are independent. After DLSS reads the game's upscaled output. **Full** runs NR at that output resolution; **Quality**, **Balanced** and **Performance** process a smaller copy and apply the result across the complete output image.
 
-Below **Full**, **Upsampling** chooses how NR's changes return to the output size: **Edge-aware** (the default) keeps each change on the side of the edge where NR made it, **Guided** splits the change into a base and a detail band whose gains are yours to tune (**Guided base gain**, **Guided detail gain**) — steadying NR's sharpening at a reduced resolution and treating the foveated grid's compressed edges more gently — and **Classic** is bilinear and slightly cheaper.
+Below **Full**, **Upsampling** chooses how NR's changes return to the output size: **Edge-aware** (the default) keeps each change on the side of the edge where NR made it and splits it into a base and a detail band whose gains are yours to tune (**Edge-aware base gain**, **Edge-aware detail gain**) — steadying NR's sharpening at a reduced resolution and treating the foveated grid's compressed edges more gently — and **Classic** is bilinear and slightly cheaper.
 
 An option that can't work in your game right now is greyed out: hover over it to see why. Your choice is remembered and comes back by
 itself when it can.
