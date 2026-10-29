@@ -48,6 +48,8 @@ void FillPreference(ui::SetupFacts* facts, const ui::Settings& settings, bool ex
   facts->motion_auto = (settings.motion_vectors == ui::MotionVectorSource::AUTO);
   facts->preferred_resolution = settings.resolution_mode;
   facts->custom_scale = settings.resolution_scale;
+  facts->resolution_asymmetric = settings.resolution_asymmetric;
+  facts->custom_scale_y = settings.resolution_scale_y;
   facts->pass_count = settings.pass_count;
   for (size_t index = 0u; index < settings.passes.size(); ++index) {
     facts->stored_stages[index] = settings.passes[index].stage;

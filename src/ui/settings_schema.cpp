@@ -537,12 +537,37 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::FLOAT,
         .section = SettingSection::PLACEMENT,
         .label = "Custom scale (%)",
-        .tooltip = "The work size for Resolution = Custom, in percent of the output. Applies when the slider is released.",
+        .tooltip = "The work size for Resolution = Custom, in percent of the output's width. Applies when the slider is released.",
         .min = 25.0,
         .max = 100.0,
         .flags = SLIDER_RANGE_ONLY,  // a share of the output: 100 % at most
         .get = [](const Settings& s) { return static_cast<double>(s.resolution_scale); },
         .set = [](Settings& s, double v) { s.resolution_scale = static_cast<float>(v); },
+    },
+    {
+        // Anamorphic (2026-10-29): Custom's two axes apart. The same pixel budget buys a smaller width and a
+        // near-native height, which is what a scene's vertical detail (edges, text) notices most.
+        .key = "ResolutionAsymmetric",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::PLACEMENT,
+        .label = "Separate scales per axis",
+        .tooltip = "Resolution = Custom scales width and height on their own axes. A smaller width with a height near 100 % costs "
+                   "as much as one uniform scale between them, but keeps vertical detail -- edges and text -- closer to native.",
+        .get = [](const Settings& s) { return Flag(s.resolution_asymmetric); },
+        .set = [](Settings& s, double v) { s.resolution_asymmetric = (v != 0.0); },
+    },
+    {
+        .key = "ResolutionScaleY",
+        .kind = SettingKind::FLOAT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Custom scale Y (%)",
+        .tooltip = "The height's share of the output for Resolution = Custom while the scales are separate. At 100 the height stays native. "
+                   "Applies when the slider is released.",
+        .min = 25.0,
+        .max = 100.0,
+        .flags = SLIDER_RANGE_ONLY,
+        .get = [](const Settings& s) { return static_cast<double>(s.resolution_scale_y); },
+        .set = [](Settings& s, double v) { s.resolution_scale_y = static_cast<float>(v); },
     },
     {
         .key = "Upsampling",

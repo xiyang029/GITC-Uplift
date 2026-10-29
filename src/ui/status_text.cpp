@@ -305,7 +305,10 @@ LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown) {
     case ResolutionMode::BALANCED:    mode = "Balanced"; break;
     case ResolutionMode::PERFORMANCE: mode = "Performance"; break;
     case ResolutionMode::MATCH_GAME:  mode = "Match game"; break;
-    case ResolutionMode::CUSTOM:      mode = std::format("Custom {:.0f} %", facts.custom_scale); break;
+    case ResolutionMode::CUSTOM:
+      mode = (facts.resolution_asymmetric ? std::format("Custom {:.0f} x {:.0f} %", facts.custom_scale, facts.custom_scale_y)
+                                          : std::format("Custom {:.0f} %", facts.custom_scale));
+      break;
   }
   const std::string_view upsampling = (facts.upsampling == color::Upsampling::CLASSIC      ? "Classic"
                                        : facts.upsampling == color::Upsampling::EDGE_AWARE ? "Edge-aware"

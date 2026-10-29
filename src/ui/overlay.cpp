@@ -219,7 +219,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         float value = static_cast<float>(descriptor.get(*settings));
         const float high = static_cast<float>(SliderMax(descriptor)) * shown_scale;  // Ctrl+click may type past it (DescriptorMax)
         const bool resolution_scale = (descriptor.key == "ResolutionScale" || descriptor.key == "ResolutionScaleAfterDlss"
-                                       || descriptor.key == "ResolutionScalePresent");
+                                       || descriptor.key == "ResolutionScalePresent" || descriptor.key == "ResolutionScaleY");
         const char* const format = (descriptor.key == "GraceSeconds" ? "%.1f"
                                     : resolution_scale                      ? "%.0f %%"
                                     : descriptor.key == "AutoExposureBlend" ? "%.0f %%"
@@ -792,6 +792,12 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   widgets::SubCaption("Resolution");
   changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state);
   changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state);
+  // Anamorphic (2026-10-29): Custom's two axes apart. The switch draws under Custom only, and the height's own
+  // slider under the switch, so the default Setup page reads exactly as it did before.
+  if (settings->resolution_mode == ResolutionMode::CUSTOM) {
+    changed |= DrawRow(*FindSetting("ResolutionAsymmetric"), view, settings, state);
+    if (settings->resolution_asymmetric) changed |= DrawRow(*FindSetting("ResolutionScaleY"), view, settings, state);
+  }
   changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state);
   // Guided's two band gains, right below the choice they depend on (DrawRow hides them unless Guided runs below Full).
   changed |= DrawRow(*FindSetting("GuidedBaseGain"), view, settings, state);

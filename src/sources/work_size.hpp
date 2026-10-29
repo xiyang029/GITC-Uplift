@@ -18,7 +18,13 @@ inline constexpr double PERFORMANCE_SCALE = 0.5;
 // - below the NR floor, both sides are scaled up by one factor until it is met, rounded up to even;
 // - the result is capped at `output`.
 // A target that reaches `output` in both sides returns `output` itself (Full), odd sides included.
-[[nodiscard]] nr::Size WorkSize(double target_width, double target_height, nr::Size output);
+//
+// Anamorphic (2026-10-29): the two scales act on their own axes, so a Custom setting can trade one side for
+// the other at the same pixel count (0.65 x 0.85 costs what a uniform 0.74 does, with Y near native). The
+// axes are independent everywhere downstream already -- foveation packs a grid per axis and NR's motion
+// scale is a pair -- so this is the only place the two were tied together. Equal scales are the uniform
+// case: the rounding is per axis either way, and the floor's single factor still scales both by one amount.
+[[nodiscard]] nr::Size WorkSize(double target_width, double target_height, double scale_x, double scale_y, nr::Size output);
 // v2 design §3.9: the floor-sized canvas an image below the floor is padded into, landscape or
 // portrait; `image` itself when it meets the floor.
 [[nodiscard]] nr::Size CanvasSize(nr::Size image);

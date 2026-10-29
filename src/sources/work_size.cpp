@@ -13,9 +13,9 @@ constexpr uint64_t SETTLE_PERCENT = 2u;  // a side must differ by more than this
 
 }  // namespace
 
-nr::Size WorkSize(double target_width, double target_height, nr::Size output) {
+nr::Size WorkSize(double target_width, double target_height, double scale_x, double scale_y, nr::Size output) {
   const auto round_even = [](double side) { return static_cast<uint32_t>(std::max(2.0 * std::round(side / 2.0), 2.0)); };
-  nr::Size work = {round_even(target_width), round_even(target_height)};
+  nr::Size work = {round_even(target_width * scale_x), round_even(target_height * scale_y)};
   if (work.width >= output.width && work.height >= output.height) return output;
   if (!nr::MeetsNrFloor(work)) {
     // f = max(MIN_NR_SHORT_SIDE / shorter, MIN_NR_LONG_SIDE / longer) as the exact fraction numerator / denominator, chosen by

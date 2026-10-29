@@ -277,11 +277,18 @@ void LogSleepStatusThrottled() {
     last_sleep.store(sample.sleep.bUseGameSleep, std::memory_order_relaxed);
     last_fg.store(sample.sleep.fgMultiplier, std::memory_order_relaxed);
     last_interval.store(interval_now, std::memory_order_relaxed);
-    nr::Logf(nr::LogLevel::INFO,
-             "reflex: driver status: mode {} interval {} us, game sleep {}, FG x{}",
-             static_cast<uint32_t>(sample.sleep.bLowLatencyMode), interval_now,
-             static_cast<uint32_t>(sample.sleep.bUseGameSleep),
-             static_cast<uint32_t>(sample.sleep.fgMultiplier));
+    // 2026-10-29: "FG x1" is the driver's own way of saying there is no frame generation; printing it
+    // made every line look like FG was on, so the multiplier only shows when there is one.
+    const unsigned fg = static_cast<unsigned>(sample.sleep.fgMultiplier);
+    if (fg > 1u) {
+      nr::Logf(nr::LogLevel::INFO, "reflex: driver status: mode {} interval {} us, game sleep {}, FG x{}",
+               static_cast<uint32_t>(sample.sleep.bLowLatencyMode), interval_now,
+               static_cast<uint32_t>(sample.sleep.bUseGameSleep), fg);
+    } else {
+      nr::Logf(nr::LogLevel::INFO, "reflex: driver status: mode {} interval {} us, game sleep {}",
+               static_cast<uint32_t>(sample.sleep.bLowLatencyMode), interval_now,
+               static_cast<uint32_t>(sample.sleep.bUseGameSleep));
+    }
   }
   // The cap only bites when something calls the Reflex sleep each frame; say so instead of letting a
   // silently ineffective cap look like a broken feature. One sample is not a verdict, though: The

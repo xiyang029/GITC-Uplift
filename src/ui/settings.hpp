@@ -287,7 +287,12 @@ struct Settings {
   ForeignNrMode foreign_nr = ForeignNrMode::YIELD;
   VulkanNrMode vulkan_nr = VulkanNrMode::NATIVE;  // Plan 19
   ResolutionMode resolution_mode = ResolutionMode::FULL;  // user ruling: Full by default
-  float resolution_scale = 100.f;                         // Custom: % of the output, 25-100
+  float resolution_scale = 100.f;                         // Custom: % of the output's width, 25-100
+  // Anamorphic (2026-10-29): Custom may scale the two axes apart, so a smaller width buys pixels the height
+  // keeps (0.65 x 0.85 costs what a uniform 0.74 does, with the vertical axis near native). Off by default:
+  // the height follows the width, which is every build before this one.
+  bool resolution_asymmetric = false;
+  float resolution_scale_y = 100.f;  // Custom: % of the output's height while resolution_asymmetric, 25-100
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
   // Guided's two band gains (Upsampling = Guided below Full): the base band's and the detail band's, 1 = unchanged.
   float guided_base_gain = 0.85f;   // after Superior Scaling's uncalibrated low-band default

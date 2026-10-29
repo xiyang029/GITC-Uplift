@@ -80,6 +80,8 @@ struct SetupFacts {
   bool motion_auto = true;                              // MotionVectors = Auto: DLSS, else Launchpad, else Lumenite, else Off
   ResolutionMode preferred_resolution = ResolutionMode::FULL;
   float custom_scale = 100.f;
+  bool resolution_asymmetric = false;  // Custom's two scales are separate: the label shows both
+  float custom_scale_y = 100.f;
   // What is possible now (§1.2).
   std::string_view dlss_unavailable;  // fixed: the bridges, OpenGL, the helper, hooks, ReShade, the latch, Vulkan's native problems
   // Plan 18 (design §3): a DLSS stage that cannot run here although DLSS runs (the Direct3D 11 bridge cannot share its image): a fixed cause for that stage

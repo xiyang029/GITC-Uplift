@@ -763,23 +763,34 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
   const bool pass1 = (chain_.group_count == 0u || chain_.groups[0].stage == stage);
   ui::ResolutionMode mode = config_.resolution;
   float custom_scale = config_.resolution_scale;
+  // Anamorphic (2026-10-29): the height's own Custom scale, and whether it acts on its own axis at all. One
+  // switch for the whole chain: a later group reads pass 1's, so two groups never disagree about the shape.
+  bool asymmetric = config_.resolution_asymmetric;
+  float custom_scale_y = config_.resolution_scale_y;
   bool slider_held = config_.resolution_slider_held;
   if (!pass1) {
     const FrameConfig::StageResolution& own = config_.stage_resolution[(stage == Stage::AFTER_DLSS ? 0u : 1u)];
     mode = own.mode;
     custom_scale = own.scale;
+    custom_scale_y = own.scale_y;
     slider_held = own.slider_held;
   }
   const bool before_upscaling = (stage == Stage::BEFORE_UPSCALING);
   double target_width = output.width;
   double target_height = output.height;
   double scale = 1.0;
+  double scale_y = 1.0;
   switch (mode) {
     case ui::ResolutionMode::FULL:        break;
     case ui::ResolutionMode::QUALITY:     scale = sources::QUALITY_SCALE; break;
     case ui::ResolutionMode::BALANCED:    scale = sources::BALANCED_SCALE; break;
     case ui::ResolutionMode::PERFORMANCE: scale = sources::PERFORMANCE_SCALE; break;
-    case ui::ResolutionMode::CUSTOM:      scale = custom_scale / 100.0; break;
+    case ui::ResolutionMode::CUSTOM:
+      scale = custom_scale / 100.0;
+      // Every preset above is one uniform factor; only Custom may split the axes, and only while the switch
+      // is on (both at one value is the uniform case, which WorkSize treats identically).
+      if (asymmetric) scale_y = custom_scale_y / 100.0;
+      break;
     case ui::ResolutionMode::MATCH_GAME:
       // v2 design §3.8 (D3): DLSS's create-time render size, stable under dynamic resolution. Before
       // upscaling, NR already works at the render size; until DLSS is seen, Full. Plan 18 Task 12 (fix round 1, M-1): Full while the game's DLSS is off
@@ -791,7 +802,10 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
       break;
   }
   StageState& state = stages_[static_cast<size_t>(stage)];
-  const nr::Size uniform = state.settle.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, slider_held);
+  // Anamorphic (2026-10-29): the height's scale, which is the width's unless Custom split the axes above.
+  if (!asymmetric) scale_y = scale;
+  const nr::Size uniform =
+      state.settle.Update(sources::WorkSize(target_width, target_height, scale, scale_y, output), now, slider_held);
   // Foveated edge scaling (2026-10-21): the output keeps its detail in the centre and NR works a grid that shrinks toward the edges. Every NR stage warps, Before
   // upscaling included: the player's numbers are in output pixels and MapToWork carries them onto `uniform`, the grid the warp is actually applied to, so the
   // centre keeps its share of the screen when the Resolution mode shrinks it. MakePlan hands back the identity grid when the centre already covers that grid or

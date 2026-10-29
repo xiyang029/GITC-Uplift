@@ -632,23 +632,34 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
   const bool pass1 = (chain_.group_count == 0u || chain_.groups[0].stage == stage);
   ui::ResolutionMode mode = config_.resolution;
   float custom_scale = config_.resolution_scale;
+  // Anamorphic (2026-10-29): the height's own Custom scale, and whether it acts on its own axis at all. One
+  // switch for the whole chain: a later group reads pass 1's, so two groups never disagree about the shape.
+  bool asymmetric = config_.resolution_asymmetric;
+  float custom_scale_y = config_.resolution_scale_y;
   bool slider_held = config_.resolution_slider_held;
   if (!pass1) {
     const FrameConfig::StageResolution& own = config_.stage_resolution[(stage == Stage::AFTER_DLSS ? 0u : 1u)];
     mode = own.mode;
     custom_scale = own.scale;
+    custom_scale_y = own.scale_y;
     slider_held = own.slider_held;
   }
   const bool before_upscaling = (stage == Stage::BEFORE_UPSCALING);
   double target_width = output.width;
   double target_height = output.height;
   double scale = 1.0;
+  double scale_y = 1.0;
   switch (mode) {
     case ui::ResolutionMode::FULL:        break;
     case ui::ResolutionMode::QUALITY:     scale = sources::QUALITY_SCALE; break;
     case ui::ResolutionMode::BALANCED:    scale = sources::BALANCED_SCALE; break;
     case ui::ResolutionMode::PERFORMANCE: scale = sources::PERFORMANCE_SCALE; break;
-    case ui::ResolutionMode::CUSTOM:      scale = custom_scale / 100.0; break;
+    case ui::ResolutionMode::CUSTOM:
+      scale = custom_scale / 100.0;
+      // Every preset above is one uniform factor; only Custom may split the axes, and only while the switch
+      // is on (both at one value is the uniform case, which WorkSize treats identically).
+      if (asymmetric) scale_y = custom_scale_y / 100.0;
+      break;
     case ui::ResolutionMode::MATCH_GAME:
       if (main_snapshot_ && !main_snapshot_->render.Empty() && !before_upscaling && !dlss_off_.Off()) {  // Plan 18 Task 12 (fix round 1, M-1): Full while off
         target_width = main_snapshot_->render.width;
@@ -657,7 +668,10 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
       break;
   }
   StageState& state = stages_[static_cast<size_t>(stage)];
-  const nr::Size uniform = state.settle.Update(sources::WorkSize(target_width * scale, target_height * scale, output), now, slider_held);
+  // Anamorphic (2026-10-29): the height's scale, which is the width's unless Custom split the axes above.
+  if (!asymmetric) scale_y = scale;
+  const nr::Size uniform =
+      state.settle.Update(sources::WorkSize(target_width, target_height, scale, scale_y, output), now, slider_held);
   // Foveated edge scaling (2026-10-21), as DeviceContext::SettleLayout: at every NR stage, the player's output pixels carried onto the settled grid
   // (MapToWork), and the identity grid whenever that grid cannot pay for the warp.
   const nr::foveation::Params foveation_params = nr::foveation::MapToWork(

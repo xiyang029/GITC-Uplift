@@ -71,7 +71,11 @@ struct FrameConfig {
   uint32_t ngx_frame_generation = 0u;                        // live NGX FrameGeneration features (Task 11's registry)
   bool nr_allowed = true;                                    // NrClaim lets this device load NR (Task 11)
   ui::ResolutionMode resolution = ui::ResolutionMode::FULL;  // v2 design §3.8
-  float resolution_scale = 100.f;                            // Resolution = Custom: % of the output
+  float resolution_scale = 100.f;                            // Resolution = Custom: % of the output's width
+  // Anamorphic (2026-10-29): while set, Custom's width scale above and this height scale act on their own axes.
+  // At 100 the height follows the width, which is every build before this one.
+  bool resolution_asymmetric = false;
+  float resolution_scale_y = 100.f;                          // Resolution = Custom: % of the output's height
   bool resolution_slider_held = false;                       // the Custom slider is being dragged: the work size waits
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
   // Foveated edge scaling (2026-10-21): NR works a grid that keeps the output's centre at full density and falls off toward the edges, so the edges cost fewer
@@ -112,7 +116,8 @@ struct FrameConfig {
   // uses `resolution` and Keep faces itself.
   struct StageResolution {
     ui::ResolutionMode mode = ui::ResolutionMode::FULL;
-    float scale = 100.f;  // Custom: % of the output
+    float scale = 100.f;      // Custom: % of the output's width
+    float scale_y = 100.f;    // Custom: % of the output's height, used while the chain's switch is on
     bool slider_held = false;  // its Custom slider is being dragged: the work size waits for the release
   };
   std::array<StageResolution, 2> stage_resolution = {};
