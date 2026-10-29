@@ -74,7 +74,6 @@ struct VkDecodePass {
   float guided_low_gain = 1.f;           // Edge-aware: the base band's gain
   float guided_high_gain = 1.f;          // Edge-aware: the detail band's gain
   float edge_density_attenuation = 0.85f;  // the band ceiling per unit of extra work-grid density
-  float kernel_fade_in = 4.f;              // 1 / the density excess at which the correction is full
   VkSampledView mask;                    // Plan 14 (§3.13): the mask copy, SHADER_READ_ONLY_OPTIMAL; null = none
   nr::foveation::Grid foveation;
 };

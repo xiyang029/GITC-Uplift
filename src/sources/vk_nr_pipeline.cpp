@@ -1036,7 +1036,6 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
                             .guided_low_gain = config_.fixes.guided_low_gain,
                             .guided_high_gain = config_.fixes.guided_high_gain,
        .edge_density_attenuation = config_.fixes.edge_density_attenuation,
-       .kernel_fade_in = config_.fixes.kernel_fade_in,
                             .mask = BoundMask(slot), .foveation = work.foveation})) {
     WarnOnce(&decode_warned_, "Vulkan: the decode could not be recorded; NR's result does not reach the target");
     return {.recorded = true, .reason = "decode failed", .motion_source = motion_source, .motion_scale_x = frame_inputs.motion_scale_x, .motion_scale_y = frame_inputs.motion_scale_y};
@@ -1283,7 +1282,6 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
                             .guided_low_gain = config_.fixes.guided_low_gain,
                             .guided_high_gain = config_.fixes.guided_high_gain,
        .edge_density_attenuation = config_.fixes.edge_density_attenuation,
-       .kernel_fade_in = config_.fixes.kernel_fade_in,
                             .mask = BoundMask(slot), .foveation = work.foveation})) {
     WarnOnce(&decode_warned_, "Vulkan: the decode could not be recorded; NR's result does not reach the target");
     return {.recorded = true, .reason = "decode failed", .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};

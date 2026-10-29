@@ -76,8 +76,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && !below_full);
   // The two band gains matter only while Edge-aware itself does (below Full); Classic has no bands.
   const bool guided_gains_hidden = ((descriptor.key == "GuidedBaseGain" || descriptor.key == "GuidedDetailGain"
-                                     || descriptor.key == "DensityOnBase" || descriptor.key == "EdgeDensityAttenuation"
-                                     || descriptor.key == "KernelFadeIn")
+                                     || descriptor.key == "DensityOnBase" || descriptor.key == "EdgeDensityAttenuation")
                                     && (!below_full || settings->upsampling != color::Upsampling::EDGE_AWARE));
   // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
   const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
@@ -806,7 +805,6 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   changed |= DrawRow(*FindSetting("GuidedDetailGain"), view, settings, state);
   changed |= DrawRow(*FindSetting("DensityOnBase"), view, settings, state);
   changed |= DrawRow(*FindSetting("EdgeDensityAttenuation"), view, settings, state);
-  changed |= DrawRow(*FindSetting("KernelFadeIn"), view, settings, state);
   // Foveated edge scaling (2026-10-21): the five rows below are the centre, its two fall-offs and the density they reach; they only matter while it is on.
   changed |= DrawRow(*FindSetting("Foveation"), view, settings, state);
   if (settings->foveation) {

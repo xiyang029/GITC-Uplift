@@ -64,7 +64,6 @@ struct DecodePass {
   float guided_low_gain = 1.f;                        // Edge-aware: the base band's gain
   float guided_high_gain = 1.f;                       // Edge-aware: the detail band's gain
   float edge_density_attenuation = 0.85f;             // the band ceiling per unit of extra work-grid density
-  float kernel_fade_in = 4.f;                         // 1 / the density excess at which the correction is full
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
   nr::foveation::Grid foveation;
@@ -97,7 +96,6 @@ struct ComputeDecodePass {
   float guided_low_gain = 1.f;                        // Edge-aware: the base band's gain
   float guided_high_gain = 1.f;                       // Edge-aware: the detail band's gain
   float edge_density_attenuation = 0.85f;             // the band ceiling per unit of extra work-grid density
-  float kernel_fade_in = 4.f;                         // 1 / the density excess at which the correction is full
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
   nr::foveation::Grid foveation;

@@ -218,7 +218,6 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Dark pedestal removal", "暗部基底移除"},
     {"Darkening", "压暗"},
     {"Debug", "调试"},
-
     {"Depth direction (no effect in NR 310.8)", "深度方向（NR 310.8 中无效）"},
     {"DestroyParameters failed with {:#010x}", "DestroyParameters 调用失败：{:#010x}"},
     {"Detail radius (% of height)", "细节半径（画面高度百分比）"},
@@ -352,7 +351,6 @@ constexpr auto CHINESE = std::to_array<Translation>({
      "leaves the edges sharper; shorter saves more. A fall-off longer than the distance to the edge simply reaches the edge later. Only after upscaling.",
      "密度沿屏幕宽度方向从中心降到边缘值所经过的距离，按占屏幕高度的比例计。越长过渡越平缓、边缘越清晰；越短越省。过渡带长于到边缘的距离时，只是更晚到达边缘。仅在超分之后生效。"},
     {"How far the fill reaches from marked skin. Raise it if broad patches of skin are still uncovered; lower it if the fill spreads onto nearby surfaces.", "控制填充从已标记皮肤向外扩展的距离。大片皮肤仍未覆盖时请调高；填充扩散到邻近表面时请调低。"},
-    {"How fast the edge-aware kernel's correction reaches full strength as the working grid gets coarser. Higher sharpens 90-85 % grids, which otherwise get little of it, and brings NR's per-frame churn along with it: raise it until you see flicker, then back off.", "随着工作网格变粗，边缘感知核的修正多快达到满强度。调高可让 90–85 % 的档位更锐利（否则它们几乎得不到修正），但同时会带出 NR 的逐帧抖动：调到出现闪烁为止，再往回退一点。"},
     {"How long NR keeps its memory after being switched off, so a quick toggle does not reload it.", "关闭 NR 后保留其显存的时长，避免短暂切换开关时重新加载。"},
     {"How much NR's change on a pixel, against the pixel's own brightness, still counts as noise. Raise it if the face mask speckles the background or bright glints; lower it if faces are only faintly tinted.", "像素亮度相对变化仍视为噪声的阈值。若背景或高亮反光处出现零散蒙版，请调高；若面部着色太淡，请调低。"},
     {"How much Uplift writes to ReShade.log.", "设置 Uplift 写入 ReShade.log 的信息量。"},
@@ -404,7 +402,6 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Keep faces: its extra NR run stopped", "保留面部：额外 NR 运行已停止"},
     {"Keep my settings", "保留当前设置"},
     {"Keeps NR's lighting and shading on characters, but stops NR reshaping their faces. NR runs one more time per frame for this (a little more GPU time and video memory), whatever the pass count. With passes at several stages it protects pass 1's stage; a later stage has its own Keep faces here.", "保留 NR 对角色光照和阴影的处理，同时避免 NR 改变角色面部形状。为此每帧会额外运行一次 NR（增加少量 GPU 开销和显存占用），与层数无关。如果不同层运行在多个阶段，此项保护第 1 层所在阶段；后续阶段可单独设置“保护面部”。"},
-    {"Kernel fade-in", "内核淡入"},
     {"LOADING", "正在加载"},
     {"Language", "语言"},
     {"Large-scale tone", "大范围色调"},

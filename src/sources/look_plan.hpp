@@ -35,7 +35,6 @@ struct ColorFixes {
   // 2026-10-29: the working grid's density correction lands on the base band instead of the detail band.
   bool density_on_base = false;
   float edge_density_attenuation = 0.85f;  // the band ceiling per unit of extra work-grid density, 1 = none
-  float kernel_fade_in = 4.f;              // 1 / the density excess at which the detail band's correction is full
   bool near_black_guard = false;
   friend bool operator==(const ColorFixes&, const ColorFixes&) = default;
 };

@@ -623,8 +623,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.density_on_base = (v != 0.0); },
     },
     {
-        // 2026-10-29: the two pacing constants the upsampler used to hard-code, as sliders. They are the real
-        // sharpness/stability dial below Full: a gain scales the field, these decide how much of it survives a
+        // 2026-10-29: the band ceiling the upsampler used to hard-code, as a slider. It is the real
+        // sharpness/stability dial below Full: a gain scales the field, this decides how much of it survives a
         // coarse grid.
         .key = "EdgeDensityAttenuation",
         .kind = SettingKind::FLOAT,
@@ -638,20 +638,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .flags = SLIDER_RANGE_ONLY,
         .get = [](const Settings& s) { return static_cast<double>(s.edge_density_attenuation); },
         .set = [](Settings& s, double v) { s.edge_density_attenuation = static_cast<float>(v); },
-    },
-    {
-        .key = "KernelFadeIn",
-        .kind = SettingKind::FLOAT,
-        .section = SettingSection::PLACEMENT,
-        .label = "Kernel fade-in",
-        .tooltip = "How fast the edge-aware kernel's correction reaches full strength as the working grid gets coarser. Higher "
-                   "sharpens 90-85 % grids, which otherwise get little of it, and brings NR's per-frame churn along with it: "
-                   "raise it until you see flicker, then back off.",
-        .min = 1.0,
-        .max = 12.0,
-        .flags = SLIDER_RANGE_ONLY,
-        .get = [](const Settings& s) { return static_cast<double>(s.kernel_fade_in); },
-        .set = [](Settings& s, double v) { s.kernel_fade_in = static_cast<float>(v); },
     },
     {
         // Split chain (2026-10-10, design 4): a later stage group's own size, keyed by stage so moving a boundary pass keeps each stage's size.

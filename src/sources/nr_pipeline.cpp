@@ -947,7 +947,6 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
        .guided_low_gain = config_.fixes.guided_low_gain,
        .guided_high_gain = config_.fixes.guided_high_gain,
        .edge_density_attenuation = config_.fixes.edge_density_attenuation,
-       .kernel_fade_in = config_.fixes.kernel_fade_in,
        .mask = BoundMask(slot), .mask_view_format = mask_.view_format,
        .foveation = work.foveation});
   Transition(list, target.resource, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1068,7 +1067,6 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
        .guided_low_gain = config_.fixes.guided_low_gain,
        .guided_high_gain = config_.fixes.guided_high_gain,
        .edge_density_attenuation = config_.fixes.edge_density_attenuation,
-       .kernel_fade_in = config_.fixes.kernel_fade_in,
        .mask = BoundMask(slot), .mask_view_format = mask_.view_format,
        .foveation = work.foveation});
   UavBarrier(list, target.resource);
@@ -1232,7 +1230,6 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
        .guided_low_gain = config_.fixes.guided_low_gain,
        .guided_high_gain = config_.fixes.guided_high_gain,
        .edge_density_attenuation = config_.fixes.edge_density_attenuation,
-       .kernel_fade_in = config_.fixes.kernel_fade_in,
           .mask = BoundMask(slot),
           .mask_view_format = mask_.view_format,
           .foveation = work.foveation,

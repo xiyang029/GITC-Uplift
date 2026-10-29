@@ -32,7 +32,6 @@ cbuffer DecodeConstants : register(b0) {
   float guided_low_gain;   // Edge-aware: the base band's gain (1 = the field's low frequencies unchanged)
   float guided_high_gain;  // Edge-aware: the detail band's gain (1 = the field's high frequencies unchanged)
   float edge_density_attenuation;  // the band ceiling per unit of extra work-grid density (1 = no attenuation)
-  float kernel_fade_in;            // 1 / the density excess at which the kernel's correction reaches full strength
 };
 
 // Plan 13: on Vulkan's After DLSS the decode works in place: the target (DLSS's output, u0) is also where the original pixel is read.
@@ -56,8 +55,8 @@ static const float MIN_WEIGHT = 1e-4f;     // below this total the edge-aware sa
 //
 // `density` covers the uniform work scale as well as the foveated grid: a Custom resolution below Full is
 // exactly as coarse as the foveated edges are, so leaving it out left the shaping inert for the common case.
-// The two pacing constants are the caller's now (the UI's sliders): edge_density_attenuation is the ceiling per
-// unit of extra density, kernel_fade_in the rate the detail band's correction fades in over the same density.
+// The ceiling per unit of extra density is the caller's now (the UI's slider); the fade-in rate beside it is the
+// constant above, which the same density scale drives.
 static const float DARK_EDIT_FLOOR = 0.80f;           // the edit's weight in the deepest shadows
 static const float DARK_GUIDE_LOW = -7.f;             // log2 stops below diffuse white: fully dark
 static const float DARK_GUIDE_HIGH = -3.5f;           // and fully lit
@@ -65,11 +64,13 @@ static const float CLAMP_SLACK = 0.15f;               // how far past the neighb
 // -1 / (2 * sigma^2 * ln 2) for the range kernel's sigma of 0.5 stops at density 1: the exponent per stop^2.  The
 // caller divides it by the density, which widens the Gaussian as sqrt(density).
 static const float RANGE_K = -2.885390082f;
-// Kernel fade: the caller's kernel_fade_in, 1 / the density excess at which the correction reaches full strength.
-// 4 makes that density 1.25 (an 80 % work grid). See ChangeBands: at density 1 the field is 1:1 with the output
-// and the kernel is pure blur, so the correction has to fade out there or the plateau's one-load path steps
-// against the ramp's first texels. Higher reaches full strength sooner, which sharpens 90-85 % grids and brings
-// their churn with it -- tried at 10 on 2026-10-29 and reverted: ghosting and flicker got markedly worse.
+// Kernel fade: 1 / the density excess at which the correction reaches full strength; 4 puts that at density 1.25
+// (an 80 % work grid). It was a UI row for a day (2026-10-29) and is a constant again: the fade saturates by
+// 80 % whatever the rate, so the row only paced the 90-85 % steps, and the coarser steps are the ceiling's to
+// set. See ChangeBands: at density 1 the field is 1:1 with the output and the kernel is pure blur, so the
+// correction has to fade out there or the plateau's one-load path steps against the ramp's first texels. 10 was
+// tried and reverted: ghosting and flicker got markedly worse.
+static const float KERNEL_FADE_IN = 4.f;
 
 // Classic: a bilinear sample of the change field at `position` (work pixels), clamped to its texels.
 float3 ChangeBilinear(float2 position, uint2 size) {
@@ -249,7 +250,7 @@ float EditDarkness(float guide) {
 // The kernel's correction fades in over the same density (2026-10-27): edge - classic is the tent's blur, which
 // only earns its keep once the field is actually coarser than the output. At density 1 there is no resample to
 // smooth, so the correction is zero and the result is `classic * low_gain` -- exactly what DecodePixel's one-load
-// path returns -- and by density 1 / kernel_fade_in it is the full kernel.
+// path returns -- and by density 1 / KERNEL_FADE_IN it is the full kernel.
 //
 // `reach` (2026-10-29) is the third gate, and the one an anisotropic Custom scale needs: the tent stops at one
 // work texel per axis, so an axis coarser than SPATIAL_RADIUS output pixels per texel cannot span the support
@@ -273,7 +274,7 @@ float EditDarkness(float guide) {
 float3 ChangeBands(float3 classic, float3 edge, float3 tap_min, float3 tap_max, float low_gain, float high_gain,
                    float density, float guide, bool clamp_bands, float reach) {
   const float dark = EditDarkness(guide);
-  const float fade = saturate((density - 1.f) * kernel_fade_in);
+  const float fade = saturate((density - 1.f) * KERNEL_FADE_IN);
   const float ceiling = pow(edge_density_attenuation, max(density - 1.f, 0.f));
   const bool on_base = (options & OPTION_DENSITY_ON_BASE) != 0u;
   const float low = (on_base ? low_gain * ceiling : low_gain);
@@ -340,9 +341,10 @@ float4 DecodePixel(uint2 pixel) {
       // checks; both defaults are 1, so the hull is skipped, and the UI's lowest base (0.5) is what turns it on.
       //
       // OPTION_DENSITY_ON_BASE widens that split on its own: it multiplies the base band by the density ceiling
-      // (down to 0.72 at a 50 % grid) while the detail band keeps its full gain, so the effective split reaches
-      // 1 - 0.72 = 0.28 there, past CLAMP_SLACK, whenever the user leaves the gains at their defaults. The
-      // ceiling is per pixel and this flag must stay uniform, so the option asks for the hull outright.
+      // (the slider's factor per unit of excess density -- 0.85 at a 50 % grid by default, 0.5 at the slider's floor)
+      // while the detail band keeps its full gain, so the effective split is 1 - ceiling there -- 0.15 at the default,
+      // wider than CLAMP_SLACK as soon as the slider drops below it -- whenever the user leaves the gains at their
+      // defaults. The ceiling is per pixel and this flag must stay uniform, so the option asks for the hull outright.
       const bool hull = (options & OPTION_DENSITY_ON_BASE) != 0u || guided_high_gain - guided_low_gain > CLAMP_SLACK;
       // The position and the density of this output pixel's cell come out of one pass over each axis: both
       // want the axis' decoded dword and the same plateau/ramp/edge branch, and the density is that branch's
