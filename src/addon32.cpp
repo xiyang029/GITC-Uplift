@@ -562,10 +562,14 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon_module, HMODULE 
 }
 
 BOOL APIENTRY DllMain(HMODULE /*module*/, DWORD reason, LPVOID reserved) {
-  // Outside ReShade the add-on refuses to load. Inside it, ReShade calls AddonInit next. The Ex pending marker is deleted only by a
+  // No ReShade check here: get_reshade_module_handle() finds ReShade by enumerating the process modules and
+  // caches that first answer for the process. In a game whose loader hides ReShade from that enumeration
+  // (Denuvo's virtualised loaders do), the call would refuse the load with ERROR_DLL_INIT_FAILED (1114) and
+  // leave the cached handle null for the AddonInit that never ran. ReShade passes its own module to AddonInit,
+  // where register_addon refuses a load without one: outside ReShade the add-on now only sits in memory.
+  // The Ex pending marker is deleted only by a
   // 9Ex device's second present event (its first Present returned) or its destruction (design §2.9), never here: a game that
   // quits cleanly after a refused CreateDeviceEx is the case the marker exists for.
-  if (reason == DLL_PROCESS_ATTACH && reshade::internal::get_reshade_module_handle() == nullptr) return FALSE;
   // The process is ending (not a FreeLibrary): a clean exit clears the Vulkan pending marker (batch 2 review I-3). No lock, no allocation.
   if (reason == DLL_PROCESS_DETACH && reserved != nullptr) {
     vk::DeviceHook::NoteProcessExit();

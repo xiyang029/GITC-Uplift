@@ -3589,8 +3589,11 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon_module, HMODULE 
 }
 
 BOOL APIENTRY DllMain(HMODULE /*module*/, DWORD reason, LPVOID reserved) {
-  // Outside ReShade the add-on refuses to load. Inside it, ReShade calls AddonInit next.
-  if (reason == DLL_PROCESS_ATTACH && reshade::internal::get_reshade_module_handle() == nullptr) return FALSE;
+  // No ReShade check here: get_reshade_module_handle() finds ReShade by enumerating the process modules and
+  // caches that first answer for the process. In a game whose loader hides ReShade from that enumeration
+  // (Denuvo's virtualised loaders do), the call would refuse the load with ERROR_DLL_INIT_FAILED (1114) and
+  // leave the cached handle null for the AddonInit that never ran. ReShade passes its own module to AddonInit,
+  // where register_addon refuses a load without one: outside ReShade the add-on now only sits in memory.
   // The process is ending (not a FreeLibrary): a clean exit clears the Vulkan pending marker (batch 2 review I-3). No lock, no allocation.
   if (reason == DLL_PROCESS_DETACH && reserved != nullptr) {
     g_process_exiting.store(true, std::memory_order_release);  // plan 13 final review, minor 3: no core Shutdown1 waits for the add-on's lock from here on
