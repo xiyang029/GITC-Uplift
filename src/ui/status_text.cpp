@@ -453,6 +453,97 @@ std::string FormatFrameGenerationLine(bool active, uint32_t multiplier, bool fro
   return std::format("Frame generation: on ({}x{})", multiplier, (from_ngx ? ", NGX" : ""));
 }
 
+std::string FormatDlssLive(const std::string& mode_name, const std::string& preset_name, const std::string& driver_preset,
+                            uint32_t render_width, uint32_t render_height, uint32_t output_width, uint32_t output_height) {
+  // One complete line, whichever parts exist: Localize matches whole strings, so a concatenation would
+  // never be translated. The sizes come from the game's own create, so they are what DLSS is rendering
+  // into -- the one place a render-scale override becomes visible.
+  const bool sized = (render_width != 0u && render_height != 0u && output_width != 0u && output_height != 0u);
+  std::string line;
+  if (driver_preset.empty() && preset_name.empty()) {
+    if (mode_name.empty()) return {};
+    line = std::format("DLSS: {}", mode_name);
+  } else if (driver_preset.empty()) {
+    line = std::format("DLSS: {} (preset {})", mode_name, preset_name);
+  } else if (preset_name.empty()) {
+    line = std::format("DLSS: NVIDIA App preset {} wins", driver_preset);
+  } else {
+    line = std::format("DLSS: {} (preset {}) · NVIDIA App preset {} wins", mode_name, preset_name, driver_preset);
+  }
+  if (sized) line += std::format(" {}x{} -> {}x{}", render_width, render_height, output_width, output_height);
+  // The sizes are a plain suffix rather than a format field: Localize matches the sentence, and a
+  // placeholder at the very end would swallow any trailing text.
+  return line;
+}
+
+std::string FormatRrLive(const std::string& preset_name) {
+  if (preset_name.empty()) return {};
+  return std::format("Ray Reconstruction: preset {}", preset_name);
+}
+
+std::string FormatFgPresetLive(const std::string& preset_name, bool live_switch, bool pending_drain) {
+  if (preset_name.empty()) return {};
+  if (pending_drain) return std::format("Frame generation model: switching to {} (one frame off)", preset_name);
+  if (live_switch) return std::format("Frame generation model: {} (applied live)", preset_name);
+  return std::format("Frame generation model: {} (next start: no Streamline)", preset_name);
+}
+
+std::string FormatMultiplierLive(bool dynamic, uint32_t multiplier, bool panel_multiplier, uint32_t panel_choice) {
+  if (dynamic) return "Frame generation: Dynamic MFG picks the multiplier";
+  if (multiplier < 2u) return {};
+  if (panel_multiplier) return std::format("Frame generation: {}x (the panel's choice)", multiplier);
+  if (panel_choice >= 2u) return std::format("Frame generation: {}x (the game's own; {}x was refused)", multiplier, panel_choice);
+  return std::format("Frame generation: {}x (the game's own)", multiplier);
+}
+
+std::string FormatFrameRateLine(uint32_t real_milli, uint32_t output_milli, bool output_estimated, uint64_t age_ms) {
+  // A window older than two seconds is not "now" any more (a paused or minimized game): say nothing
+  // rather than a stale number.
+  if (real_milli == 0u || age_ms > 2000u) return {};
+  const double real = static_cast<double>(real_milli) / 1000.0;
+  // With frame generation off there is no second rate to report: real and output are the same number,
+  // and printing it twice reads as though generation were running.
+  if (output_milli <= real_milli) return std::format("Frame rate: {:.1f}", real);
+  const double output = static_cast<double>(output_milli) / 1000.0;
+  if (output_estimated) return std::format("Frame rate: {:.1f} real, {:.1f} estimated", real, output);
+  return std::format("Frame rate: {:.1f} real, {:.1f} generated", real, output);
+}
+
+std::string FormatDynamicMfgLive(const DynamicMfgFacts& facts) {
+  if (!facts.wanted) return {};
+  // The target is what the panel asked Dynamic MFG to hold, not what the game happens to run at: the
+  // multiplier follows the target, so a line about the moment-to-moment rate would describe the scene
+  // rather than the choice.
+  const bool counted = (facts.multiplier >= 2u);
+  const bool targeted = (facts.target_fps != 0u);
+  if (facts.in_force) {
+    if (counted && targeted) return std::format("Dynamic MFG: on (target {} FPS, now {}x)", facts.target_fps, facts.multiplier);
+    if (targeted) return std::format("Dynamic MFG: on (target {} FPS)", facts.target_fps);
+    if (counted) return std::format("Dynamic MFG: on (now {}x)", facts.multiplier);
+    return "Dynamic MFG: on (target: the display's refresh rate)";
+  }
+  if (!facts.d3d12) return "Dynamic MFG: Direct3D 12 only";
+  if (facts.declined) return "Dynamic MFG: refused by the runtime (toggle to retry)";
+  if (!facts.support_known) return "Dynamic MFG: waiting for the runtime's support answer";
+  if (!facts.supported) return "Dynamic MFG: not supported by this runtime";
+  if (!facts.ready) {
+    return (counted ? std::format("Dynamic MFG: waiting for frame generation (last {}x)", facts.multiplier)
+                    : std::string("Dynamic MFG: waiting for frame generation"));
+  }
+  return "Dynamic MFG: applies at the next call";
+}
+
+std::string FormatReflexLive(bool known, uint32_t mode, uint32_t fps_cap) {
+  // A game submits SetSleepMode once at startup on most engines, so this must not expire: it says what
+  // the driver holds, not what happened this second. "None seen" is itself the answer for a game without
+  // Reflex, and that is worth showing.
+  if (!known) return "Reflex: no call seen (the game does not use it)";
+  if (mode == 0u && fps_cap == 0u) return "Reflex: off";
+  // Without a cap, "off" is already gone (the line above): only the two modes that limit latency remain.
+  if (fps_cap == 0u) return (mode == 2u ? "Reflex: on + boost" : "Reflex: on");
+  return std::format("Reflex: {}, cap {} FPS", (mode == 2u ? "on + boost" : mode == 1u ? "on" : "off"), fps_cap);
+}
+
 std::optional<std::string> FrameGenerationWarning(bool active, uint32_t passes) {
   if (!active || passes <= 1u) return std::nullopt;
   return std::format("Frame generation is on: {} NR passes can push it past its frame budget; one pass is safest", passes);

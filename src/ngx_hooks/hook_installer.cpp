@@ -787,6 +787,9 @@ size_t HookInstaller::ScanLocked() {
     const size_t separator = full_path.find_last_of(L"\\/");
     const std::wstring_view file_name =
         (separator == std::wstring_view::npos ? full_path : full_path.substr(separator + 1u));
+    // By name only: matching on exports also catches the driver's own NGX binaries (160_E658700.bin,
+    // nvngx_deepdvc.dll), whose separate bookkeeping keeps the FG feature's LiveCount above zero forever,
+    // so NotifyFgQuiescent never resets the provider's cached configuration.
     if (IsNgxCoreFileName(file_name)) {
       cores.emplace_back(module, std::wstring(file_name));
     }

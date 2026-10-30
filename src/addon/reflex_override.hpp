@@ -35,4 +35,15 @@ void RefreshFromPanel();
 // the driver holds, whether the game actually calls the Reflex sleep, and the live FG multiplier.
 void LogSleepStatusThrottled();
 
+// What the driver last accepted, for the panel's live row. known is false until a submission reached it
+// (a game that never calls SetSleepMode keeps it false, which is what the row should say). mode is the
+// accepted low-latency mode: 0 off, 1 on, 2 boost. fps_cap is the accepted minimum interval as an
+// output-FPS ceiling, 0 for none.
+struct LiveState {
+  bool known = false;
+  uint32_t mode = 0u;
+  uint32_t fps_cap = 0u;
+};
+[[nodiscard]] LiveState ReadLiveState();
+
 }  // namespace uplift::addon::reflex

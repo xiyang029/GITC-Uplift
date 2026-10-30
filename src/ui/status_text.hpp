@@ -234,6 +234,35 @@ struct StatusView {
 
 // v2 design §3.5: "Frame generation: on (2x, NGX)", "Frame generation: on (3x)", "Frame generation: off".
 [[nodiscard]] std::string FormatFrameGenerationLine(bool active, uint32_t multiplier, bool from_ngx);
+// The frame-rate row (addon/frame_rate.hpp): real frames per second, and the rate frame generation
+// presents -- the provider's counted batch, or real x the measured multiplier (then `output_estimated`).
+// Empty while the measurement is stale or missing.
+[[nodiscard]] std::string FormatFrameRateLine(uint32_t real_milli, uint32_t output_milli, bool output_estimated, uint64_t age_ms);
+
+// The DLSS / Reflex card's live block, drawn once at the bottom of the card: what the runtime actually
+// holds, as opposed to the choice that asks for it. Each returns an empty string when it has nothing to
+// say, and each is ONE format string (Localize matches whole lines, never a concatenation).
+[[nodiscard]] std::string FormatDlssLive(const std::string& mode_name, const std::string& preset_name, const std::string& driver_preset,
+                                        uint32_t render_width, uint32_t render_height, uint32_t output_width, uint32_t output_height);
+[[nodiscard]] std::string FormatRrLive(const std::string& preset_name);
+[[nodiscard]] std::string FormatFgPresetLive(const std::string& preset_name, bool live_switch, bool pending_drain);
+[[nodiscard]] std::string FormatMultiplierLive(bool dynamic, uint32_t multiplier, bool panel_multiplier, uint32_t panel_choice);
+[[nodiscard]] std::string FormatReflexLive(bool known, uint32_t mode, uint32_t fps_cap);
+
+// Dynamic MFG's own line: the panel's choice, and which gate holds it back when it is on but not in force.
+struct DynamicMfgFacts {
+  bool wanted = false;          // the panel turned it on
+  bool in_force = false;        // the runtime accepted eDynamic
+  bool ready = false;           // every gate allows it right now
+  bool support_known = false;   // the runtime has reported bIsDynamicMFGSupported
+  bool supported = false;       // ... and the answer was yes
+  bool declined = false;        // the runtime refused a submission
+  bool d3d12 = false;           // the game's API (Dynamic MFG is Direct3D 12 only)
+  uint32_t multiplier = 1u;      // the presented frames per real frame the runtime last accepted
+  uint32_t target_fps = 0u;      // the panel's dynamic target; 0 = the display's own refresh rate
+};
+[[nodiscard]] std::string FormatDynamicMfgLive(const DynamicMfgFacts& facts);
+
 // With frame generation on, every pass beyond the first can push it past its frame budget ([V7] §4.2).
 [[nodiscard]] std::optional<std::string> FrameGenerationWarning(bool active, uint32_t passes);
 

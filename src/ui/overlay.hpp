@@ -26,6 +26,24 @@ struct OverlayView {
   // working (its fixed height has spare lines then). Each is the engine's or the bridge's own text.
   std::string api_line;  // the Direct3D 11/10 bridge's or the helper front's line; empty on native Direct3D 12
   std::string frame_generation_line;     // FormatFrameGenerationLine; empty before a context exists and in 32-bit games
+  std::string frame_rate_line;           // FormatFrameRateLine: real and generated frames per second; empty until measured
+  // The DLSS / Reflex card's live block, drawn once at the bottom of the card (status_text.hpp's
+  // FormatXLive): what the runtime actually holds, as opposed to the choice that asks for it. Empty
+  // lines are left out.
+  std::string dlss_live_line;       // the mode, its preset, and a driver override that wins over it
+  std::string rr_live_line;         // Ray Reconstruction's preset, when the game runs RR
+  std::string fg_live_line;         // the frame-generation model preset, and whether it landed live
+  std::string fg_multiplier_line;   // the accepted count, or Dynamic MFG's ownership of it
+  std::string dynamic_mfg_line;     // in force, or which gate holds it back
+  std::string reflex_live_line;     // the mode and cap the driver accepted
+  // The game's DLSS sizes, for the live line's "1280x720 -> 2560x1440" (CreateSnapshot's render and
+  // output regions; zero until the game created a feature).
+  nr::Size dlss_render;
+  nr::Size dlss_output;
+  // The game's DLSS quality mode: its bare name for the live line, and its ui::DlssPresetMode index (the
+  // row whose preset the game reads; -1 before its DLSS is seen).
+  std::string dlss_mode_name;
+  int dlss_preset_mode = -1;
   bool frame_generation_active = false;  // the working card shows frame_generation_line only when this is set
   // The FG multiplier row: only choices the DLSS-G runtime's own ceiling allows are offered
   // (generated frames + 1, i.e. 3 = 2x..4x). A stored choice above it stays saved and returns

@@ -285,6 +285,7 @@ add_library(uplift_addon_core STATIC
   src/addon/dlss_ratio.cpp
   src/addon/nvapi_ids.cpp
   src/addon/fg_preset.cpp
+  src/addon/frame_rate.cpp
   src/addon/sl_fg_hooks.cpp
   src/addon/reflex_override.cpp
   src/addon/reshade_version.cpp

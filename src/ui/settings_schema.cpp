@@ -105,9 +105,10 @@ constexpr std::string_view RENDER_SCALE_TOOLTIP =
 
 constexpr std::string_view FG_PRESET_TOOLTIP =
     "The DLSS Frame Generation model preset (A/B/C; C is 310.9.16+'s lighter performance mode, older runtimes ignore it). Applied through the "
-    "game's driver-settings read, which also beats a NVIDIA App frame-generation override. The provider reads this once, at its first FG "
-    "feature, so a change needs a restart. An add-on that owns the FG preset pipeline (MFG-Unlocker and the like) serves its own choice and wins "
-    "over this one.";
+    "game's driver-settings read, which also beats a NVIDIA App frame-generation override. The provider caches the model at its first FG feature, "
+    "so a change in a Streamline game is applied live: Uplift turns frame generation off for one frame, lets the provider drop the cached model, "
+    "and turns the game's own request back on -- expect a short hitch while the new model loads. In a game without Streamline, or with an add-on "
+    "that owns the FG pipeline (MFG-Unlocker and the like), a change needs a restart.";
 
 constexpr std::string_view RR_PRESET_TOOLTIP =
     "The Ray Reconstruction render preset, applied to every quality mode: D is the transformer, E the latest transformer (a game using the DoF "

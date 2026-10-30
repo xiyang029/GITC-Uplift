@@ -943,6 +943,19 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   }
   if (dlss_reflex_open) {
     changed |= draw_rows(SettingSection::DLSS_REFLEX);
+    // What actually runs, gathered in one place at the bottom of the card: a setting row says what was
+    // asked for, and these lines say what the runtime is doing with it.
+    const std::array<const std::string*, 7> live = {&view.dlss_live_line,      &view.rr_live_line,      &view.fg_live_line,
+                                                    &view.fg_multiplier_line,  &view.dynamic_mfg_line,  &view.frame_rate_line,
+                                                    &view.reflex_live_line};
+    if (std::ranges::any_of(live, [](const std::string* line) { return !line->empty(); })) {
+      widgets::SubCaption("Currently");
+      for (const std::string* line : live) {
+        if (!line->empty()) {
+          widgets::RowNote(line->c_str());
+        }
+      }
+    }
   }
 
   widgets::SectionGap();

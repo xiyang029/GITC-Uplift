@@ -33,6 +33,7 @@
 #include "addon/dlss_settings.hpp"
 #include "addon/dlss_summary.hpp"
 #include "addon/fg_preset.hpp"
+#include "addon/frame_rate.hpp"
 #include "addon/reflex_override.hpp"
 #include "addon/sl_fg_hooks.hpp"
 #include "addon/environment.hpp"
@@ -482,17 +483,15 @@ void ApplyProcessSettings(const ui::Settings& settings) {
 }
 
 // The FG multiplier / Dynamic MFG / Reflex choices (addon/sl_fg_hooks.hpp, addon/reflex_override.hpp):
+// the panel's multiplier row as a number: 0 for Game, else 2..6 (the generated count is one less).
+uint32_t FgMultiplierChoice(ui::FgMultiplierOverride choice) {
+  const uint32_t index = static_cast<uint32_t>(choice);
+  return index >= 1u && index <= 5u ? index + 1u : 0u;
+}
+
 // each is a live switch -- the atomics take the choice and the game's next relevant call applies it.
 void PushFgRuntimeChoices(const ui::Settings& settings) {
-  uint32_t multiplier = 0u;
-  switch (settings.fg_multiplier) {
-    case ui::FgMultiplierOverride::X2: multiplier = 2u; break;
-    case ui::FgMultiplierOverride::X3: multiplier = 3u; break;
-    case ui::FgMultiplierOverride::X4: multiplier = 4u; break;
-    case ui::FgMultiplierOverride::X5: multiplier = 5u; break;
-    case ui::FgMultiplierOverride::X6: multiplier = 6u; break;
-    default: break;
-  }
+  const uint32_t multiplier = FgMultiplierChoice(settings.fg_multiplier);
   addon::slfg::SetForceMultiplier(multiplier);
   addon::slfg::SetDynamicMfg(settings.dynamic_mfg, settings.dynamic_mfg_target_fps);
   addon::slfg::SetOptionOverrides(static_cast<addon::slfg::FgOptionOverride>(static_cast<uint32_t>(settings.fg_ui_recomposition)),
@@ -518,6 +517,8 @@ void SaveAndApply(AddonState* state) {
                                       || addon::ToRrPresetOverrides(state->settings).Any());
   state->bridge.NoteDlssRenderScales(state->settings.dlss_render_scale);
   addon::SetFgPresetDesired(static_cast<uint32_t>(state->settings.fg_preset));
+  addon::SetSrRrPresetForced(addon::ToPresetOverrides(state->settings).Any(),
+                             addon::ToRrPresetOverrides(state->settings).Any());
   PushFgRuntimeChoices(state->settings);
 }
 
@@ -539,6 +540,10 @@ void PollHooks() {
   addon::reflex::EnsureReflexHook();
   // Live panel changes: re-submit the cached game submissions on the game's present thread.
   addon::slfg::RefreshFromPanel();
+  addon::slfg::FgPresetTick();  // the FG model preset's live switch (a drain, once per panel choice)
+  // The frame-rate row's fallback divisor, out of the overlay's draw path: the count the runtime last
+  // accepted, whether or not the panel is open.
+  addon::framerate::SetMultiplier(addon::slfg::ReadLiveState().multiplier);
   addon::reflex::RefreshFromPanel();
   addon::reflex::LogSleepStatusThrottled();
 }
@@ -801,7 +806,9 @@ ngx_hooks::NgxApi DlssApiOf(const DeviceEntry& entry) {
 // The Details line naming the main DLSS feature's quality mode and sizes (2026-10-25): the panel's
 // per-mode render-scale and preset rows key off exactly this mode, so the line says which row matters
 // now. The mode is the game's PerfQualityValue at its DLSS create, from the registry's snapshot.
-std::string DlssModeLine(const ngx_hooks::FeatureRecord& record) {
+// `mode_index` is that mode as a ui::DlssPresetMode index (-1 when the game named none) and `mode_name`
+// its bare name, both for the card's live line.
+std::string DlssModeLine(const ngx_hooks::FeatureRecord& record, int& mode_index, std::string& mode_name) {
   std::string_view mode;
   switch (record.snapshot.perf_quality) {
     case 0:  mode = "Performance";        break;
@@ -812,6 +819,10 @@ std::string DlssModeLine(const ngx_hooks::FeatureRecord& record) {
     case 5:  mode = "DLAA";               break;
     default: mode = "the game's own choice"; break;
   }
+  // PresetSlotOf's own mapping; 6 (no mode) becomes -1.
+  const unsigned slot = ngx_hooks::PresetSlotOf(record.snapshot.perf_quality);
+  mode_index = (slot < 6u ? static_cast<int>(slot) : -1);
+  mode_name = std::string(mode);
   std::string line = std::format("DLSS mode: {}", mode);
   const ngx_hooks::CreateSnapshot& snapshot = record.snapshot;
   if (!snapshot.render.Empty() && !snapshot.output.Empty()) {
@@ -1672,6 +1683,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     addon::slfg::NotifyDynamicD3D12(device_api == api::device_api::d3d12);  // Dynamic MFG is D3D12-only
     StampThisThread();
     const auto now = std::chrono::steady_clock::now();
+    addon::framerate::OnPresent(now);  // the frame-rate row's window: one present of the primary swapchain
     // Plan 7 (key decision a): the private device D3D12Side made for a new bridge. On the fallback it is D3D12CreateDevice's (ReShade's proxy in a game),
     // whose last release raises destroy_device, whose handler takes the add-on's lock; the device factory's raises nothing, and goes the same way.
     // Declared before the lock, it is released after it.
@@ -3116,7 +3128,10 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         const std::optional<ngx_hooks::FeatureRecord> main_record = state.bridge.Registry().Find(main_handle);
         facts.ray_reconstruction = main_record && main_record->feature == NVSDK_NGX_Feature_RayReconstruction;
         if (main_record) {
-          view.dlss_mode_line = DlssModeLine(*main_record);  // which per-mode row (preset, render scale) matters now
+          // Which per-mode row (preset, render scale) matters now, and its index for the live row.
+          view.dlss_mode_line = DlssModeLine(*main_record, view.dlss_preset_mode, view.dlss_mode_name);
+          view.dlss_render = main_record->snapshot.render;
+          view.dlss_output = main_record->snapshot.output;
         }
       }
       // Split-chain design 11 (the owner, 2026-10-15): Before upscaling runs on Ray Reconstruction on Direct3D 12 and Vulkan; the Direct3D 11 bridge keeps
@@ -3187,6 +3202,50 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         view.frame_generation_line = ui::FormatFrameGenerationLine(
             status.frame_generation.active, status.frame_generation.multiplier, status.frame_generation.from_ngx);
         view.frame_generation_active = status.frame_generation.active;
+        const addon::framerate::Snapshot rate = addon::framerate::Read();
+        view.frame_rate_line =
+            ui::FormatFrameRateLine(rate.real_milli, rate.output_milli, rate.output_estimated, rate.age_ms);
+        {
+          // The card's live block: what the runtime actually holds, gathered at the bottom of the card.
+          const addon::slfg::LiveState fg = addon::slfg::ReadLiveState();
+          static constexpr std::array<std::string_view, 4> FG_NAMES = {"", "A", "B", "C"};
+          static constexpr std::array<std::string_view, 4> SR_NAMES = {"", "J", "K", "L"};
+          static constexpr std::array<std::string_view, 4> RR_NAMES = {"", "D", "E", "F"};
+          const auto name_of = [](const auto& names, uint32_t value) {
+            return std::string(value < names.size() ? names[value] : std::string_view());
+          };
+          const bool rr = status.ray_reconstruction;
+          // The panel's choice for the mode the game runs in (RR has one choice for every mode).
+          const int mode = view.dlss_preset_mode;
+          const uint32_t sr_choice = (mode >= 0 ? static_cast<uint32_t>(state.settings.dlss_presets[static_cast<size_t>(mode)]) : 0u);
+          const uint32_t rr_choice = static_cast<uint32_t>(state.settings.rr_preset);
+          // A value the driver held that reached the provider unsuppressed is the one that wins, whatever
+          // the panel asked for: that is an NVIDIA App override, and the line must say so.
+          const addon::PresetEvidence evidence = addon::SrRrPresetEvidence(rr);
+          const std::string driver_preset =
+              (evidence.read_seen && !evidence.suppressed && evidence.driver_value != 0u ? std::to_string(evidence.driver_value) : "");
+          view.dlss_live_line = ui::FormatDlssLive(view.dlss_mode_name, (rr ? std::string() : name_of(SR_NAMES, sr_choice)),
+                                                  driver_preset, view.dlss_render.width, view.dlss_render.height,
+                                                  view.dlss_output.width, view.dlss_output.height);
+          view.rr_live_line = (rr ? ui::FormatRrLive(name_of(RR_NAMES, rr_choice)) : std::string());
+          view.fg_live_line =
+              ui::FormatFgPresetLive(name_of(FG_NAMES, static_cast<uint32_t>(state.settings.fg_preset)), fg.streamline, fg.switching);
+          view.fg_multiplier_line = ui::FormatMultiplierLive(fg.dynamic, fg.multiplier, fg.panel_multiplier,
+                                                            FgMultiplierChoice(state.settings.fg_multiplier));
+          view.dynamic_mfg_line = ui::FormatDynamicMfgLive({
+              .wanted = fg.dynamic_wanted,
+              .in_force = fg.dynamic,
+              .ready = fg.dynamic_ready,
+              .support_known = fg.dynamic_support_known,
+              .supported = fg.dynamic_supported,
+              .declined = fg.dynamic_declined,
+              .d3d12 = fg.d3d12,
+              .multiplier = fg.multiplier,
+              .target_fps = state.settings.dynamic_mfg_target_fps,
+          });
+          const addon::reflex::LiveState reflex = addon::reflex::ReadLiveState();
+          view.reflex_live_line = ui::FormatReflexLive(reflex.known, reflex.mode, reflex.fps_cap);
+        }
         if (const std::optional<std::string> warning =
                 ui::FrameGenerationWarning(status.frame_generation.active, state.settings.pass_count)) {
           view.frame_generation_warning = *warning;
@@ -3396,6 +3455,8 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     // settings gates anyway -- the preset swap's wanted flag lives in the bridge instance and a rebuild
     // that did replace the state would otherwise leave every live switch off until a settings change.
     addon::SetFgPresetDesired(static_cast<uint32_t>(g_state->settings.fg_preset));
+    addon::SetSrRrPresetForced(addon::ToPresetOverrides(g_state->settings).Any(),
+                               addon::ToRrPresetOverrides(g_state->settings).Any());
     g_state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(g_state->settings).Any()
                                           || addon::ToRrPresetOverrides(g_state->settings).Any());
     g_state->bridge.NoteDlssRenderScales(g_state->settings.dlss_render_scale);
@@ -3419,6 +3480,8 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
                                         || addon::ToRrPresetOverrides(g_state->settings).Any());
   g_state->bridge.NoteDlssRenderScales(g_state->settings.dlss_render_scale);
   addon::SetFgPresetDesired(static_cast<uint32_t>(g_state->settings.fg_preset));
+  addon::SetSrRrPresetForced(addon::ToPresetOverrides(g_state->settings).Any(),
+                             addon::ToRrPresetOverrides(g_state->settings).Any());
   PushFgRuntimeChoices(g_state->settings);
   addon::EnsureFgPresetHook();  // the watchdog waits for nvapi64.dll, before any NvAPI caller
   addon::slfg::EnsureSlFgHooks();  // and for sl.interposer.dll, before the game asks for the FG functions

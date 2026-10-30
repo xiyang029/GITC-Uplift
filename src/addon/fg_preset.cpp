@@ -28,6 +28,14 @@ constexpr uint32_t SETTING_VERSION = NVDRS_SETTING_VER;
 // (https://docs.nvidia.com/nvapi/group__drsapi.html), not the per-feature setting ids, which each
 // feature's own integration introduces. The id was read out of the runtime, not guessed.
 constexpr uint32_t FG_PRESET_ID = 0x10E41DF1u;
+// DLSS Super Resolution's and Ray Reconstruction's own preset settings, read once per provider at its
+// initialization (NGXDLAA / NGXDLSSD's ReadValuesFromDRS) exactly like the FG one. A value found there
+// -- an NVIDIA App override, or the driver's -- outranks the per-Create hint keys the live SR/RR swap
+// writes (ngx_hooks/dlss_overrides.hpp) for the whole session. With a panel SR/RR choice set the read
+// therefore answers "not set", which is the suppression MFG-Unlocker's dlss_sr_policy.h documents; the
+// hints then decide. Ids after MFG-Unlocker, MIT.
+constexpr uint32_t SR_PRESET_ID = 0x10E41DF3u;
+constexpr uint32_t RR_PRESET_ID = 0x10E41DF7u;
 
 // ---- The filter: rewrite the FG preset id's answer after the driver's ----
 
@@ -36,17 +44,23 @@ std::atomic<uint32_t> g_desired{0};  // the panel's choice, 0 = follow
 // configuration-slot block below).
 std::atomic<void**> g_config_slot{nullptr};
 std::atomic<uint32_t> g_last_served{0};
+// How many times the provider's cached configuration has been reset. The FG controller (sl_fg_hooks'
+// live switch) waits for this to move after it turns frame generation off for a drain.
+std::atomic<uint64_t> g_resets{0};
+// The panel value the live switch has already been asked to apply: a drain is attempted once per
+// distinct choice, never once per present (a provider that refuses the reset would otherwise be
+// driven off and on every frame).
+std::atomic<uint32_t> g_switch_requested{0};
+
 void** FindConfigSlot(HMODULE module, uintptr_t helper0, uintptr_t helper1);
 
-// True when this read is one the rewrite can own: the FG preset id, a setting block of the version
-// this process's NVAPI produces, and either the driver's answer or its setting-not-found. Everything
-// else (other ids, other versions, driver errors) passes through untouched.
-// The driver's own answer, logged once: the evidence that the FG provider's read actually crosses one
-// of the hooked paths, and what the driver said before any override.
-bool CompatibleRead(uint32_t id, NvAPI_Status result, const DrsSetting& setting) {
-  return id == FG_PRESET_ID && setting.version == SETTING_VERSION
+// True when this read is one the rewrite can own (the caller has already matched the id): a setting
+// block of the version this process's NVAPI produces, carrying either the driver's answer or its
+// setting-not-found. Anything else -- another version, a driver error -- passes through untouched.
+bool CompatibleRead(NvAPI_Status result, const DrsSetting& setting) {
+  return setting.version == SETTING_VERSION
          && (result == NVAPI_SETTING_NOT_FOUND
-             || (result == NVAPI_OK && setting.settingId == FG_PRESET_ID && setting.settingType == NVDRS_DWORD_TYPE));
+             || (result == NVAPI_OK && setting.settingType == NVDRS_DWORD_TYPE));
 }
 
 // Writes `preset` into `setting` as a current-profile DWORD value; a not-found answer is fabricated
@@ -322,9 +336,74 @@ void** FindConfigSlot(HMODULE module, uintptr_t helper0, uintptr_t helper1) {
   return slot;
 }
 
+// ---- The SR/RR suppression ----
+// A provider reads its own preset key once, at its initialization, and caches what it found; a driver
+// or NVIDIA App value there outranks every hint key a later create carries. With the panel forcing an
+// SR or RR preset, the answer to that read is withheld ("setting not found"), so the per-create hints
+// -- the ones the live swap writes -- are what selects the model. With the panel on Game the driver's
+// answer passes through untouched, so an NVIDIA App override still works.
+std::atomic<bool> g_sr_forced{false};
+std::atomic<bool> g_rr_forced{false};
+
+// The driver's own answer for each id when the provider first read it, for the panel's live row: whether
+// a read was seen at all, the value it carried, and whether we withheld it. This is how a player learns
+// why a chosen preset is not what runs -- an NVIDIA App override we could not answer is the one case.
+struct DrsObservation {
+  std::atomic<bool> seen{false};
+  std::atomic<uint32_t> driver_value{0u};
+  std::atomic<bool> suppressed{false};
+};
+DrsObservation g_sr_observation;
+DrsObservation g_rr_observation;
+DrsObservation& ObservationOf(uint32_t id) {
+  return id == SR_PRESET_ID ? g_sr_observation : g_rr_observation;
+}
+
+// An NGX feature provider (the snippet) exports NVSDK_NGX_GetSnippetVersion; the NGX runtime and every
+// other NvAPI caller do not. Only the provider's own initialization read is ours to answer (MFG-Unlocker's
+// rule): anything else reading these ids -- a diagnostics tool, a game -- gets the driver's answer.
+bool IsNgxProvider(const void* caller) {
+  HMODULE module = nullptr;
+  return caller != nullptr
+         && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<LPCWSTR>(caller), &module)
+                != FALSE
+         && module != nullptr && GetProcAddress(module, "NVSDK_NGX_GetSnippetVersion") != nullptr;
+}
+
+NvAPI_Status SuppressSrRrRead(const void* caller, uint32_t id, NvAPI_Status result, DrsSetting* setting) {
+  // The driver's answer, for this id, in the shape this process's NVAPI produces; nothing else.
+  if (setting == nullptr || result != NVAPI_OK || setting->version != SETTING_VERSION
+      || setting->settingId != id || setting->settingType != NVDRS_DWORD_TYPE) {
+    return result;
+  }
+  const bool sr = (id == SR_PRESET_ID);
+  if (!IsNgxProvider(caller)) return result;
+  // The row's evidence, recorded whatever the panel asks for: the value the driver had, and whether it
+  // reached the provider.
+  DrsObservation& observation = ObservationOf(id);
+  observation.driver_value.store(setting->u32CurrentValue, std::memory_order_relaxed);
+  if (!(sr ? g_sr_forced : g_rr_forced).load(std::memory_order_relaxed)) {
+    observation.seen.store(true, std::memory_order_relaxed);
+    observation.suppressed.store(false, std::memory_order_relaxed);
+    return result;
+  }
+  observation.seen.store(true, std::memory_order_relaxed);
+  observation.suppressed.store(true, std::memory_order_relaxed);
+  static std::atomic<bool> logged_sr{false};
+  static std::atomic<bool> logged_rr{false};
+  if (!(sr ? logged_sr : logged_rr).exchange(true)) {
+    nr::Logf(nr::LogLevel::INFO,
+             "the {} preset override answered the provider's driver-setting read as not set (driver had {}); its creation hints decide the model",
+             (sr ? "DLSS-SR" : "Ray Reconstruction"), setting->u32CurrentValue);
+  }
+  return NVAPI_SETTING_NOT_FOUND;
+}
+
 // The shared detour body for both entry points: the original ran already; `id` and `result` are its
 // inputs and result. Returns the result the caller sees.
 NvAPI_Status FilterRead(const void* caller, uint32_t id, NvAPI_Status result, DrsSetting* setting) {
+  if (id == SR_PRESET_ID || id == RR_PRESET_ID) return SuppressSrRrRead(caller, id, result, setting);
   if (id == FG_PRESET_ID) {
     // The provider reads this id once and caches it: this call is the one chance to find its module
     // (from the read's return address) and hook the cached reader behind it.
@@ -342,9 +421,13 @@ NvAPI_Status FilterRead(const void* caller, uint32_t id, NvAPI_Status result, Dr
                setting != nullptr ? setting->settingId : 0u, setting != nullptr ? setting->settingType : 0u);
     }
   }
-  if (desired == 0u || desired > 3u || setting == nullptr) return result;
-  if (!CompatibleRead(id, result, *setting)) return result;
+  if (id != FG_PRESET_ID || desired == 0u || desired > 3u || setting == nullptr) return result;
+  if (!CompatibleRead(result, *setting)) return result;
   OverrideRead(*setting, desired);
+  // g_last_served is NOT set here: it means "the provider's cached configuration already holds this
+  // choice", and NotifyFgQuiescent's early return is what decides whether the cache gets reset. Rewriting
+  // a driver read does not rebuild the cached configuration, so claiming it as served there made
+  // NotifyFgQuiescent return early for every later choice and the provider never rebuilt its model.
   static std::atomic<bool> logged{false};
   if (!logged.exchange(true)) {
     nr::Logf(nr::LogLevel::INFO, "the FG preset override rewrote the driver's answer ({}); it lands at the game's next DLSS-FG create",
@@ -384,6 +467,38 @@ std::atomic<uint32_t> g_install{0};  // 0 = not tried, 1 = hooked, 2 = failed (n
 
 void SetFgPresetDesired(uint32_t preset) {
   g_desired.store(preset, std::memory_order_relaxed);
+  // Back on the game's/driver's own choice: nothing to switch to, so the next A/B/C selection is a
+  // fresh request whatever it was before.
+  if (preset == 0u) g_switch_requested.store(0u, std::memory_order_relaxed);
+}
+
+void SetSrRrPresetForced(bool sr, bool rr) {
+  g_sr_forced.store(sr, std::memory_order_relaxed);
+  g_rr_forced.store(rr, std::memory_order_relaxed);
+}
+
+bool FgPresetSwitchPending() {
+  // Without a configuration slot there is nothing to reset: the panel's choice only lands at the next
+  // start, and turning frame generation off and on would not change that.
+  if (g_config_slot.load(std::memory_order_acquire) == nullptr) return false;
+  const uint32_t desired = g_desired.load(std::memory_order_relaxed);
+  if (desired < 1u || desired > 3u || desired == g_last_served.load(std::memory_order_relaxed)) return false;
+  // ponytail: one drain per distinct choice. A provider that refuses the reset leaves the switch until
+  // the panel changes again or the game restarts; a retry loop would keep driving FG off every frame.
+  return g_switch_requested.exchange(desired, std::memory_order_acq_rel) != desired;
+}
+
+uint64_t FgPresetResets() {
+  return g_resets.load(std::memory_order_acquire);
+}
+
+PresetEvidence SrRrPresetEvidence(bool ray_reconstruction) {
+  const DrsObservation& observation = ObservationOf(ray_reconstruction ? RR_PRESET_ID : SR_PRESET_ID);
+  return {
+      .read_seen = observation.seen.load(std::memory_order_relaxed),
+      .driver_value = observation.driver_value.load(std::memory_order_relaxed),
+      .suppressed = observation.suppressed.load(std::memory_order_relaxed),
+  };
 }
 
 void InstallFgPresetHook();
@@ -505,7 +620,10 @@ void NotifyFgQuiescent() {
   // Quiescent (no FG feature lives) and the layout checks out: clear the object word. The provider's
   // next create publishes a fresh configuration, reading the preset through our hooked reader.
   if (InterlockedCompareExchangePointer(reinterpret_cast<void* volatile*>(slot), nullptr, object) == object) {
+    // g_last_served stays 0: the rebuilt configuration does not hold the panel's choice yet, the cached
+    // reader records it when the provider's next create reads it.
     g_last_served.store(0u, std::memory_order_relaxed);
+    g_resets.fetch_add(1u, std::memory_order_release);
     nr::Logf(nr::LogLevel::INFO, "the FG preset override reset the provider's cached configuration; the next FG create rebuilds it with the panel's choice");
   }
 }

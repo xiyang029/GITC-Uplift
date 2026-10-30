@@ -62,6 +62,18 @@ std::atomic<IUnknown*> g_seen_device{nullptr};
 std::atomic<uint32_t> g_seen_version{0u};
 nvapi::SleepModeParams g_seen_params{};  // written only inside the detour (the game's calling thread)
 std::atomic<bool> g_refresh_pending{false};
+// What the driver last accepted, for the panel's live row: 0 = nothing submitted yet, else the accepted
+// low-latency mode (0 off, 1 on, 2 boost) and minimum interval in microseconds.
+std::atomic<uint32_t> g_live_mode{UINT32_MAX};
+std::atomic<uint32_t> g_live_interval_us{0u};
+
+// The values the driver holds, recorded by every call that actually reached it (the game's detour and the
+// panel's live refresh), so the row says what the driver took rather than what was asked for.
+void RecordLive(const nvapi::SleepModeParams& params) {
+  g_live_mode.store(params.bLowLatencyMode == 0u ? 0u : (params.bLowLatencyBoost != 0u ? 2u : 1u),
+                    std::memory_order_relaxed);
+  g_live_interval_us.store(params.minimumIntervalUs, std::memory_order_relaxed);
+}
 
 nvapi::Status __cdecl SetSleepModeDetour(IUnknown* device, nvapi::SleepModeParams* params) {
   const SetSleepModeFn original = g_original.load(std::memory_order_acquire);
@@ -128,6 +140,8 @@ nvapi::Status __cdecl SetSleepModeDetour(IUnknown* device, nvapi::SleepModeParam
   }
 
   nvapi::Status result = original(device, &rewritten);
+  // What the driver actually holds: the rewrite, or the game's own block after the fallback below.
+  const nvapi::SleepModeParams* accepted = &rewritten;
   if (result != nvapi::kOk) {
     // One bounded retry with the game's own request: never leave the player without Reflex
     // because the rewritten mode was refused (a rejected SetSleepMode can disable latency
@@ -140,6 +154,7 @@ nvapi::Status __cdecl SetSleepModeDetour(IUnknown* device, nvapi::SleepModeParam
       }
       return result;
     }
+    accepted = params;
   } else {
     if (log_this_call) {
       nr::Logf(nr::LogLevel::INFO, "reflex: rewritten submission accepted: mode {} boost {} interval {} us",
@@ -147,6 +162,7 @@ nvapi::Status __cdecl SetSleepModeDetour(IUnknown* device, nvapi::SleepModeParam
                static_cast<uint32_t>(rewritten.bLowLatencyBoost), rewritten.minimumIntervalUs);
     }
   }
+  RecordLive(*accepted);
   g_refresh_pending.store(false, std::memory_order_relaxed);
   return result;
 }
@@ -219,6 +235,7 @@ void RefreshFromPanel() {
   ApplyPanelChoices(&fields, g_desired_mode.load(std::memory_order_relaxed),
                     CapToIntervalUs(g_desired_cap_fps.load(std::memory_order_relaxed)));
   const nvapi::Status result = original(device, &fields);
+  if (result == nvapi::kOk) RecordLive(fields);
   // Once per panel save: the values submitted live and the driver's verdict.
   nr::Logf(nr::LogLevel::INFO,
            "reflex: live refresh submitted version {:#x}: mode {} boost {} interval {} us, markers {} min queue {} -> {}",
@@ -320,6 +337,16 @@ void EnsureReflexHook() {
     }
     InstallReflexHook();
   }).detach();
+}
+
+LiveState ReadLiveState() {
+  const uint32_t mode = g_live_mode.load(std::memory_order_relaxed);
+  LiveState state;
+  state.known = mode != UINT32_MAX;
+  state.mode = (mode == UINT32_MAX ? 0u : mode);
+  const uint32_t interval_us = g_live_interval_us.load(std::memory_order_relaxed);
+  state.fps_cap = interval_us == 0u ? 0u : static_cast<uint32_t>((1'000'000ull + interval_us / 2ull) / interval_us);
+  return state;
 }
 
 }  // namespace uplift::addon::reflex

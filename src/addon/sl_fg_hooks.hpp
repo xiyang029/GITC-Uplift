@@ -57,4 +57,33 @@ void EnsureSlFgHooks();
 // and Dynamic MFG land without the game's own next call. Called from the add-on's Present poll.
 void RefreshFromPanel();
 
+// The DLSS Frame Generation model preset's live switch (addon/fg_preset.hpp): the provider caches its
+// model configuration at the first FG create, so a new preset only lands while no FG feature lives.
+// While a panel choice is pending this submits Off for one drain (without resource retention), lets the
+// release empty the provider's cache, then resubmits the game's own request. Called from the add-on's
+// Present poll; a no-op in a game without Streamline.
+void FgPresetTick();
+
+// What the DLSS-G runtime last accepted, for the panel's live row: the presented frames per real frame
+// (1 when frame generation is off), whether that count is the panel's own rather than the game's, and
+// whether Dynamic MFG owns the selection (its multiplier belongs to the provider, so multiplier is then
+// 1 and dynamic says why). Before any submission: 1, false, false.
+struct LiveState {
+  uint32_t multiplier = 1u;
+  bool panel_multiplier = false;
+  bool dynamic = false;
+  bool streamline = false;  // the game's frame generation goes through Streamline (a live preset switch is possible)
+  bool switching = false;   // the FG preset's drain is in progress right now
+  // Dynamic MFG's own gates, for its row: what the panel asked for, whether every gate allows it right
+  // now, and which one refused when it does not (support not yet reported, or reported unsupported;
+  // declined after the runtime refused a submission).
+  bool dynamic_wanted = false;
+  bool dynamic_ready = false;
+  bool dynamic_supported = false;
+  bool dynamic_support_known = false;
+  bool dynamic_declined = false;
+  bool d3d12 = false;
+};
+[[nodiscard]] LiveState ReadLiveState();
+
 }  // namespace uplift::addon::slfg

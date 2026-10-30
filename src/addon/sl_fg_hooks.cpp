@@ -10,6 +10,8 @@
 #include <string>
 #include <thread>
 
+#include "addon/fg_preset.hpp"
+#include "addon/frame_rate.hpp"
 #include "ngx_hooks/minhook_once.hpp"
 #include "nr/log.hpp"
 
@@ -205,6 +207,18 @@ std::atomic<GetStateFn> g_real_get_state{nullptr};
 std::atomic<void*> g_real_get_feature_function{nullptr};
 std::atomic<bool> g_override_applied_logged{false};
 
+// What the runtime last accepted, for the panel's live row (addon/sl_fg_hooks.hpp's LiveState):
+// presented frames per real frame, whether the panel's multiplier is the one in force, and whether
+// Dynamic MFG owns the choice instead.
+std::atomic<uint32_t> g_live_multiplier{1u};
+std::atomic<bool> g_live_panel_multiplier{false};  // the accepted count is the panel's, not the game's
+std::atomic<bool> g_live_dynamic{false};
+
+void RecordAccepted(uint32_t generated_frames, bool panel_chosen) {
+  g_live_multiplier.store(generated_frames + 1u, std::memory_order_relaxed);
+  g_live_panel_multiplier.store(panel_chosen, std::memory_order_relaxed);
+}
+
 // ---- The live replay ----
 // A panel change would otherwise wait for the game's own next slDLSSGSetOptions call, which many
 // games only make from their settings menu. The last accepted enabled submission is cached and
@@ -215,6 +229,65 @@ sl::ViewportHandle g_replay_viewport{};
 sl::DLSSGOptions g_replay_options{};
 bool g_replay_valid = false;
 std::atomic<bool> g_replay_pending{false};
+
+// ---- The FG model preset's live switch (addon/fg_preset.hpp) ----
+// The provider builds its frame-generation model from a configuration it caches at the first FG create,
+// and only rebuilds it when that cache is empty -- which the add-on can only empty while no FG feature
+// lives (NotifyFgQuiescent). A game that keeps frame generation on therefore never reaches the new
+// preset by itself. This controller drives it there: submit Off (without eRetainResourcesWhenOff, so the
+// feature is really released), wait for the release to empty the provider's cache, then submit the
+// game's own options again -- the create that follows reads the panel's preset. A drain that does not
+// land within kDrainTimeoutMs gives up and restores the game's request, so the player never loses frame
+// generation to a refused switch.
+constexpr uint64_t kDrainTimeoutMs = 4000u;
+std::atomic<uint32_t> g_drain{0u};  // 0 = idle, 1 = draining
+std::atomic<uint64_t> g_drain_started_ms{0u};
+std::atomic<uint64_t> g_drain_resets{0u};  // the provider's reset count when this drain began
+
+bool Draining() {
+  return g_drain.load(std::memory_order_acquire) != 0u;
+}
+
+// The last accepted enabled submission, for the switch's own submissions: false when the game has not
+// made one (nothing to drain from, nothing to resume).
+bool LastEnabledRequest(sl::ViewportHandle& viewport, sl::DLSSGOptions& options) {
+  AcquireSRWLockShared(&g_replay_lock);
+  const bool valid = g_replay_valid;
+  if (valid) {
+    viewport = g_replay_viewport;
+    options = g_replay_options;
+  }
+  ReleaseSRWLockShared(&g_replay_lock);
+  return valid;
+}
+
+// The drain's Off submission: the game's own last enabled request with mode Off and the resource
+// retention bit cleared, so the provider releases the feature instead of keeping it alive.
+bool SubmitDrainOff() {
+  const auto real = g_real_set_options.load(std::memory_order_acquire);
+  sl::ViewportHandle viewport{};
+  sl::DLSSGOptions options{};
+  if (real == nullptr || !LastEnabledRequest(viewport, options) || options.mode == sl::DLSSGMode::eOff) return false;
+  options.mode = sl::DLSSGMode::eOff;
+  constexpr auto kRetain = static_cast<uint32_t>(sl::DLSSGFlags::eRetainResourcesWhenOff);
+  options.flags = static_cast<sl::DLSSGFlags>(static_cast<uint32_t>(options.flags) & ~kRetain);
+  const sl::Result result = real(viewport, options);
+  LogSlResult("submitted Off for the FG preset switch (resources not retained)", result);
+  return result == sl::Result::eOk;
+}
+
+// Puts the game's own request back, which is what resumes frame generation after the drain. It goes
+// through the panel's wrapper, not the raw function: the multiplier and option rows a player set must
+// still stand after the switch -- the drain only borrows the submission to release the model.
+sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options);
+
+void ResumeGameRequest() {
+  sl::ViewportHandle viewport{};
+  sl::DLSSGOptions options{};
+  if (!LastEnabledRequest(viewport, options)) return;
+  LogSlResult("resubmitted the game's own frame-generation options after the FG preset switch",
+              HookedSetOptions(viewport, options));
+}
 
 void CacheReplaySubmission(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options) {
   if (options.mode == sl::DLSSGMode::eOff) return;
@@ -236,7 +309,15 @@ bool DynamicReady(bool game_enabled) {
 // that do not rewrite the count still have to carry them, or choosing UI recomposition on its own
 // would never reach the runtime.
 sl::Result ForwardGameRequest(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options, SetOptionsFn real) {
-  if (!OptionOverridesSet()) return real(viewport, options);
+  if (!OptionOverridesSet()) {
+    const sl::Result result = real(viewport, options);
+    // The panel's own count is not in force here: the row must not keep showing a number nothing applied.
+    if (result == sl::Result::eOk) {
+      RecordAccepted(options.numFramesToGenerate, false);
+      g_live_dynamic.store(false, std::memory_order_relaxed);
+    }
+    return result;
+  }
   sl::DLSSGOptions forwarded{};
   if (!BuildForwardedOptions(options, forwarded, 0u, false, false, 0.0f)) return real(viewport, options);
   const sl::Result result = real(viewport, forwarded);
@@ -287,6 +368,10 @@ sl::Result CallSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
   const sl::Result result = real(viewport, forwarded);
   if (dynamic) LogSlResult("dynamic submission (eDynamic)", result);
   if (result == sl::Result::eOk) {
+    // What is in force now, for the panel's row: the accepted count, whether it is the panel's own, and
+    // whether Dynamic MFG owns the choice (its multiplier is the provider's, so no number is claimed).
+    g_live_dynamic.store(dynamic, std::memory_order_relaxed);
+    RecordAccepted(dynamic ? 0u : forwarded.numFramesToGenerate, override_generated);
     if (dynamic) {
       g_dynamic_set_failures.store(0u, std::memory_order_relaxed);
       g_dynamic_fell_back.store(false, std::memory_order_relaxed);
@@ -335,6 +420,12 @@ sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
   if (real == nullptr) return sl::Result::eErrorNotInitialized;
 
   const bool game_enabled = options.mode != sl::DLSSGMode::eOff;
+  // A game that turns frame generation back on during a drain wins: its own request goes through
+  // unchanged and the drain ends (nothing to resume). The switch is retried later, rate-limited.
+  if (game_enabled && Draining()) {
+    g_drain.store(0u, std::memory_order_release);
+    nr::Logf(nr::LogLevel::INFO, "the FG preset switch stepped back: the game turned frame generation on again; the game's own request goes through");
+  }
   if (!game_enabled) {
     // A game-side off/on cycle is a safe retry boundary after a rejection.
     g_dynamic_declined.store(false, std::memory_order_release);
@@ -508,6 +599,11 @@ sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& st
     const int dynamic_flag = observed->structVersion >= sl::kStructVersion4 ? static_cast<int>(observed->bIsDynamicMFGSupported) : -1;
     nr::Logf(nr::LogLevel::INFO, "sl-fg: slDLSSGGetState -> result {}, max generated {}, dynamic flag {} (state v{})",
              static_cast<uint32_t>(result), observed->numFramesToGenerateMax, dynamic_flag, observed->structVersion);
+  }
+  // The presented batch, for the frame-rate row: one sample per real frame, the last one of the frame
+  // winning (several GetState calls read the same batch).
+  if (result == sl::Result::eOk && observed->structVersion >= sl::kStructVersion1) {
+    framerate::OnPresentedBatch(observed->numFramesActuallyPresented);
   }
   if (result == sl::Result::eOk) {
     if (observed->structVersion >= sl::kStructVersion4
@@ -783,6 +879,58 @@ uint32_t GeneratedFramesCeiling() {
 
 void NotifyDynamicD3D12(bool d3d12) {
   g_dynamic_d3d12.store(d3d12, std::memory_order_relaxed);
+}
+
+// ---- The FG model preset's live switch, driven from the Present poll ----
+// Called every present (cheap: two relaxed loads while nothing is wanted). It starts a drain when the
+// panel's FG preset differs from what the provider last served, and ends it once the provider's cache
+// was reset (the next create rebuilds the model) or the deadline passes.
+void FgPresetTick() {
+  const auto real = g_real_set_options.load(std::memory_order_acquire);
+  if (real == nullptr) return;  // no Streamline: the FG preset lands at the next start, as before
+  const uint64_t now = GetTickCount64();
+  if (Draining()) {
+    const bool reset = addon::FgPresetResets() != g_drain_resets.load(std::memory_order_relaxed);
+    if (reset || (now - g_drain_started_ms.load(std::memory_order_relaxed)) >= kDrainTimeoutMs) {
+      // Either the reset landed (the provider's next create reads the panel's preset) or it did not in
+      // time: both end the same way, with the game's own frame generation back on.
+      g_drain.store(0u, std::memory_order_release);
+      ResumeGameRequest();
+    }
+    return;
+  }
+  // Only ask while a drain is possible at all: the pending query consumes the request, and a game that
+  // never enabled frame generation has nothing to submit Off from.
+  sl::ViewportHandle viewport{};
+  sl::DLSSGOptions options{};
+  if (!LastEnabledRequest(viewport, options)) return;
+  if (!addon::FgPresetSwitchPending()) return;
+  if (!SubmitDrainOff()) {
+    // No enabled request to drain from, or the runtime refused: the preset lands at the next start.
+    ResumeGameRequest();
+    return;
+  }
+  g_drain_started_ms.store(now, std::memory_order_relaxed);
+  g_drain_resets.store(addon::FgPresetResets(), std::memory_order_relaxed);
+  g_drain.store(1u, std::memory_order_release);
+  nr::Logf(nr::LogLevel::INFO,
+           "the FG preset switch turned frame generation off for one drain; it resumes as soon as the provider has released its cached model");
+}
+
+LiveState ReadLiveState() {
+  return {
+      .multiplier = g_live_multiplier.load(std::memory_order_relaxed),
+      .panel_multiplier = g_live_panel_multiplier.load(std::memory_order_relaxed),
+      .dynamic = g_live_dynamic.load(std::memory_order_relaxed),
+      .streamline = (g_real_set_options.load(std::memory_order_acquire) != nullptr),
+      .switching = Draining(),
+      .dynamic_wanted = g_dynamic_enabled.load(std::memory_order_relaxed),
+      .dynamic_ready = DynamicReady(true),
+      .dynamic_supported = g_dynamic_supported.load(std::memory_order_relaxed),
+      .dynamic_support_known = g_dynamic_support_seen.load(std::memory_order_acquire),
+      .dynamic_declined = g_dynamic_declined.load(std::memory_order_relaxed),
+      .d3d12 = g_dynamic_d3d12.load(std::memory_order_relaxed),
+  };
 }
 
 void EnsureSlFgHooks() {
