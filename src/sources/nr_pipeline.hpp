@@ -14,6 +14,7 @@
 #include "color/encoding.hpp"
 #include "look/look_math.hpp"
 #include "nr/foveation.hpp"
+#include "nr/gpu_timer.hpp"
 #include "nr/session.hpp"
 #include "nr/timeline.hpp"
 #include "nr/types.hpp"
@@ -158,6 +159,8 @@ class NrPipeline final : private nr::PassResolver {
   [[nodiscard]] bool SupportsUavTarget(DXGI_FORMAT format) const;
   // Plan 5: the look stage, the colour fixes, the mask and passes 2..10 for the next recordings.
   void SetLookConfig(const LookConfig& config);
+  // Frame skip: the queue the GPU timings are taken against, named by the device context's present.
+  void NotePresentQueue(ID3D12CommandQueue* queue) { timer_.NoteQueue(queue); }
   // Plan 5 (v2 design §3.13, key decision 8): Uplift's copy of UPLIFT_MASK, shaped like `mask` (its size and
   // format), which the add-on copies the effect's texture into at the end of ReShade's effects. Recordings bind it
   // from NoteMaskCopied on. `mask` null, or a format Uplift cannot read, releases the copy and returns null.
@@ -283,6 +286,7 @@ class NrPipeline final : private nr::PassResolver {
     TargetKind kind = TargetKind::PRESENT;
     nr::Size private_color;                         // pre-SR: the game's Color dimensions
     bool canvas_motion = false;                     // pre-SR in a canvas, with motion vectors to copy into it
+    nr::Size boost_motion;                          // frame skip: the motion texture's own size, which the held vectors are kept at
     // The warped work grid the set was made for (nr/foveation.hpp). A grid that moves while the surfaces still fit restarts
     // the histories instead of reallocating: see EnsureIntermediates.
     nr::foveation::Grid foveation;
@@ -296,6 +300,18 @@ class NrPipeline final : private nr::PassResolver {
     Texture change;         // required RGBA16F change field at the image size
     Texture canvas_motion;  // the canvas size: only with SetPlan::canvas_motion
     Texture private_color;  // pre-SR only
+    // Frame skip (MFG-Unlocker's Boost, ported): the look model, what it does not explain, and the vectors held over the
+    // frames the network skips. Made with the set, and only while frame skip is on.
+    Texture boost_change;     // the canvas: what the model does not explain, and the input's luminance in alpha
+    Texture boost_sums;       // cells_x * 6 by cells_y * bins: the fit's sums, RGBA32F
+    Texture boost_model;      // cells_x * 3 by cells_y * bins: the solved model, RGBA32F
+    Texture boost_accum;       // the motion texture's size: the vectors accumulated up to the last frame the network ran
+    Texture boost_accum_prev;  // ... and that field one frame earlier: what the accumulation reads and writes over
+    uint32_t boost_cell = 0u;
+    uint32_t boost_cells_x = 0u;
+    uint32_t boost_cells_y = 0u;
+    bool boost_held = false;     // a network frame left a model and detail for a skipped frame to carry
+    bool boost_skipped = false;  // ... and the frame just recorded carried rather than ran the network (the accumulation starts over)
     SetPlan plan;
     uint64_t bytes = 0u;    // every texture above, as the budget charges them
     bool motion_needs_clear = true;
@@ -389,6 +405,30 @@ class NrPipeline final : private nr::PassResolver {
                                            const WorkLayout& work);
   void NoteEncoding(color::Encoding encoding, float input_scale);
   void CommitSlot(uint32_t slot);
+  // Frame skip: the five kernels of MFG-Unlocker's Boost. All of them are false (or do nothing) when this device, this
+  // session or this recording cannot support them, in which case NR runs every frame as before.
+  [[nodiscard]] bool BoostSurfaces() const;
+  [[nodiscard]] color::BoostConstants BoostConstantsFor(const nr::BoundResource& motion, float scale_x, float scale_y) const;
+  // The skipped frame: this frame's model input through the model, with the held detail on top of it where the two match.
+  [[nodiscard]] std::optional<nr::EvaluateResult> BoostCarry(ID3D12GraphicsCommandList* list, uint32_t slot, const nr::FrameInputs& inputs);
+  // Every frame of the cycle, before either use of the vectors: this frame's own added to the field as the last frame the
+  // network ran left it, so what comes out is the motion over the whole cycle. The rect its vectors occupy, or nothing.
+  [[nodiscard]] std::optional<nr::Rect> BoostAdvance(ID3D12GraphicsCommandList* list, uint32_t slot, const nr::FrameInputs& inputs);
+  // A frame the network ran: fits the model from its input to `output` and holds what the fit does not explain.
+  void BoostModel(ID3D12GraphicsCommandList* list, uint32_t slot, ID3D12Resource* output);
+  // Frame skip: what kept a frame that meant to skip from carrying instead. One count per reason, reported with the timing
+  // so a frame the network ran for no good reason can be told from one it had to.
+  struct SkipMisses {
+    uint32_t no_motion = 0u;
+    uint32_t no_history = 0u;
+    uint32_t reset = 0u;
+    uint32_t split = 0u;
+    uint32_t multipass = 0u;
+    uint32_t unavailable = 0u;
+    [[nodiscard]] uint32_t Total() const { return no_motion + no_history + reset + split + multipass + unavailable; }
+  };
+  // Frame skip: the GPU time of the network's own frames, the ones it skipped, and the chain around them, once a minute.
+  void ReportTiming();
   bool Encode(ID3D12GraphicsCommandList* list, uint32_t slot, color::EncodePass pass);
   nr::EvaluateResult Evaluate(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs inputs, const nr::Controls& controls,
                               const nr::StageSlice& slice);
@@ -396,6 +436,14 @@ class NrPipeline final : private nr::PassResolver {
   Microsoft::WRL::ComPtr<ID3D12Device> device_;
   nr::Session& session_;
   nr::Timeline& timeline_;
+  nr::GpuTimer timer_;
+  std::chrono::steady_clock::time_point last_timing_report_ = std::chrono::steady_clock::now();
+  SkipMisses skip_misses_;
+  // Frame skip: what the cycle asked of the frames against what they did. A cycle that asks for the wrong share is a different
+  // fault from one whose share is right and whose frames fall back anyway.
+  uint32_t half_rate_frames_ = 0u;
+  uint32_t half_rate_asked_ = 0u;
+  uint32_t half_rate_carried_ = 0u;
   color::ColorPipeline color_;
   std::array<StageSet, STAGE_SETS> sets_;
   StageSet* set_ = &sets_[0];  // the recording's (ChainPart::set)

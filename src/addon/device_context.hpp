@@ -88,6 +88,8 @@ struct FrameConfig {
   uint32_t foveation_falloff_y = 15;  // fall-off on the top/bottom sides: short enough that the vertical ramp reaches the edge density
   uint32_t foveation_edge = 50;       // the density the fall-off reaches at the edge, in percent (25 to 100, where 100 is off)
   bool pre_upscale = false;  // v2 design §3.9: NR before DLSS-SR upscales
+  // Frame skip (MFG-Unlocker's Boost, ported): the network runs on one frame of the setting's cycle, and the frames it skips carry the last change it made.
+  ui::HalfRate half_rate = ui::HalfRate::OFF;
   sources::LookConfig look;  // Plan 5: the look stage, the colour fixes, Mask, UI correction, passes 2..10
   bool launchpad_motion = true;       // Plan 6: MotionVectors Auto, Launchpad or (2026-10-08) Lumenite: the Present path may bind UPLIFT_MV
   bool uplift_mv_lumenite = false;    // 2026-10-08: UPLIFT_MV holds Lumenite's vectors (Uplift.fx compiled with UPLIFT_USE_LUMENITE): the readouts name it
@@ -490,6 +492,9 @@ class DeviceContext {
   std::string output_message_;  // device removal, unsupported format or colour space
   std::string_view skip_reason_;
   bool skip_from_session_ = false;  // M1 fix round 1: skip_reason_ is Session::Evaluate's own
+  uint32_t half_rate_phase_ = 0u;  // Frame skip: where this present sits in the setting's cycle; the network runs on phase 0
+  bool half_rate_skip_ = false;    // ... and whether it carries NR's last change instead of running the network
+  std::chrono::steady_clock::time_point last_rate_report_{};  // the panel's frame rate, logged beside the pipeline's own GPU timings
   sources::PresentTarget frame_target_;
   nr::Controls controls_;
   std::optional<color::Encoding> encoding_;

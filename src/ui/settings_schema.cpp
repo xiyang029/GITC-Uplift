@@ -16,6 +16,7 @@ constexpr std::array<std::string_view, 3> NR_NETWORKS = {"Runtime default", "A: 
 constexpr std::array<std::string_view, 3> PASS_NETWORKS = {"Same as pass 1", "A: Legacy", "B: Small FP8"};
 constexpr std::array<std::string_view, 3> SOURCES = {"Auto", "After DLSS", "Present"};
 constexpr std::array<std::string_view, 5> MOTION_VECTORS = {"Auto", "DLSS", "Launchpad", "None", "Lumenite"};  // stored-index order (Setup shows Lumenite after Launchpad)
+constexpr std::array<std::string_view, 4> HALF_RATE = {"Off", "Every 2nd frame", "Every 3rd frame", "Every 4th frame"};
 constexpr std::array<std::string_view, 5> PRESETS = {"Game", "J", "K", "L", "M"};
 constexpr std::array<std::string_view, 4> FG_PRESETS = {"Game", "A", "B", "C"};
 constexpr std::array<std::string_view, 6> FG_MULTIPLIERS = {"Game", "2x", "3x", "4x", "5x", "6x"};
@@ -522,6 +523,17 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .choices = SOURCES,
         .get = [](const Settings& s) { return Index(s.source); },
         .set = [](Settings& s, double v) { s.source = FromIndex<PlacementSource>(v); },
+    },
+    {
+        .key = "HalfRate",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::PLACEMENT,
+        .label = "Frame skip",
+        .tooltip = "NR's network runs on the frame the cycle picks, every 2nd, 3rd or 4th, and a skipped frame carries the last change the network made "
+                   "along the motion vectors, so it still shows NR's result. A change applies at once.",
+        .choices = HALF_RATE,
+        .get = [](const Settings& s) { return Index(s.half_rate); },
+        .set = [](Settings& s, double v) { s.half_rate = FromIndex<HalfRate>(v); },
     },
     {
         .key = "PreUpscale",

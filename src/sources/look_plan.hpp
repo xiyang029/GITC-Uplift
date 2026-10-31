@@ -60,6 +60,9 @@ struct LookConfig {
   std::array<PassStrengths, LATER_PASSES> later_strengths = {};              // pass n's own; (1, 1) resolves nothing
   bool mask = false;                   // Mask = Auto: bind the mask copy once the add-on has copied into it
   bool present_ui_correction = false;  // UICorrection = On: forwarded on the Present path only (no effect without a Backbuffer)
+  bool half_rate = false;       // Frame skip: NR's network runs on one frame of the setting's cycle (the device context sets it from the setting)
+bool half_rate_skip = false;  // ... and this recording is one of the frames it skips (per frame; never on the Vulkan route)
+uint32_t half_rate_period = 2u;  // ... and how many presents the cycle spans, which is how many frames its vectors then cover
   float frame_seconds = 1.f / 60.f;    // Δt since this placement's last recording: the stabiliser and the governor
   KeepFacesConfig keep_faces;
 };

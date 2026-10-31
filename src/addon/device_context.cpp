@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "addon/dred.hpp"
+#include "addon/frame_rate.hpp"
 #include "nr/log.hpp"
 
 namespace uplift::addon {
@@ -171,6 +172,22 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
     logged_after_dlss_ = false;
   }
   NotePlacementChange();
+  // Frame skip (MFG-Unlocker's Boost, ported): the setting's cycle decides which presents run NR's network and which carry the last change it made. One flag
+  // for the whole present, so every stage of a split chain agrees. The cycle starts on the network, so every carry has a frame behind it to carry from.
+  const uint32_t half_rate_period = ui::HalfRatePeriod(config_.half_rate);
+  half_rate_phase_ = (half_rate_period > 1u ? (half_rate_phase_ + 1u) % half_rate_period : 0u);
+  half_rate_skip_ = (half_rate_period > 1u && half_rate_phase_ != 0u);
+  // The panel's own frame rate, once a minute, on the same clock as the pipeline's GPU timings: a saving the GPU timings show
+  // only counts if the frames really leave faster, and the two numbers are only comparable side by side.
+  if (now - last_rate_report_ >= std::chrono::seconds(60)) {
+    last_rate_report_ = now;
+    const framerate::Snapshot rate = framerate::Read();
+    if (rate.real_milli > 0u) {
+      const double real_fps = static_cast<double>(rate.real_milli) / 1000.0;
+      nr::Logf(nr::LogLevel::INFO, "Panel: {:.1f} fps of real frames ({:.2f} ms a frame; this window closed {} ms ago), {:.1f} fps presented in all", real_fps,
+               1000.0 / real_fps, static_cast<double>(rate.age_ms), static_cast<double>(rate.output_milli) / 1000.0);
+    }
+  }
   // The back buffer as NR at Present sees it: pass 1's output problem there, and (split chain, design 6.1) whether a later group can run there. Not read
   // when nothing could run at Present.
   std::string present_problem;
@@ -612,6 +629,12 @@ void DeviceContext::ApplyLookConfig(std::chrono::steady_clock::time_point now, u
   if (group > 0u && group < chain_.group_count) {
     look.keep_faces.enabled = (look.keep_faces.enabled && LaterStageKeepsFaces(chain_.groups[group].stage));
   }
+  // Frame skip: the setting says whether it is on, this present's place in the cycle says whether the network runs on it.
+  look.half_rate = (ui::HalfRatePeriod(config_.half_rate) > 1u);
+  look.half_rate_skip = (look.half_rate && half_rate_skip_);
+  look.half_rate_period = ui::HalfRatePeriod(config_.half_rate);
+  // Frame skip: the timings are taken against the present queue's clock, which only the device context knows.
+  present_source_->Pipeline().NotePresentQueue(PresentQueue());
   present_source_->Pipeline().SetLookConfig(look);
 }
 

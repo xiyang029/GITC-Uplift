@@ -53,6 +53,7 @@ FrameConfig BuildFrameConfig(const FrameConfigInputs& inputs, ui::ControlsCoales
       .foveation_falloff_y = settings.foveation_falloff_y,
       .foveation_edge = settings.foveation_edge,
       .pre_upscale = settings.pre_upscale,
+      .half_rate = settings.half_rate,
       .look = LookConfigFrom(look_settings, coalescer->LaterPasses(look_settings, inputs.drag.pass_slider, now)),
       .launchpad_motion = (settings.motion_vectors == ui::MotionVectorSource::AUTO || settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD
                            || settings.motion_vectors == ui::MotionVectorSource::LUMENITE),

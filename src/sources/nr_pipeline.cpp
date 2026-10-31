@@ -23,6 +23,16 @@ void WarnOnce(bool* logged, std::format_string<Args...> format, Args&&... args) 
 }
 
 
+// Frame skip: every Boost kernel says so the first time it runs, so a crash inside one of them names itself in the log.
+void NoteBoostStep(uint32_t step) {
+  static uint32_t seen = 0u;
+  const uint32_t bit = 1u << step;
+  if ((seen & bit) != 0u) return;
+  seen |= bit;
+  static constexpr std::string_view NAMES[] = {"fit", "solve", "hold", "carry", "compose"};
+  nr::Logf(nr::LogLevel::INFO, "Frame skip: the {} kernel ran", NAMES[step]);
+}
+
 // The Present decode is a pixel shader; everything else reads through compute-legal states only.
 constexpr D3D12_RESOURCE_STATES PIXEL_AND_COMPUTE_READ =
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -93,6 +103,42 @@ bool SessionWroteMessage(std::string_view reason) {
   return reason == "frame too small" || reason == "budget" || reason == "create failed" || reason == "evaluate failed";
 }
 
+// Frame skip: what a recording that carried NR's change instead of running the network reports (PipelineResult::reason).
+constexpr std::string_view HALF_RATE_REASON = "half rate";
+
+// Frame skip: the fit grid, one cell per this many texels at 1080p, scaled with the canvas, and eight luminance bins
+// within each cell. MFG-Unlocker fits twice as coarse (dlss5_policy.h); halving the cell doubles the grid in each axis,
+// so four times the cells: a model that follows the image's own edges more closely, paid for by fit and solve, which
+// cost 0.46 ms of a 3.25 ms network frame when the cell was sixteen. If the finer grid starts showing cell-shaped artefacts in flat
+// areas (each cell holds four times fewer samples for the same lambda), raise BoostConstants::lambda to match.
+constexpr uint32_t BOOST_CELL_AT_1080 = 16u;
+constexpr uint32_t BOOST_BINS = 8u;
+uint32_t BoostCell(uint32_t height) {
+  return BOOST_CELL_AT_1080 * static_cast<uint32_t>(std::max(1l, std::lround(static_cast<double>(height) / 1080.0)));
+}
+
+// Frame skip: the chain channel's pair. Start is called once the recording is certain to touch the list, so a
+// call that returns beforehand records nothing; every early return after that still closes the pair.
+class ChainScope final {
+ public:
+  ChainScope(nr::GpuTimer& timer, ID3D12GraphicsCommandList* list) : timer_(timer), list_(list) {}
+  ~ChainScope() {
+    if (started_) timer_.End(list_, false, nr::GpuTimer::Channel::CHAIN);
+  }
+  ChainScope(const ChainScope&) = delete;
+  ChainScope& operator=(const ChainScope&) = delete;
+  void Start() {
+    if (started_) return;
+    started_ = true;
+    timer_.Begin(list_, nr::GpuTimer::Channel::CHAIN);
+  }
+
+ private:
+  nr::GpuTimer& timer_;
+  ID3D12GraphicsCommandList* list_;
+  bool started_ = false;
+};
+
 }  // namespace
 
 NrPipeline::NrPipeline(ID3D12Device* device, nr::Session& session, nr::Timeline& timeline)
@@ -101,6 +147,8 @@ NrPipeline::NrPipeline(ID3D12Device* device, nr::Session& session, nr::Timeline&
 NrPipeline::~NrPipeline() = default;
 
 bool NrPipeline::Initialize(std::string* error) {
+  // Frame skip: the GPU timings. A device that cannot make the query heap or its readback simply goes unmeasured.
+  timer_.Initialize(device_.Get(), &timeline_);
   return color_.Initialize(device_.Get(), error);
 }
 
@@ -335,6 +383,12 @@ std::string_view NrPipeline::EnsureIntermediates(const SetPlan& plan) {
   RetireSet(set_);
   constexpr D3D12_RESOURCE_FLAGS UAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   const bool pre_sr = (plan.kind == TargetKind::PRE_SR);
+  // Frame skip: the surfaces its kernels work on are made with the set, and only while frame skip is on: two model-domain
+  // canvases and a motion texture are not free, and NR's budget charges them like the rest.
+  const bool boost = config_.half_rate && plan.boost_motion.Pixels() > 0u;
+  const uint32_t cell = BoostCell(plan.canvas.height);
+  const uint32_t cells_x = std::max(1u, (plan.canvas.width + cell - 1u) / cell);
+  const uint32_t cells_y = std::max(1u, (plan.canvas.height + cell - 1u) / cell);
   Intermediates created = {
       .source_copy = (plan.copy_format == DXGI_FORMAT_UNKNOWN
                           ? Texture()
@@ -351,16 +405,36 @@ std::string_view NrPipeline::EnsureIntermediates(const SetPlan& plan) {
       .private_color = (pre_sr ? CreateTexture(plan.private_color, DXGI_FORMAT_R16G16B16A16_FLOAT, UAV, COMPUTE_READ,
                                                L"Uplift pre-SR colour")
                                : Texture()),
+      .boost_change = (boost ? CreateTexture(plan.canvas, DXGI_FORMAT_R16G16B16A16_FLOAT, UAV, COMPUTE_READ, L"Uplift boost change")
+                             : Texture()),
+      .boost_sums = (boost ? CreateTexture({cells_x * 6u, cells_y * BOOST_BINS}, DXGI_FORMAT_R32G32B32A32_FLOAT, UAV, COMPUTE_READ,
+                                            L"Uplift boost sums")
+                            : Texture()),
+      .boost_model = (boost ? CreateTexture({cells_x * 3u, cells_y * BOOST_BINS}, DXGI_FORMAT_R32G32B32A32_FLOAT, UAV, COMPUTE_READ,
+                                             L"Uplift boost model")
+                             : Texture()),
+      .boost_accum = (boost ? CreateTexture(plan.boost_motion, DXGI_FORMAT_R32G32_FLOAT, UAV, COMPUTE_READ, L"Uplift boost motion over the cycle")
+                            : Texture()),
+      .boost_accum_prev = (boost ? CreateTexture(plan.boost_motion, DXGI_FORMAT_R32G32_FLOAT, UAV, COMPUTE_READ, L"Uplift boost motion before it")
+                                 : Texture()),
+      .boost_cell = cell,
+      .boost_cells_x = cells_x,
+      .boost_cells_y = cells_y,
       .plan = plan,
       .bytes = plan.output.Pixels() * plan.source_bytes_per_pixel
                + plan.canvas.Pixels() * (2u * MODEL_BYTES_PER_PIXEL + MOTION_BYTES_PER_PIXEL)
                + plan.image.Pixels() * MODEL_BYTES_PER_PIXEL
                + (plan.canvas_motion ? plan.canvas.Pixels() * MOTION_BYTES_PER_PIXEL : 0u)
-               + plan.private_color.Pixels() * MODEL_BYTES_PER_PIXEL,
+               + plan.private_color.Pixels() * MODEL_BYTES_PER_PIXEL
+               + (boost ? plan.canvas.Pixels() * MODEL_BYTES_PER_PIXEL + (cells_x * 6u + cells_x * 3u) * cells_y * BOOST_BINS * 16u
+                              + 2u * plan.boost_motion.Pixels() * 8u  // RG32F, the two accumulated fields
+                        : 0u),
   };
   const bool complete = created.model_a && created.model_b && created.zero_motion
                         && (plan.copy_format == DXGI_FORMAT_UNKNOWN || created.source_copy) && created.change
-                        && (!plan.canvas_motion || created.canvas_motion) && (!pre_sr || created.private_color);
+                        && (!plan.canvas_motion || created.canvas_motion) && (!pre_sr || created.private_color)
+                        && (!boost || (created.boost_change && created.boost_sums && created.boost_model && created.boost_accum
+                                      && created.boost_accum_prev));
   if (!complete) {
     if (!allocation_failure_logged_) {
       nr::Logf(nr::LogLevel::ERR, "could not allocate the {}x{} NR surfaces", plan.canvas.width, plan.canvas.height);
@@ -369,6 +443,10 @@ std::string_view NrPipeline::EnsureIntermediates(const SetPlan& plan) {
     return "out of memory";
   }
   allocation_failure_logged_ = false;
+  if (boost) {
+    nr::Logf(nr::LogLevel::INFO, "Frame skip: {}x{} canvas, {}x{} vectors, {}x{} cells of {}", plan.canvas.width,
+             plan.canvas.height, plan.boost_motion.width, plan.boost_motion.height, cells_x, cells_y, cell);
+  }
   set_->intermediates = std::move(created);
   return {};
 }
@@ -377,9 +455,14 @@ void NrPipeline::SetLookConfig(const LookConfig& config) {
   // v2 design §3.12: a new Detail radius or Stabilize mode starts the stabiliser afresh. Split chain: in every set.
   const bool restart_stabilizer = (config.look.detail_radius != config_.look.detail_radius || config.look.stabilize != config_.look.stabilize
                                    || config.look.stabilize_detail != config_.look.stabilize_detail);
+  // Frame skip: its histories are made with the set (EnsureIntermediates), so turning it on or off rebuilds them; RetireSet frees them at their marks.
+  const bool half_rate_changed = (config.half_rate != config_.half_rate);
   for (StageSet& set : sets_) {
     if (restart_stabilizer) {
       set.look.history_valid = false;
+    }
+    if (half_rate_changed) {
+      RetireSet(&set);
     }
   }
   config_ = config;
@@ -697,14 +780,219 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
   return after;
 }
 
+// Frame skip: the motion texture's own size, which the held vectors are kept at (their own texels, their own units, so
+// the carry and the compose read them exactly where the network would have).
+nr::Size MotionExtentOf(ID3D12Resource* motion) {
+  if (motion == nullptr) return {};
+  const D3D12_RESOURCE_DESC description = motion->GetDesc();
+  return {static_cast<uint32_t>(description.Width), description.Height};
+}
+
+// Frame skip: whether this set has the surfaces the Boost kernels work on (made with the set, and only while frame skip is on).
+bool NrPipeline::BoostSurfaces() const {
+  const Intermediates& surfaces = set_->intermediates;
+  return surfaces.boost_change && surfaces.boost_sums && surfaces.boost_model && surfaces.boost_accum && surfaces.boost_accum_prev;
+}
+
+// Frame skip: the constants every Boost kernel indexes identically (nr_boost_common.hlsli's cbuffer). The thresholds are
+// Tighter than MFG's BoostThresholds Loose (0.04/0.12), between it and its Normal (0.02/0.06): a carried texel has the
+// accumulated vectors to distrust it with as well, so it takes a smaller mismatch to fade it out and stop the smear.
+color::BoostConstants NrPipeline::BoostConstantsFor(const nr::BoundResource& motion, float scale_x, float scale_y) const {
+  const Intermediates& surfaces = set_->intermediates;
+  color::BoostConstants constants;
+  constants.motion_x = static_cast<int32_t>(motion.rect.x);
+  constants.motion_y = static_cast<int32_t>(motion.rect.y);
+  constants.motion_width = motion.rect.width;
+  constants.motion_height = motion.rect.height;
+  constants.motion_extent_x = surfaces.plan.boost_motion.width;
+  constants.motion_extent_y = surfaces.plan.boost_motion.height;
+  constants.extent_width = surfaces.plan.canvas.width;
+  constants.extent_height = surfaces.plan.canvas.height;
+  constants.motion_scale_x = scale_x;
+  constants.motion_scale_y = scale_y;
+  constants.stable_below = 0.02f;
+  constants.unstable_above = 0.08f;
+  constants.cell = surfaces.boost_cell;
+  constants.bins = BOOST_BINS;
+  constants.cells_x = surfaces.boost_cells_x;
+  constants.cells_y = surfaces.boost_cells_y;
+  // The kernels are handed the vectors accumulated over the whole cycle, not over one frame, so what counts as a long one
+  // scales with it: a texel that moved this far over the cycle is no less trustworthy than one that moved it in one frame.
+  const float span = static_cast<float>(std::max(1u, config_.half_rate_period));
+  constants.mv_stable_below = 24.f * span;
+  constants.mv_unstable_above = 64.f * span;
+  constants.mv_field_above = 32.f * span;
+  return constants;
+}
+
+// Frame skip: the frame the network does not run. This frame's own model input goes through the look model the last network
+// frame fitted, and the detail that fit does not explain is added back where this frame still matches where it came from,
+// so the result follows this frame's edges instead of the last frame's. The vectors are the ones BoostAdvance accumulated
+// over the cycle, so the detail lands where that frame left it. None: the network runs instead.
+std::optional<nr::EvaluateResult> NrPipeline::BoostCarry(ID3D12GraphicsCommandList* list, uint32_t slot, const nr::FrameInputs& inputs) {
+  Intermediates& surfaces = set_->intermediates;
+  const color::StabilizeMotion motion = StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y);
+  // With no vectors the model cannot say where a texel came from, and NR's raw input is the better answer.
+  if (motion.vectors.resource == nullptr || motion.view_format == DXGI_FORMAT_UNKNOWN) return std::nullopt;
+  const color::BoostConstants constants = BoostConstantsFor(motion.vectors, motion.scale_x, motion.scale_y);
+  ID3D12Resource* const output = surfaces.model_b.Get();
+  timer_.Begin(list, nr::GpuTimer::Channel::CARRY);
+  Transition(list, output, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  const bool recorded = color_.RecordBoostCarry(list, slot,
+                                                {.first = surfaces.model_a.Get(),
+                                                 .second = surfaces.boost_change.Get(),
+                                                 .third = surfaces.boost_model.Get(),
+                                                 .motion = surfaces.boost_accum.Get(),
+                                                 .target = output,
+                                                 .motion_view_format = DXGI_FORMAT_R32G32_FLOAT,
+                                                 .constants = constants,
+                                                 .dispatch = surfaces.plan.canvas});
+  Transition(list, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  timer_.End(list, false, nr::GpuTimer::Channel::CARRY);
+  if (!recorded) return std::nullopt;
+  NoteBoostStep(3u);
+  faces_ran_ = false;  // no twin ran this frame, and the mask it would show has nothing to tint
+  surfaces.boost_skipped = true;
+  surfaces.last_use = slot_marks_[slot];
+  return nr::EvaluateResult{output, 1u, HALF_RATE_REASON};
+}
+
+// Frame skip: every frame of the cycle, before either use of the vectors. This frame's own are added to the field as the
+// last frame the network ran left it, so what comes out is the motion over the whole cycle: what the carry reprojects
+// with, and what the network is given when its turn comes, because its history never saw the frames in between.
+// Nothing: the vectors are not available, and NR runs as before.
+std::optional<nr::Rect> NrPipeline::BoostAdvance(ID3D12GraphicsCommandList* list, uint32_t slot, const nr::FrameInputs& inputs) {
+  Intermediates& surfaces = set_->intermediates;
+  const color::StabilizeMotion motion = StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y);
+  if (motion.vectors.resource == nullptr || motion.view_format == DXGI_FORMAT_UNKNOWN) return std::nullopt;
+  color::BoostConstants constants = BoostConstantsFor(motion.vectors, motion.scale_x, motion.scale_y);
+  // The frame before this one carried instead of running the network, so the field it left is the one to add to. Otherwise
+  // the last frame ran the network, there is nothing behind this one, and the field starts here.
+  constants.compose_reset = (surfaces.boost_skipped && surfaces.boost_held ? 0u : 1u);
+  timer_.Begin(list, nr::GpuTimer::Channel::COMPOSE);
+  Transition(list, surfaces.boost_accum_prev.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  const bool recorded = color_.RecordBoostCompose(list, slot,
+                                                  {.first = motion.vectors.resource,
+                                                   .second = surfaces.boost_accum.Get(),
+                                                   .target = surfaces.boost_accum_prev.Get(),
+                                                   .motion_view_format = motion.view_format,
+                                                   .constants = constants,
+                                                   .dispatch = surfaces.plan.boost_motion});
+  Transition(list, surfaces.boost_accum_prev.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  timer_.End(list, false, nr::GpuTimer::Channel::COMPOSE);
+  if (!recorded) return std::nullopt;
+  NoteBoostStep(4u);
+  std::swap(surfaces.boost_accum, surfaces.boost_accum_prev);
+  return motion.vectors.rect;
+}
+
+// Frame skip: the frame the network ran. A small affine look model is fitted from its input to its result per cell of the
+// canvas and per luminance bin (fit, solve), and what that model does not explain is held for the skipped frame to carry
+// (hold). It fails quietly: without a model the skipped frames simply run the network as before.
+void NrPipeline::BoostModel(ID3D12GraphicsCommandList* list, uint32_t slot, ID3D12Resource* output) {
+  Intermediates& surfaces = set_->intermediates;
+  if (output == nullptr || !BoostSurfaces()) {
+    surfaces.boost_held = false;
+    return;
+  }
+  const color::BoostConstants constants = BoostConstantsFor({}, 1.f, 1.f);  // these three read no motion vectors
+  const color::BoostPass fit = {.first = surfaces.model_a.Get(),
+                                .second = output,
+                                .target = surfaces.boost_sums.Get(),
+                                .constants = constants,
+                                .dispatch = {surfaces.boost_cells_x * 8u, surfaces.boost_cells_y * 8u}};
+  const color::BoostPass solve = {.first = surfaces.boost_sums.Get(),
+                                  .target = surfaces.boost_model.Get(),
+                                  .constants = constants,
+                                  .dispatch = {surfaces.boost_cells_x, surfaces.boost_cells_y * BOOST_BINS}};
+  const color::BoostPass hold = {.first = surfaces.model_a.Get(),
+                                 .second = output,
+                                 .third = surfaces.boost_model.Get(),
+                                 .target = surfaces.boost_change.Get(),
+                                 .constants = constants,
+                                 .dispatch = surfaces.plan.canvas};
+  Transition(list, surfaces.boost_sums.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  Transition(list, surfaces.boost_model.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  Transition(list, surfaces.boost_change.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  // Each kernel reads what the one before it wrote, so the three need the UAV barriers between them. Each is timed on
+  // its own channel: which of the three dominates is what says whether fitting less often is worth anything.
+  timer_.Begin(list, nr::GpuTimer::Channel::FIT);
+  bool recorded = color_.RecordBoostFit(list, slot, fit);
+  if (recorded) {
+    NoteBoostStep(0u);
+    UavBarrier(list, surfaces.boost_sums.Get());
+    timer_.End(list, false, nr::GpuTimer::Channel::FIT);
+    timer_.Begin(list, nr::GpuTimer::Channel::SOLVE);
+    recorded = color_.RecordBoostSolve(list, slot, solve);
+  }
+  if (recorded) {
+    NoteBoostStep(1u);
+    UavBarrier(list, surfaces.boost_model.Get());
+    timer_.End(list, false, nr::GpuTimer::Channel::SOLVE);
+    timer_.Begin(list, nr::GpuTimer::Channel::HOLD);
+    recorded = color_.RecordBoostHold(list, slot, hold);
+  }
+  if (recorded) {
+    NoteBoostStep(2u);
+    timer_.End(list, false, nr::GpuTimer::Channel::HOLD);
+  }
+  Transition(list, surfaces.boost_change.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  Transition(list, surfaces.boost_model.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  Transition(list, surfaces.boost_sums.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  surfaces.boost_held = recorded;
+  surfaces.boost_skipped = false;
+}
+
 nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs inputs,
                                         const nr::Controls& controls, const nr::StageSlice& slice) {
-  if (inputs.motion.resource == nullptr) {
+  timer_.Begin(list);
+  const bool had_motion = (inputs.motion.resource != nullptr);
+  if (!had_motion) {
     inputs.motion = {.resource = set_->intermediates.zero_motion.Get()};
     inputs.motion_scale_x = 1.f;
     inputs.motion_scale_y = 1.f;
   }
   inputs.reset_hint = (inputs.reset_hint || set_->intermediates.reset_pending);
+  // Frame skip (MFG-Unlocker's Boost, ported): the frames NR's network does not run put this frame's own input through the
+  // look model the last frame it ran fitted, and add back the detail that fit does not explain, so the result follows this
+  // frame's edges instead of the last frame's. A single pass only: the model and the detail belong to the pass that made them.
+  const bool boost_surfaces = BoostSurfaces();
+  const bool boost_ready = color_.BoostReady() && had_motion && !inputs.reset_hint && slice.first == 0u
+                           && session_.PassCount() == 1u && boost_surfaces;
+  const bool boost = config_.half_rate && boost_ready;
+  if (config_.half_rate && slice.first == 0u) {
+    ++half_rate_frames_;
+    half_rate_asked_ += (config_.half_rate_skip ? 1u : 0u);
+  }
+  // Frame skip: a frame that meant to skip and could not say why, counted. The order of the tests below is the order the
+  // condition above tests them in, so the reason named is the first one that failed.
+  if (config_.half_rate && config_.half_rate_skip && !boost_ready) {
+    if (!color_.BoostReady()) ++skip_misses_.unavailable;
+    else if (!had_motion) ++skip_misses_.no_motion;
+    else if (inputs.reset_hint) ++skip_misses_.reset;
+    else if (slice.first != 0u) ++skip_misses_.split;
+    else if (session_.PassCount() != 1u) ++skip_misses_.multipass;
+    else if (!boost_surfaces) ++skip_misses_.unavailable;
+    else ++skip_misses_.no_history;
+  }
+  // Frame skip: the vectors are accumulated onto the last frame the network ran before either kernel uses them, so that both
+  // the carry and the network after it see the motion over the whole cycle rather than over this frame alone.
+  const std::optional<nr::Rect> advanced = (boost ? BoostAdvance(list, slot, inputs) : std::nullopt);
+  if (advanced && config_.half_rate_skip && set_->intermediates.boost_held) {
+    static bool carried_frame_logged = false;
+    if (!std::exchange(carried_frame_logged, true)) nr::Logf(nr::LogLevel::INFO, "Frame skip: the network does not run this frame");
+    if (const std::optional<nr::EvaluateResult> carried = BoostCarry(list, slot, inputs)) {
+      ++half_rate_carried_;
+      timer_.End(list, true);
+      ReportTiming();
+      return *carried;
+    }
+  }
+  // ... and the frame the network runs again, right after ones it did not, is given the vectors over all of them: its history
+  // never saw the skipped ones, so this frame's own vectors alone would leave its result that many frames behind.
+  if (advanced && !config_.half_rate_skip) {
+    inputs.motion = {.resource = set_->intermediates.boost_accum.Get(), .rect = *advanced};
+  }
   // Plan 5 (v2 design §3.10): passes 2..10's own controls, and their own strengths between passes.
   inputs.later_passes = config_.later_controls;
   inputs.resolver = this;
@@ -734,6 +1022,13 @@ nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_
       inputs, controls, slice);
   if (evaluated.output != nullptr) {
     set_->intermediates.reset_pending = false;  // Plan 3: only a frame that ran NR pays off the owed reset
+    // Frame skip: the model and the detail the next skipped frame carries instead of running the network. A single pass
+    // only, for the same reason the carry is.
+    if (boost) {
+      BoostModel(list, slot, evaluated.output);
+      static bool network_frame_logged = false;
+      if (!std::exchange(network_frame_logged, true)) nr::Logf(nr::LogLevel::INFO, "Frame skip: the network's own frame is recorded");
+    }
   }
   if (evaluated.output != nullptr && faces_ran_ && config_.keep_faces.show_mask) {
     // Show the face mask: the mask tinted into NR's result, which the change field and the decode then carry to the image.
@@ -741,7 +1036,72 @@ nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_
     color_.RecordFacesShow(list, slot, evaluated.output, set_->faces.twin.Get(), set_->intermediates.plan.canvas);
     Transition(list, evaluated.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   }
+  timer_.End(list, false);
+  ReportTiming();
   return evaluated;
+}
+
+void NrPipeline::ReportTiming() {
+  const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+  if (now - last_timing_report_ < std::chrono::seconds(60)) {
+    return;
+  }
+  last_timing_report_ = now;
+  const std::optional<nr::GpuTimer::Report> report = timer_.Take();
+  if (!report) {
+    return;
+  }
+  const nr::GpuTimer::Metrics& network = report->network;
+  const nr::GpuTimer::Metrics& skipped = report->skipped;
+  if (skipped.frames > 0u) {
+    // Both kinds of frame, weighted: what the frames between the network's own cost is what a skip really saves on average, not
+    // the difference between the two -- only some frames are skipped.
+    const uint32_t total = network.frames + skipped.frames;
+    const double average = ((network.ms * network.frames) + (skipped.ms * skipped.frames)) / static_cast<double>(total);
+    nr::Logf(nr::LogLevel::INFO,
+             "Frame skip: NR takes {:.2f} ms of GPU time on the frames the network runs ({} of them) and {:.2f} ms on the ones it skips ({} of them); {:.2f} ms "
+             "a frame on average, against {:.2f} ms with none skipped",
+             network.ms, network.frames, skipped.ms, skipped.frames, average, network.ms);
+  } else if (network.frames > 0u) {
+    nr::Logf(nr::LogLevel::INFO, "NR takes {:.2f} ms of GPU time a frame ({} frames)", network.ms, network.frames);
+  }
+  if (report->chain.frames > 0u) {
+    // Everything Uplift records for a frame -- the encode, NR, the change field, the look stage and the decode -- so the
+    // add-on's own share of the frame time is a number to set beside the network's.
+    nr::Logf(nr::LogLevel::INFO, "Uplift: the whole chain takes {:.2f} ms of GPU time a frame ({} recordings)", report->chain.ms, report->chain.frames);
+  }
+  if (report->carry.frames > 0u) {
+    // The kernels told apart: the ones a skipped frame runs, then the compose the network's own frame runs before its
+    // network. Whichever number dominates is the one worth making cheaper.
+    nr::Logf(nr::LogLevel::INFO,
+             "Frame skip: the skipped frames cost {:.2f} ms carrying the model; the network's own frames cost {:.2f} ms composing "
+             "the cycle's motion",
+             report->carry.ms, report->compose.ms);
+  }
+  if (report->fit.frames > 0u) {
+    // A network frame's look model told apart: fit reads the whole canvas, solve reads its cells, and hold reads the
+    // canvas again. Whichever dominates is the one a coarser grid, or fitting less often, would take the time out of.
+    nr::Logf(nr::LogLevel::INFO,
+             "Frame skip: the network's own frames cost {:.2f} ms fitting the model, {:.2f} ms solving it and {:.2f} ms holding what it does not explain",
+             report->fit.ms, report->solve.ms, report->hold.ms);
+  }
+  if (half_rate_frames_ > 0u) {
+    // The cycle's own arithmetic first: a share that is not one frame in the period means the phase is not advancing once a
+    // present, and a share that is right means the frames are falling back after it asked them not to.
+    nr::Logf(nr::LogLevel::INFO, "Frame skip: the cycle asked {} of {} frames to carry without the network and {} did; {} ran it instead", half_rate_asked_,
+             half_rate_frames_, half_rate_carried_, half_rate_frames_ - half_rate_carried_);
+    half_rate_frames_ = 0u;
+    half_rate_asked_ = 0u;
+    half_rate_carried_ = 0u;
+  }
+  if (skip_misses_.Total() > 0u) {
+    nr::Logf(nr::LogLevel::INFO,
+             "Frame skip: {} frames ran the network instead of carrying: {} without vectors, {} after a reset, {} in a later group, {} of a multi-pass chain, "
+             "{} without surfaces, {} with no model held",
+             skip_misses_.Total(), skip_misses_.no_motion, skip_misses_.reset, skip_misses_.split, skip_misses_.multipass,
+             skip_misses_.unavailable, skip_misses_.no_history);
+    skip_misses_ = {};
+  }
 }
 
 void NrPipeline::NoteEncoding(color::Encoding encoding, float input_scale) {
@@ -784,6 +1144,7 @@ bool NrPipeline::Encode(ID3D12GraphicsCommandList* list, uint32_t slot, color::E
 
 PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const PresentTarget& target,
                                          const nr::Controls& controls, bool reset_hint, const WorkLayout& layout, const ChainPart& part) {
+  ChainScope chain{timer_, list};
   if (session_.State() != nr::SessionState::ACTIVE) return {.reason = "inactive"};
   if (list == nullptr || target.resource == nullptr || part.set >= STAGE_SETS) return {.reason = "invalid input"};
   set_ = &sets_[part.set];
@@ -802,29 +1163,6 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   if (!timeline_.IsComplete(slot_marks_[slot])) return {.reason = "descriptors busy"};
   const nr::Size size = {static_cast<uint32_t>(description.Width), description.Height};
   const WorkLayout work = Resolve(layout, size);
-  if (const std::string_view problem = EnsureIntermediates({
-          .output = size,
-          .image = work.image,
-          .canvas = work.canvas,
-          .copy_format = format->copy_format,
-          .source_bytes_per_pixel = format->bytes_per_pixel,
-          .kind = TargetKind::PRESENT,
-          .foveation = work.foveation,
-      });
-      !problem.empty()) {
-    return {.reason = problem};
-  }
-  last_present_frame_ = frame;
-  const bool reduced = (work.image != size);
-  const bool look_ready = EnsureLook(LookPlanFor(work.image));  // before the fit, like the set
-  CommitSlot(slot);
-  const float input_scale = color::InputScale(target.encoding, target.diffuse_white_nits, config_.fixes.linear_unit_nits);
-  NoteEncoding(target.encoding, input_scale);
-  const uint32_t options = ShaderOptions();
-  // v2 design §3.14, key decision 10: the Present path never has the game's own exposure.
-  NoteMeterBasis(part.slice.stage, target.encoding, input_scale);
-  const ExposureChoice exposure = ChooseExposure(target.encoding, nullptr, 1.f);
-  ID3D12Resource* const source_copy = set_->intermediates.source_copy.Get();
   // Amendment 7, deepened by I-2: the copy of the game's motion vectors made for this very frame, when
   // there is one, from the slot the frame it was made for selects (PresentMotionSlotOf).
   nr::FrameInputs inputs = {.ui_correction = config_.present_ui_correction, .reset_hint = reset_hint};
@@ -865,6 +1203,30 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
       motion_source = MotionSource::LAUNCHPAD;
     }
   }
+  if (const std::string_view problem = EnsureIntermediates({
+          .output = size,
+          .image = work.image,
+          .canvas = work.canvas,
+          .copy_format = format->copy_format,
+          .source_bytes_per_pixel = format->bytes_per_pixel,
+          .kind = TargetKind::PRESENT,
+          .boost_motion = MotionExtentOf(inputs.motion.resource),
+          .foveation = work.foveation,
+      });
+      !problem.empty()) {
+    return {.reason = problem};
+  }
+  last_present_frame_ = frame;
+  const bool reduced = (work.image != size);
+  const bool look_ready = EnsureLook(LookPlanFor(work.image));  // before the fit, like the set
+  CommitSlot(slot);
+  const float input_scale = color::InputScale(target.encoding, target.diffuse_white_nits, config_.fixes.linear_unit_nits);
+  NoteEncoding(target.encoding, input_scale);
+  const uint32_t options = ShaderOptions();
+  // v2 design §3.14, key decision 10: the Present path never has the game's own exposure.
+  NoteMeterBasis(part.slice.stage, target.encoding, input_scale);
+  const ExposureChoice exposure = ChooseExposure(target.encoding, nullptr, 1.f);
+  ID3D12Resource* const source_copy = set_->intermediates.source_copy.Get();
   if (motion_source != MotionSource::LAUNCHPAD && launchpad_motion_.texture) {
     RetireLaunchpadMotion();  // Launchpad's vectors stopped coming: its copy goes, behind the recordings that used it
   }
@@ -892,6 +1254,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   }
   inputs.reset_hint = (inputs.reset_hint || motion_source != set_->present_motion);  // spec §9: a provider switch
   set_->present_motion = motion_source;
+  chain.Start();
   // 1. Source copy ← target (Plan 3, unchanged).
   Transition(list, source_copy, PIXEL_AND_COMPUTE_READ, D3D12_RESOURCE_STATE_COPY_DEST);
   list->CopyResource(source_copy, target.resource);
@@ -963,6 +1326,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
 PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavTarget& target,
                                      const nr::FrameInputs& inputs, const nr::Controls& controls, const WorkLayout& layout,
                                      const ChainPart& part) {
+  ChainScope chain{timer_, list};
   if (session_.State() != nr::SessionState::ACTIVE) return {.reason = "inactive"};
   if (list == nullptr || target.resource == nullptr || part.set >= STAGE_SETS) return {.reason = "invalid input"};
   set_ = &sets_[part.set];
@@ -989,6 +1353,7 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
           .copy_format = format->copy_format,
           .source_bytes_per_pixel = format->bytes_per_pixel,
           .kind = TargetKind::UAV,
+          .boost_motion = MotionExtentOf(inputs.motion.resource),
           .foveation = work.foveation,
       });
       !problem.empty()) {
@@ -1005,6 +1370,7 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   ID3D12Resource* const source_copy = set_->intermediates.source_copy.Get();
   const MotionSource motion_source = (inputs.motion.resource != nullptr ? MotionSource::DIRECT : MotionSource::NONE);
 
+  chain.Start();
   // 1. Source copy ← the region. DLSS leaves its Output in UNORDERED_ACCESS, and so does Uplift.
   Transition(list, target.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
   Transition(list, source_copy, COMPUTE_READ, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1081,6 +1447,7 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
 
 PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const UavTarget& color, const nr::FrameInputs& inputs,
                                        const nr::Controls& controls, const WorkLayout& layout, const ChainPart& part) {
+  ChainScope chain{timer_, list};
   if (session_.State() != nr::SessionState::ACTIVE) return {.reason = "inactive"};
   if (list == nullptr || color.resource == nullptr || part.set >= STAGE_SETS) return {.reason = "invalid input"};
   set_ = &sets_[part.set];
@@ -1116,6 +1483,7 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
           .kind = TargetKind::PRE_SR,
           .private_color = {static_cast<uint32_t>(description.Width), description.Height},
           .canvas_motion = motion_format.has_value(),
+          .boost_motion = MotionExtentOf(inputs.motion.resource),
           .foveation = work.foveation,
       });
       !problem.empty()) {
@@ -1135,6 +1503,7 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
                  .primaries = (options & color::shader_options::PRIMARIES_MASK), .input_scale = input_scale},
                 exposure);
   }
+  chain.Start();
   // 1. Encode the region straight from the game's Color: it is only read, never copied or transitioned.
   const color::EncodePass encode = {
       .source = color.resource,

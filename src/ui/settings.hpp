@@ -25,6 +25,22 @@ inline constexpr float SKIN_SAME_AS_STRUCTURE = -1.f;
 inline constexpr uint32_t CONFIG_VERSION = 3u;
 
 // v2 design §5. Every combo is stored as its index, in the order below.
+// Frame skip (MFG-Unlocker's Boost, ported): NR's network runs on one frame of the setting's cycle, and the frames it skips carry the last change it made.
+enum class HalfRate : uint32_t {
+  OFF = 0u,          // the network runs on every frame
+  SKIP = 1u,         // one frame in two
+  SKIP_THREE = 2u,   // one frame in three
+  SKIP_FOUR = 3u,    // one frame in four
+};
+
+// How many presents the network runs on one of: 2, 3 or 4 for every 2nd, 3rd or 4th frame, 1 when frame skip is off.
+[[nodiscard]] constexpr uint32_t HalfRatePeriod(HalfRate rate) {
+  if (rate == HalfRate::SKIP_FOUR) return 4u;
+  if (rate == HalfRate::SKIP_THREE) return 3u;
+  if (rate == HalfRate::SKIP) return 2u;
+  return 1u;
+}
+
 enum class PlacementSource : uint32_t {
   AUTO = 0u,     // after DLSS once the game has used DLSS, else Present
   DLSS = 1u,     // after DLSS only
@@ -327,6 +343,7 @@ struct Settings {
   bool keep_faces_after_dlss = false;
   bool keep_faces_present = false;
   bool pre_upscale = false;  // Before upscaling (pre-SR), off until E13
+  HalfRate half_rate = HalfRate::OFF;  // NR on one frame of the cycle: a skipped frame carries the last change the network made, along the motion vectors
   std::array<PassSettings, MAX_PASSES - 1u> passes = {};  // passes 2..10
   look::LookSettings look;                                // Shape result and its rows
   MaskMode mask = MaskMode::AUTO;

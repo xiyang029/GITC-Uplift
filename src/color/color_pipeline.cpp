@@ -17,6 +17,11 @@
 #include "meter_cs.h"
 #include "motion_cs.h"
 #include "nr/log.hpp"
+#include "boost_carry_cs.h"
+#include "boost_compose_cs.h"
+#include "boost_fit_cs.h"
+#include "boost_hold_cs.h"
+#include "boost_solve_cs.h"
 #include "resolve_cs.h"
 
 namespace uplift::color {
@@ -52,7 +57,11 @@ constexpr uint32_t FACES_SHOW_TABLE = 17u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_FIRST_TABLE = 18u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_TABLE = 19u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_SWAPPED_TABLE = 20u * TABLE_SIZE;
-constexpr uint32_t DESCRIPTORS_PER_SLOT = 21u * TABLE_SIZE;
+// Frame skip: one table per kernel, so a frame's kernels never share descriptors (the GPU has not run the earlier
+// dispatch by the time the CPU writes the next one's). The tables follow BoostKernel's own order.
+constexpr uint32_t BOOST_TABLE_FIRST = 21u;
+constexpr uint32_t BOOST_KERNELS = 5u;
+constexpr uint32_t DESCRIPTORS_PER_SLOT = (BOOST_TABLE_FIRST + BOOST_KERNELS) * TABLE_SIZE;
 constexpr uint32_t STABILIZE_CUT = 0u;  // look_stabilize_cs.hlsl's modes and flags
 constexpr uint32_t STABILIZE_LEVELS = 1u;
 constexpr uint32_t STABILIZE_DETAIL = 2u;
@@ -213,6 +222,24 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
     faces_pipeline_.Reset();
     nr::Logf(nr::LogLevel::WARN, "Keep faces is unavailable on this device: its pipeline could not be built ({:#010x})", static_cast<uint32_t>(result));
   }
+  // Frame skip: optional as well. Without them NR runs as before and frame skip is unavailable (BoostReady).
+  const auto build_boost = [&](const void* bytecode, size_t length, const char* name, uint32_t kernel) {
+    const D3D12_COMPUTE_PIPELINE_STATE_DESC description = {
+        .pRootSignature = root_signature_.Get(),
+        .CS = {.pShaderBytecode = bytecode, .BytecodeLength = length},
+    };
+    if (const HRESULT result = device->CreateComputePipelineState(&description, IID_PPV_ARGS(boost_pipelines_[kernel].GetAddressOf()));
+        FAILED(result)) {
+      boost_pipelines_[kernel].Reset();
+      nr::Logf(nr::LogLevel::WARN, "Frame skip is unavailable on this device: its {} pipeline could not be built ({:#010x})", name,
+               static_cast<uint32_t>(result));
+    }
+  };
+  build_boost(g_boost_fit_cs, sizeof(g_boost_fit_cs), "fit", BOOST_FIT);
+  build_boost(g_boost_solve_cs, sizeof(g_boost_solve_cs), "solve", BOOST_SOLVE);
+  build_boost(g_boost_hold_cs, sizeof(g_boost_hold_cs), "hold", BOOST_HOLD);
+  build_boost(g_boost_carry_cs, sizeof(g_boost_carry_cs), "carry", BOOST_CARRY);
+  build_boost(g_boost_compose_cs, sizeof(g_boost_compose_cs), "compose", BOOST_COMPOSE);
   D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
   uav_loads_ = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options)))
                && options.TypedUAVLoadAdditionalFormats != FALSE;
@@ -351,6 +378,55 @@ bool ColorPipeline::RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot,
   };
   DispatchCompute(list, motion_pipeline_.Get(), constants, base, pass.canvas.width, pass.canvas.height);
   return true;
+}
+
+bool ColorPipeline::BoostReady() const {
+  return std::ranges::all_of(boost_pipelines_, [](const Microsoft::WRL::ComPtr<ID3D12PipelineState>& pipeline) { return pipeline != nullptr; });
+}
+
+bool ColorPipeline::RecordBoost(ID3D12GraphicsCommandList* list, uint32_t slot, uint32_t kernel, const BoostPass& pass,
+                                std::initializer_list<View> shader_resources, std::initializer_list<View> unordered) {
+  if (!SlotInRange(slot, "RecordBoost")) return false;
+  ID3D12PipelineState* const pipeline = boost_pipelines_[kernel].Get();
+  if (pipeline == nullptr) return false;
+  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + (BOOST_TABLE_FIRST + kernel) * TABLE_SIZE;
+  WriteTable(base, shader_resources, unordered);
+  const std::array<uint32_t, 21u> constants = std::bit_cast<std::array<uint32_t, 21u>>(pass.constants);
+  DispatchCompute(list, pipeline, constants, base, pass.dispatch.width, pass.dispatch.height);
+  return true;
+}
+
+bool ColorPipeline::RecordBoostFit(ID3D12GraphicsCommandList* list, uint32_t slot, const BoostPass& pass) {
+  // t0 the network's input, t1 its output -> u0 the sums of each cell and bin (RGBA32F: 6 texels per cell and bin).
+  return RecordBoost(list, slot, BOOST_FIT, pass, {{pass.first}, {pass.second}},
+                     {{pass.target, DXGI_FORMAT_R32G32B32A32_FLOAT}});
+}
+
+bool ColorPipeline::RecordBoostSolve(ID3D12GraphicsCommandList* list, uint32_t slot, const BoostPass& pass) {
+  // t0 the sums -> u0 the model (RGBA32F: 3 texels per cell and bin).
+  return RecordBoost(list, slot, BOOST_SOLVE, pass, {{pass.first, DXGI_FORMAT_R32G32B32A32_FLOAT}},
+                     {{pass.target, DXGI_FORMAT_R32G32B32A32_FLOAT}});
+}
+
+bool ColorPipeline::RecordBoostHold(ID3D12GraphicsCommandList* list, uint32_t slot, const BoostPass& pass) {
+  // t0 the input, t1 the output, t2 the model -> u0 what the model does not explain, and the input's luminance in alpha.
+  return RecordBoost(list, slot, BOOST_HOLD, pass,
+                     {{pass.first}, {pass.second}, {pass.third, DXGI_FORMAT_R32G32B32A32_FLOAT}},
+                     {{pass.target, DXGI_FORMAT_R16G16B16A16_FLOAT}});
+}
+
+bool ColorPipeline::RecordBoostCarry(ID3D12GraphicsCommandList* list, uint32_t slot, const BoostPass& pass) {
+  // t0 this frame's input, t1 the held detail, t2 the model, t3 the game's vectors -> u0 the network's stand-in output.
+  return RecordBoost(list, slot, BOOST_CARRY, pass,
+                     {{pass.first}, {pass.second}, {pass.third, DXGI_FORMAT_R32G32B32A32_FLOAT},
+                      {pass.motion, pass.motion_view_format}},
+                     {{pass.target, DXGI_FORMAT_R16G16B16A16_FLOAT}});
+}
+
+bool ColorPipeline::RecordBoostCompose(ID3D12GraphicsCommandList* list, uint32_t slot, const BoostPass& pass) {
+  // t0 the game's vectors now, t1 the ones the field held -> u0 the motion over both, in the vectors' own units.
+  return RecordBoost(list, slot, BOOST_COMPOSE, pass, {{pass.first, pass.motion_view_format}, {pass.second, DXGI_FORMAT_R32G32_FLOAT}},
+                     {{pass.target, DXGI_FORMAT_R32G32_FLOAT}});
 }
 
 bool ColorPipeline::RecordDecode(ID3D12GraphicsCommandList* list, uint32_t slot, const DecodePass& pass) {

@@ -545,6 +545,41 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
   return changed;
 }
 
+// Frame skip (MFG-Unlocker's Boost, ported): NR's network on one frame of the setting's cycle, the frames between carrying the last change it made. It sits
+// under the NR stage row it qualifies; the Vulkan route does not record through this pipeline, so it cannot skip there.
+bool DrawHalfRateRow(const OverlayView& view, Settings* settings) {
+  gui::PushID("HalfRate");
+  static constexpr std::array<const char*, 4> OPTIONS = {"Off", "Every 2nd frame", "Every 3rd frame", "Every 4th frame"};
+  std::array<std::string_view, 4> tips = {
+      "NR's network runs on every frame.",
+      "NR's network runs on every other frame. A skipped frame carries the last change the network made along the motion vectors, so it still shows NR's "
+      "result rather than the game's raw image.",
+      "NR's network runs on one frame in three. The other two carry the last change the network made along the motion vectors, so they still show NR's "
+      "result rather than the game's raw image, but an approximation two frames old is on screen two frames in three.",
+      "NR's network runs on one frame in four. The other three carry the last change the network made along the motion vectors, so they still show NR's "
+      "result rather than the game's raw image, but an approximation three frames old is on screen three frames in four.",
+  };
+  std::array<std::string_view, 4> why = {};
+  if (view.dlss_explicit) {
+    constexpr std::string_view VULKAN = "Frame skip is not available on this Vulkan route yet.";
+    for (size_t i = 1u; i < why.size(); ++i) why[i] = VULKAN;
+  }
+  bool changed = false;
+  const int shown = static_cast<int>(settings->half_rate);
+  if (const int clicked = RadioRow("Frame skip", OPTIONS, why, tips, shown); clicked >= 0 && clicked != shown) {
+    settings->half_rate = static_cast<HalfRate>(clicked);
+    changed = true;
+  }
+  if (settings->half_rate != HalfRate::OFF) {
+    if (widgets::ResetButton("HalfRate", OPTIONS[0])) {
+      settings->half_rate = HalfRate::OFF;
+      changed = true;
+    }
+  }
+  gui::PopID();
+  return changed;
+}
+
 // Plan 14: the Motion vectors row -- Off / DLSS / Launchpad / Lumenite (2026-10-08) -- from Setup, as the NR stage row.
 bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* state) {
   gui::PushID("MotionVectors");
@@ -797,6 +832,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     changed = true;
   }
   changed |= DrawSourceRow(view, settings, state);
+  changed |= DrawHalfRateRow(view, settings);
   changed |= DrawMotionRow(view, settings, state);
   changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state);
   changed |= DrawRow(*FindSetting("Preset"), view, settings, state);

@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
@@ -194,6 +195,50 @@ struct ShapePass {
   bool sdr = false;
 };
 
+// Frame skip (MFG-Unlocker's Boost, ported). On each frame the network runs, the fit and the solve build a small affine
+// look model from its input to its output (per cell of the canvas and per luminance bin), and the hold keeps what that
+// model does not explain. On every frame it skips, the compose accumulates the game's motion over the frames since, and
+// the carry applies the model to its own input there and adds the held detail where the surface still matches.
+// ponytail: the fit's bins (8) and lambda (0.005) are MFG's, and nothing else sets them, so they are fixed here.
+struct BoostConstants {
+  int32_t motion_x = 0;              // the game's motion vectors: this rect of the motion texture
+  int32_t motion_y = 0;
+  uint32_t motion_width = 0u;
+  uint32_t motion_height = 0u;
+  uint32_t motion_extent_x = 0u;  // ... that texture's own size, which the held vectors are kept at
+  uint32_t motion_extent_y = 0u;
+  uint32_t extent_width = 0u;     // ... and the canvas the model is fitted on
+  uint32_t extent_height = 0u;
+  float motion_scale_x = 1.f;     // MV.Scale x MotionScale: a vector's pixels, in its rect
+  float motion_scale_y = 1.f;
+  float stable_below = 0.02f;     // a texel whose neighbours (nine of them, two texels apart) moved less than this, keeps the
+  float unstable_above = 0.08f;   // held detail whole ... and past this it has lost all of it (MFG's pair is 0.04/0.12)
+  uint32_t cell = 0u;             // the grid: cell x cell texels per cell, 8 luminance bins
+  uint32_t bins = 0u;
+  uint32_t cells_x = 0u;
+  uint32_t cells_y = 0u;
+  float lambda = 0.005f;          // the fit's pull toward the identity plus the mean change
+  // The three thresholds the vectors themselves set, per frame of the cycle: the kernels are handed vectors accumulated over
+  // the whole of it, so their caller multiplies these by its length rather than let a cycle's worth read as one frame's.
+  float mv_stable_below = 24.f;   // a vector shorter than this many canvas pixels carries the held detail whole
+  float mv_unstable_above = 64.f; // ... and past this many it carries none of it
+  float mv_field_above = 32.f;    // ... and so does a vector that disagrees with the field where it lands
+  uint32_t compose_reset = 0u;    // 1: the accumulated motion starts over here (the network just ran: nothing to add to)
+};
+static_assert(sizeof(BoostConstants) == 21u * sizeof(uint32_t));  // nr_boost_common.hlsli's cbuffer, field for field
+
+// One of the five kernels (see nr_boost_common.hlsli). Which of the resources a kernel reads is fixed per entry point.
+struct BoostPass {
+  ID3D12Resource* first = nullptr;   // Fit/Hold/Carry: the model input. Solve: the sums. Compose: the game's vectors
+  ID3D12Resource* second = nullptr;  // Fit/Hold: the network output. Carry: the held detail. Compose: the held vectors
+  ID3D12Resource* third = nullptr;   // Hold and Carry: the model
+  ID3D12Resource* motion = nullptr;  // Carry: the game's vectors
+  ID3D12Resource* target = nullptr;  // UNORDERED_ACCESS
+  DXGI_FORMAT motion_view_format = DXGI_FORMAT_UNKNOWN;
+  BoostConstants constants;
+  nr::Size dispatch;                 // the pixels the kernels cover, at 8x8 threads
+};
+
 // v2 design §3.10: a pass's own strengths between NR passes.
 struct ResolveStrengthsPass {
   ID3D12Resource* given = nullptr;     // the pass's input, NON_PIXEL_SHADER_RESOURCE
@@ -259,6 +304,13 @@ class ColorPipeline {
   bool RecordDetail(ID3D12GraphicsCommandList* list, uint32_t slot, const StabilizePass& pass);
   bool RecordShape(ID3D12GraphicsCommandList* list, uint32_t slot, const ShapePass& pass);
   bool RecordResolve(ID3D12GraphicsCommandList* list, uint32_t slot, const ResolveStrengthsPass& pass);
+  // Frame skip: one entry per kernel, into pass.target. Each is false (logged, nothing recorded) when slot is out of
+  // range or without its pipeline, and Initialize does not fail without them (BoostReady).
+  bool RecordBoostFit(ID3D12GraphicsCommandList* list, uint32_t slot, const BoostPass& pass);
+  bool RecordBoostSolve(ID3D12GraphicsCommandList* list, uint32_t slot, const BoostPass& pass);
+  bool RecordBoostHold(ID3D12GraphicsCommandList* list, uint32_t slot, const BoostPass& pass);
+  bool RecordBoostCarry(ID3D12GraphicsCommandList* list, uint32_t slot, const BoostPass& pass);
+  bool RecordBoostCompose(ID3D12GraphicsCommandList* list, uint32_t slot, const BoostPass& pass);
   // Keep faces: the pyramid of the pass's weighted change (one dispatch per level, a UAV barrier on the atlas between them), the combine, and Show the face
   // mask's tint of the mask (NON_PIXEL_SHADER_RESOURCE) into the target (UNORDERED_ACCESS) at `size`. Each: false (logged, nothing recorded) when slot is out
   // of range. They need typed UAV loads (SupportsUavLoads).
@@ -275,16 +327,22 @@ class ColorPipeline {
   [[nodiscard]] bool SupportsUavLoads() const { return uav_loads_; }
   // Keep faces fix round 1 (C3): its pipeline was built (Initialize does not fail without it).
   [[nodiscard]] bool FacesReady() const { return faces_pipeline_ != nullptr; }
+  // Frame skip: all five of its pipelines were built (Initialize does not fail without them).
+  [[nodiscard]] bool BoostReady() const;
 
  private:
-  [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE CpuDescriptor(uint32_t index) const;
-  [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE GpuDescriptor(uint32_t index) const;
-  void WriteShaderResource(uint32_t index, ID3D12Resource* resource, DXGI_FORMAT format);
-  void WriteUnorderedAccess(uint32_t index, ID3D12Resource* resource, DXGI_FORMAT format);
   struct View {
     ID3D12Resource* resource = nullptr;
     DXGI_FORMAT format = DXGI_FORMAT_R16G16B16A16_FLOAT;  // also a null view's
   };
+  enum BoostKernel : uint32_t { BOOST_FIT = 0u, BOOST_SOLVE, BOOST_HOLD, BOOST_CARRY, BOOST_COMPOSE };
+  // Records one half-rate kernel at its table, with the pass's constants and dispatch.
+  bool RecordBoost(ID3D12GraphicsCommandList* list, uint32_t slot, uint32_t kernel, const BoostPass& pass,
+                   std::initializer_list<View> shader_resources, std::initializer_list<View> unordered);
+  [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE CpuDescriptor(uint32_t index) const;
+  [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE GpuDescriptor(uint32_t index) const;
+  void WriteShaderResource(uint32_t index, ID3D12Resource* resource, DXGI_FORMAT format);
+  void WriteUnorderedAccess(uint32_t index, ID3D12Resource* resource, DXGI_FORMAT format);
   // The exposure SRV: the texture's own float format (typeless read as float), or a null R32_FLOAT view.
   [[nodiscard]] static View ExposureView(ID3D12Resource* exposure);
   // One pass's table: `shader_resources` into t0.., `unordered` into u0..; every other slot gets a null view.
@@ -306,6 +364,8 @@ class ColorPipeline {
   Microsoft::WRL::ComPtr<ID3D12PipelineState> shape_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> resolve_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> faces_pipeline_;  // Keep faces
+  // Frame skip: fit, solve, hold, carry, compose (BoostKernel).
+  std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 5u> boost_pipelines_;
   // A null entry records a format whose pipeline could not be built, so it is not retried every frame.
   std::unordered_map<DXGI_FORMAT, Microsoft::WRL::ComPtr<ID3D12PipelineState>> decode_pipelines_;
   mutable std::unordered_map<DXGI_FORMAT, bool> typed_uav_store_;
