@@ -88,6 +88,9 @@ struct AddonState32 {
   ui::Settings settings;
   ui::EnabledPoller poller;
   ui::OverlayState overlay;
+  // ReShade calls the overlay event on every frame, open or not, so the panel draws only while its overlay is
+  // open. Written by OnOpenOverlay; the initial value suits a ReShade that starts with the overlay closed.
+  bool overlay_open = false;
   std::unordered_map<api::device*, DeviceEntry32> devices;
   std::vector<api::effect_runtime*> runtimes;
   addon::NrClaim claim;  // at most one device runs NR
@@ -224,6 +227,7 @@ void OnDestroyDevice(api::device* device) {
 bool OnOpenOverlay(api::effect_runtime* /*runtime*/, bool open, api::input_source /*source*/) {
   try {
     const std::unique_lock lock(g_state->mutex);
+    g_state->overlay_open = open;
     if (!open) {
       // Plan 6 (D6): defaults_view is session-only and survives closing the overlay; a slider held as it closes must not stay
       // coalesced, so everything else about the panel still resets.
@@ -401,6 +405,9 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState32& state = *g_state;
+    if (!state.overlay_open) {
+      return;
+    }
     const auto now = std::chrono::steady_clock::now();
     ui::OverlayView view = {.status_line = "OFF", .last_key_pressed = runtime->last_key_pressed(), .placement_line = "Placement: NR is off", .motion_line = "Motion vectors: NR is off"};
     view.dlss_unavailable = std::string(ui::BRIDGED_DLSS_REASON);  // no DLSS placement without a Direct3D 12 game
@@ -424,6 +431,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       facts.dlss_unavailable = view.dlss_unavailable;
       ui::FinishSetup(&view, &state.overlay, runtime->get_device(), facts, now);
     }
+    ui::BeginPanel();
     if (ui::DrawOverlay(view, &state.settings, &state.overlay)) {
       SaveAndApply(&state);
     } else if (state.overlay.language_changed) {
@@ -433,6 +441,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     if (std::exchange(state.overlay.retry_now, false)) {
       state.front->RetryNow(helper_device);
     }
+    ui::EndPanel();
   }
   UPLIFT_CATCH("draw_overlay", )
 }
@@ -541,7 +550,10 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   reshade::register_event<reshade::addon_event::reshade_present>(OnReshadePresent);
   addon::RegisterCreateDeviceEvent(&OnCreateDevice);
   addon::RegisterCreateSwapchainEvent(reshade_vulkan_events);  // Plan 11: copy access on a Vulkan swap chain's images (event 97, raw)
-  reshade::register_overlay("GITC Uplift", OnDrawOverlay);
+  // The event rather than register_overlay: the panel opens its own window (ui::BeginPanel). ReShade calls this
+  // one every frame, open or not (runtime_gui.cpp's has_addon_event early-out), which is why OnDrawOverlay
+  // checks `overlay_open` first.
+  reshade::register_event<reshade::addon_event::reshade_overlay>(OnDrawOverlay);
 
   nr::Logf(nr::LogLevel::INFO, "Uplift {} (32-bit) registered (ReShade API {}, Dear ImGui {}, ReShade {})", UPLIFT_VERSION,
            RESHADE_API_VERSION, IMGUI_VERSION_NUM,

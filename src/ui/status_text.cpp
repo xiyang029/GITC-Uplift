@@ -459,16 +459,22 @@ std::string FormatDlssLive(const std::string& mode_name, const std::string& pres
   // never be translated. The sizes come from the game's own create, so they are what DLSS is rendering
   // into -- the one place a render-scale override becomes visible.
   const bool sized = (render_width != 0u && render_height != 0u && output_width != 0u && output_height != 0u);
+  // The mode carries the share of the output it renders at, so an override reads off the name: 40 % beside
+  // Performance is the override answering, 50 % DLSS's own ratio for that mode. It comes from the created sizes,
+  // so a game that ignored the override shows what it did rather than what was asked for.
+  const std::string named = (sized && !mode_name.empty())
+                                ? std::format("{} ({}%)", mode_name, (render_width * 100u + output_width / 2u) / output_width)
+                                : mode_name;
   std::string line;
   if (driver_preset.empty() && preset_name.empty()) {
     if (mode_name.empty()) return {};
-    line = std::format("DLSS: {}", mode_name);
+    line = std::format("DLSS: {}", named);
   } else if (driver_preset.empty()) {
-    line = std::format("DLSS: {} (preset {})", mode_name, preset_name);
+    line = std::format("DLSS: {} (preset {})", named, preset_name);
   } else if (preset_name.empty()) {
     line = std::format("DLSS: NVIDIA App preset {} wins", driver_preset);
   } else {
-    line = std::format("DLSS: {} (preset {}) · NVIDIA App preset {} wins", mode_name, preset_name, driver_preset);
+    line = std::format("DLSS: {} (preset {}) · NVIDIA App preset {} wins", named, preset_name, driver_preset);
   }
   if (sized) line += std::format(" {}x{} -> {}x{}", render_width, render_height, output_width, output_height);
   // The sizes are a plain suffix rather than a format field: Localize matches the sentence, and a

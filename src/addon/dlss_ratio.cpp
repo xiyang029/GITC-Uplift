@@ -24,10 +24,7 @@ std::unordered_map<const NVSDK_NGX_Parameter*, OptimalSettingsFn> g_originals;
 
 // DLSS's own render ratios as denominators (the OptimalSettings helper's table), by ui::DlssPresetMode.
 // Only used when the block carried no snippet callback to ask first.
-float DefaultDenominator(unsigned mode) {
-  constexpr float DENOMINATORS[6] = {1.f, 1.3f, 1.5f, 1.7f, 2.f, 3.f};
-  return DENOMINATORS[mode];
-}
+constexpr float DLSS_DENOMINATORS[6] = {1.f, 1.3f, 1.5f, 1.7f, 2.f, 3.f};
 
 // Rescales one dynamic-resolution bound the snippet answered, by how far the override moved the optimal
 // size; untouched when the snippet never set it (a game then applies its own bounds).
@@ -79,7 +76,7 @@ NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* block) 
       }
       return result;
     }
-    scale = 1.f / DefaultDenominator(mode);  // no snippet answer: DLSS's own table
+    scale = 1.f / DLSS_DENOMINATORS[mode];  // no snippet answer: DLSS's own table
   }
   // The override's answer: the game's selected size times the render scale.
   const unsigned optimal_w = (unsigned)(width * scale);
@@ -94,10 +91,8 @@ NVSDK_NGX_Result NVSDK_CONV OptimalSettingsCallback(NVSDK_NGX_Parameter* block) 
     // No snippet answer to rescale: DLSS's own 0.5-1.0 DRS window, slid proportionally with the
     // override (a half-and-half mix of the override and the table's window is what some engines
     // misread into an illegal size). The bounds stay inside [optimal, output].
-    const unsigned min_w = std::max(optimal_w, std::min(width, width / 2u));
-    const unsigned min_h = std::max(optimal_h, std::min(height, height / 2u));
-    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, std::min(min_w, width));
-    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, std::min(min_h, height));
+    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, std::clamp(optimal_w, width / 2u, width));
+    block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, std::clamp(optimal_h, height / 2u, height));
     block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, std::max(optimal_w, width));
     block->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, std::max(optimal_h, height));
     block->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);

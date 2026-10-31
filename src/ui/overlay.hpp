@@ -118,9 +118,14 @@ struct OverlayState {
 // `view->setup` and `view->live`; `view->card` must be set already. `device`: the shown device's identity. `facts`' views must outlive the draw.
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now);
 
-// Draws the Uplift panel (spec §12) inside the window ReShade opened for it, editing `settings`
+// Draws the Uplift panel (spec §12) inside the panel's own window, editing `settings`
 // in place. Returns true when a setting changed; the caller then sanitises, saves and applies.
 bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state);
+
+// The panel's own window (ReShade passes a registered overlay's window no flags of the add-on's, so one that
+// wants no title bar and no border opens its own). BeginPanel must be followed by EndPanel on every path.
+void BeginPanel();
+void EndPanel();
 
 // 1.1.0: a hotkey capture the overlay has not shown for a moment (Esc closed ReShade's overlay, or another tab is open) ends, keeping the old hotkey, so
 // the hotkey (which a capture holds off) works again. Called at each present.

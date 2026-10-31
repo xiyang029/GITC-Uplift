@@ -359,6 +359,9 @@ struct AddonState {
   ui::EnabledPoller poller;
   ui::ControlsCoalescer coalescer;
   ui::OverlayState overlay;
+  // ReShade calls the overlay event on every frame, open or not, so the panel draws only while its overlay is
+  // open. Written by OnOpenOverlay; the initial value suits a ReShade that starts with the overlay closed.
+  bool overlay_open = false;
   std::unordered_map<api::device*, DeviceEntry> devices;
   std::vector<api::effect_runtime*> runtimes;
   addon::NrClaim claim;  // Plan 2 final review M8: at most one device loads NR
@@ -1653,6 +1656,7 @@ void OnExecuteCommandList(api::command_queue* queue, api::command_list* cmd_list
 bool OnOpenOverlay(api::effect_runtime* /*runtime*/, bool open, api::input_source /*source*/) {
   try {
     const std::unique_lock lock(g_state->mutex);
+    g_state->overlay_open = open;
     if (!open) {
       // Plan 6 (D6): defaults_view is session-only and survives closing the overlay; a slider held as
       // it closes must not stay coalesced, so everything else about the panel still resets.
@@ -3045,6 +3049,9 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState& state = *g_state;
+    if (!state.overlay_open) {
+      return;
+    }
     const auto now = std::chrono::steady_clock::now();
     ui::OverlayView view = {.status_line = "OFF", .last_key_pressed = runtime->last_key_pressed(),
                             .placement_line = "Placement: NR is off", .motion_line = "Motion vectors: NR is off"};
@@ -3336,6 +3343,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       ui::FinishSetup(&view, &state.overlay, runtime->get_device(), facts, now);
     }
     const ui::VulkanNrMode vulkan_nr_before = state.settings.vulkan_nr;
+    ui::BeginPanel();
     if (ui::DrawOverlay(view, &state.settings, &state.overlay)) {
       if (overlay_device_api == api::device_api::vulkan && MoveStageForVkRoute(&state.settings, vulkan_nr_before)) {
         state.overlay.setup_settle.Clicked(ui::SetupRow::STAGE, static_cast<uint32_t>(ui::SourcePick::PRESENT));  // as a click on Present
@@ -3367,6 +3375,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         found->second.context->RetryNow();
       }
     }
+    ui::EndPanel();
   }
   UPLIFT_CATCH("draw_overlay", )
 }
@@ -3618,7 +3627,10 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     addon::RegisterTrackingEvents();  // once, and never unregistered while the game runs (amendment 2)
     g_state->tracking_registered = true;
   }
-  reshade::register_overlay("GITC Uplift", OnDrawOverlay);
+  // The event rather than register_overlay: the panel opens its own window (ui::BeginPanel). ReShade calls this
+  // one every frame, open or not (runtime_gui.cpp's has_addon_event early-out), which is why OnDrawOverlay
+  // checks `overlay_open` first.
+  reshade::register_event<reshade::addon_event::reshade_overlay>(OnDrawOverlay);
 
   nr::Logf(nr::LogLevel::INFO, "Uplift {} registered (ReShade API {}, Dear ImGui {}, ReShade {})", UPLIFT_VERSION,
            RESHADE_API_VERSION, IMGUI_VERSION_NUM,

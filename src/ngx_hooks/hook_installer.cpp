@@ -2,6 +2,7 @@
 
 #include <intrin.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 #include <winternl.h>
 
 #include <MinHook.h>
@@ -759,25 +760,52 @@ size_t HookInstaller::Scan() {
   return ScanLocked();
 }
 
+namespace {
+
+// The modules loaded into this process. Toolhelp32 is the route that works everywhere, including this
+// process's own modules (Phantom Blade Zero: K32EnumProcessModules reported zero modules on every scan,
+// which left the installer blind to every NGX library, the game's DLSS included).
+std::vector<HMODULE> LoadedModules() {
+  std::vector<HMODULE> modules(256u);
+  for (;;) {
+    DWORD needed_bytes = 0u;
+    if (K32EnumProcessModules(GetCurrentProcess(), modules.data(), static_cast<DWORD>(modules.size() * sizeof(HMODULE)),
+                              &needed_bytes)
+        == FALSE) {
+      break;  // the call fails outright here (ERROR_INVALID_HANDLE on every scan of this process)
+    }
+    const size_t count = needed_bytes / sizeof(HMODULE);
+    if (count == 0u) break;  // an empty list is not worth a second ask
+    if (count <= modules.size()) {
+      modules.resize(count);
+      return modules;
+    }
+    modules.resize(count);  // the list grew past the buffer: ask again with it
+  }
+  modules.clear();
+  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    nr::Logf(nr::LogLevel::WARN, "could not snapshot this process's modules ({}); no NGX library can be seen", GetLastError());
+    return modules;
+  }
+  MODULEENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  if (Module32FirstW(snapshot, &entry) != FALSE) {
+    do {
+      modules.push_back(entry.hModule);
+    } while (Module32NextW(snapshot, &entry) != FALSE);
+  }
+  CloseHandle(snapshot);
+  return modules;
+}
+
+}  // namespace
+
 size_t HookInstaller::ScanLocked() {
   if (!started_) return 0u;
 
-  // Every loaded module named like an NGX core (formerly the free function LoadedNgxCores; its only
-  // caller was this one, so the controller's helper ruling folds it in here).
-  std::vector<HMODULE> loaded_modules(256u);
-  while (true) {
-    DWORD needed_bytes = 0u;
-    if (K32EnumProcessModules(GetCurrentProcess(), loaded_modules.data(),
-                              static_cast<DWORD>(loaded_modules.size() * sizeof(HMODULE)), &needed_bytes)
-        == FALSE) {
-      loaded_modules.clear();
-      break;
-    }
-    const size_t count = needed_bytes / sizeof(HMODULE);
-    const bool complete = (count <= loaded_modules.size());
-    loaded_modules.resize(count);
-    if (complete) break;
-  }
+  // Every loaded module named like an NGX core.
+  const std::vector<HMODULE> loaded_modules = LoadedModules();
   std::vector<std::pair<HMODULE, std::wstring>> cores;
   std::wstring path(32768u, L'\0');
   for (const HMODULE module : loaded_modules) {
@@ -790,9 +818,7 @@ size_t HookInstaller::ScanLocked() {
     // By name only: matching on exports also catches the driver's own NGX binaries (160_E658700.bin,
     // nvngx_deepdvc.dll), whose separate bookkeeping keeps the FG feature's LiveCount above zero forever,
     // so NotifyFgQuiescent never resets the provider's cached configuration.
-    if (IsNgxCoreFileName(file_name)) {
-      cores.emplace_back(module, std::wstring(file_name));
-    }
+    if (IsNgxCoreFileName(file_name)) cores.emplace_back(module, std::wstring(file_name));
   }
 
   size_t hooked = 0u;

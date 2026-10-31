@@ -19,6 +19,9 @@
 namespace uplift::ui {
 namespace {
 
+// A panel taller than this is scrolled rather than run off the bottom of the screen.
+constexpr float kMenuMaxScreenFraction = 0.8f;
+
 // ui-review.md §3 (user decision) and §4.3: every row with three or fewer short choices -- Source,
 // Motion vectors, Compare, Model, Upsampling, Stabilise, NR mask, UI correction and any other CHOICE row
 // this short -- draws as a segmented control instead of RadioButton (which sizes to its text) or a
@@ -74,10 +77,16 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   const bool below_full = (settings->resolution_mode != ResolutionMode::FULL)
                            || std::ranges::any_of(view.setup.pass_stages, later_group_scaled);
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && !below_full);
-  // The two band gains matter only while Edge-aware itself does (below Full); Classic has no bands.
-  const bool guided_gains_hidden = ((descriptor.key == "GuidedBaseGain" || descriptor.key == "GuidedDetailGain"
-                                     || descriptor.key == "DensityOnBase" || descriptor.key == "EdgeDensityAttenuation")
-                                    && (!below_full || settings->upsampling != color::Upsampling::EDGE_AWARE));
+  // Edge-aware's own rows matter only while Edge-aware itself does (below Full); Classic has no bands.
+  const bool edge_aware_off = (!below_full || settings->upsampling != color::Upsampling::EDGE_AWARE);
+  const bool guided_gains_hidden = ((descriptor.key == "GuidedBaseGain" || descriptor.key == "GuidedDetailGain")
+                                    && edge_aware_off);
+  // 2026-10-31: the ceiling and the band it lands on say nothing a gain cannot while the work grid is
+  // uniform -- its density is one number screen-wide, so the ceiling is a constant factor, and that is a
+  // gain. Only a foveated grid, thinning toward the edges, gives the two rows an effect of their own
+  // (LookConfigFrom clears them when Foveated edges is off).
+  const bool density_rows_hidden = ((descriptor.key == "DensityOnBase" || descriptor.key == "EdgeDensityAttenuation")
+                                    && (!settings->foveation || edge_aware_off));
   // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
   const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
                                  || descriptor.key == "FaceLightingDensity" || descriptor.key == "FaceSpeckSize";
@@ -90,7 +99,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   // ui-review.md §3 rule 1: these rows matter only after a choice in the row just above them, so they
   // are hidden -- not merely greyed -- until that choice is made.
   if (pass_follows || shaping_off || stabilize_off || exposure_hidden || resolution_scale_hidden || upsampling_hidden || guided_gains_hidden
-      || keep_faces_off || fill_off) {
+      || density_rows_hidden || keep_faces_off || fill_off) {
     return false;
   }
 
@@ -637,8 +646,9 @@ constexpr const char* DlssReflexGroup(std::string_view key) {
 }
 
 bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state) {
-  // The panel draws at BaseFontSize(), one push for the whole overlay: every row measures itself in font
-  // sizes, so the layout scales with the text. StyleScope pops it on every return path.
+  // The panel draws at BaseFontSize(), one push for the whole overlay: every row measures itself in font sizes,
+  // so the layout scales with the text, and Ctrl+mouse wheel's change of that size takes the panel with it.
+  // StyleScope pops it on every return path.
   style::StyleScope panel_font;
   panel_font.FontSize(style::BaseFontSize());
   // The panel draws and colours itself out of style.hpp's tokens; without this the global style stays
@@ -1016,6 +1026,48 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   changed |= DrawEnableWarning(*FindSetting("PresentWithFrameGen"), settings, state);
   changed |= DrawEnableWarning(*FindSetting("AllowCrossQueuePasses"), settings, state);
   return changed;
+}
+
+void BeginPanel() {
+  // Where the panel sits: the screen's top-right corner a narrow margin in from both edges, clear of ReShade's
+  // own window on the left. The width is 40 font sizes (the font is already this monitor's scale, since the
+  // style was applied last frame), and the height follows its content. FirstUseEver for the position, so a
+  // player's own placement sticks from then on.
+  const float unit = gui::GetFontSize();
+  const float margin = unit * 0.5f;
+  const float width = unit * 40.f;
+  const ImVec2 display = gui::GetIO().DisplaySize;
+  gui::SetNextWindowPos(ImVec2(display.x - width - margin, margin), ImGuiCond_FirstUseEver);
+  gui::SetNextWindowSize(ImVec2(width, 0.f), ImGuiCond_Always);  // 0 height: fit whatever the content is
+  // The height cap: the size above fits the content, which on a long panel is taller than the screen, and the
+  // rows past the cap are scrolled to instead. It has to be a constraint -- ImGui applies one to the auto-fit
+  // size, while a SetWindowSize after Begin only sets the next frame's size, so the panel still draws full
+  // height for that frame and the cap looks like it did nothing.
+  gui::SetNextWindowSizeConstraints(ImVec2(width, 0.f), ImVec2(width, display.y * kMenuMaxScreenFraction), nullptr,
+                                    nullptr);
+  // NoDocking: ReShade's Dear ImGui is the docking branch, so without it the panel could be dragged into
+  // ReShade's own window and become one of its tabs. The panel is a floating window and stays one.
+  gui::Begin("GITC Uplift", nullptr,
+             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse
+                 | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoDocking);
+  // Where the title bar was: a strip across the top that carries the panel's name and drags the window, as the
+  // bar it replaces did.
+  const float strip_height = gui::GetFrameHeight();
+  gui::InvisibleButton("##UpliftTitleBar", ImVec2(gui::GetContentRegionAvail().x, strip_height));
+  if (gui::IsItemActive()) {
+    const ImVec2 window = gui::GetWindowPos();
+    const ImVec2 moved = gui::GetIO().MouseDelta;
+    gui::SetWindowPos(ImVec2(window.x + moved.x, window.y + moved.y), ImGuiCond_Always);
+  }
+  const ImVec2 strip = gui::GetItemRectMin();
+  gui::GetWindowDrawList()->AddText(ImVec2(strip.x, strip.y + (strip_height - gui::GetFontSize()) * 0.5f),
+                                    gui::GetColorU32(ImGuiCol_Text), "GITC Uplift");
+}
+
+void EndPanel() {
+  // No resize grip: BeginPanel sizes the window, so the title bar's lower-right corner, which was one, went
+  // with the bar.
+  gui::End();
 }
 
 }  // namespace uplift::ui

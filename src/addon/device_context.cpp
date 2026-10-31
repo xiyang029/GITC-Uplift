@@ -46,8 +46,8 @@ sources::LookConfig LookConfigFrom(const ui::Settings& settings,
           .chroma_clamp = settings.chroma_clamp,
           .guided_low_gain = settings.guided_base_gain,    // the UI names the bands base/detail, the shaders low/high
           .guided_high_gain = settings.guided_detail_gain,
-          .density_on_base = settings.density_on_base,
-          .edge_density_attenuation = settings.edge_density_attenuation,
+          .density_on_base = settings.density_on_base && settings.foveation,
+          .edge_density_attenuation = (settings.foveation ? settings.edge_density_attenuation : 1.f),  // 2026-10-31: the two rows shape the foveated grid only; a uniform one's ceiling is a gain
           .near_black_guard = settings.near_black_guard,
       },
       .later_controls = later_controls,
