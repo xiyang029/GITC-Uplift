@@ -340,7 +340,6 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Frame rate: {:.1f} real, {:.1f} estimated", "帧率：真实 {:.1f}，估算输出 {:.1f}"},
     {"Frame rate: {:.1f} real, {:.1f} generated", "帧率：真实 {:.1f}，插帧输出 {:.1f}"},
     {"Frame skip", "跳帧"},
-    {"Frame skip is not available on this Vulkan route yet.", "跳帧目前不支持这条 Vulkan 路径。"},
     {"Full", "完整"},
     {"Full protection at (% of brightness)", "完全保护阈值（亮度百分比）"},
     {"Full-density centre height (%)", "全密度中心高度（%）"},

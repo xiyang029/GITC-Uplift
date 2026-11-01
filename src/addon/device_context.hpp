@@ -119,7 +119,6 @@ struct FrameConfig {
   struct StageResolution {
     ui::ResolutionMode mode = ui::ResolutionMode::FULL;
     float scale = 100.f;      // Custom: % of the output's width
-    float scale_y = 100.f;    // Custom: % of the output's height, used while the chain's switch is on
     bool slider_held = false;  // its Custom slider is being dragged: the work size waits for the release
   };
   std::array<StageResolution, 2> stage_resolution = {};
@@ -457,6 +456,7 @@ class DeviceContext {
   struct StageState {
     sources::WorkSizeSettle settle;
     nr::Size work;
+    nr::Size last_work;   // last frame's, so ApplyLookConfig can tell when the size just changed
     nr::Size canvas;
     bool nr_applied = false;
     uint32_t passes_run = 0u;
@@ -493,7 +493,8 @@ class DeviceContext {
   std::string_view skip_reason_;
   bool skip_from_session_ = false;  // M1 fix round 1: skip_reason_ is Session::Evaluate's own
   uint32_t half_rate_phase_ = 0u;  // Frame skip: where this present sits in the setting's cycle; the network runs on phase 0
-  bool half_rate_skip_ = false;    // ... and whether it carries NR's last change instead of running the network
+  bool half_rate_armed_ = false;    // Frame skip: whether half-rate is currently allowed (false while the work size is settling)
+  uint32_t size_settle_grace_ = 0u;  // Frame skip: frames left to wait after a work-size change before half-rate may run again
   std::chrono::steady_clock::time_point last_rate_report_{};  // the panel's frame rate, logged beside the pipeline's own GPU timings
   sources::PresentTarget frame_target_;
   nr::Controls controls_;

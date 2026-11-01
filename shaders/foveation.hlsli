@@ -85,16 +85,14 @@ float FovGInv(float g, FovAxis p) {
   return p.a + p.b * q;
 }
 
-// One axis: full normalized -> working normalized, and back.
-float FovWarp1(float n, uint packed, float gmax) {
-  [branch] if (!FovAxisOn(packed)) return n;
-  const FovAxis p = FovDecode(packed, gmax);
+// One axis, decoded: full normalized -> working normalized.
+float FovWarpAxis1(float n, FovAxis p) {
   const float t = 2.0 * n - 1.0;
   return 0.5 + 0.5 * sign(t) * FovG(abs(t), p) / p.gmax;
 }
 
-// One axis, already decoded: working normalized -> full normalized.  Callers that hold the decoded axis (the
-// footprint, which needs it four times) decode once.
+// One axis, decoded: working normalized -> full normalized.  Callers that hold the decoded axis (the footprint,
+// which needs it four times) decode once.
 float FovUnwarpAxis1(float v, FovAxis p) {
   const float s = 2.0 * v - 1.0;
   return 0.5 + 0.5 * sign(s) * FovGInv(abs(s) * p.gmax, p);
@@ -107,17 +105,18 @@ bool FovPlateau1(float v, FovAxis p) {
   return abs(2.0 * v - 1.0) * p.gmax <= p.a;
 }
 
-float FovUnwarp1(float v, uint packed, float gmax) {
-  [branch] if (!FovAxisOn(packed)) return v;
-  return FovUnwarpAxis1(v, FovDecode(packed, gmax));
-}
-
+// Both axes at once.  A grid with no warped axis is the common case and returns its input untouched, so the decode
+// and the integral stay out of shaders that never foveate; a single identity axis beside a warped one pays the select.
 float2 FovWarp(float2 n, uint2 packed, float2 gmax) {
-  return float2(FovWarp1(n.x, packed.x, gmax.x), FovWarp1(n.y, packed.y, gmax.y));
+  if (!FovAny(packed)) return n;
+  return float2((FovAxisOn(packed.x) ? FovWarpAxis1(n.x, FovDecode(packed.x, gmax.x)) : n.x),
+                (FovAxisOn(packed.y) ? FovWarpAxis1(n.y, FovDecode(packed.y, gmax.y)) : n.y));
 }
 
 float2 FovUnwarp(float2 v, uint2 packed, float2 gmax) {
-  return float2(FovUnwarp1(v.x, packed.x, gmax.x), FovUnwarp1(v.y, packed.y, gmax.y));
+  if (!FovAny(packed)) return v;
+  return float2((FovAxisOn(packed.x) ? FovUnwarpAxis1(v.x, FovDecode(packed.x, gmax.x)) : v.x),
+                (FovAxisOn(packed.y) ? FovUnwarpAxis1(v.y, FovDecode(packed.y, gmax.y)) : v.y));
 }
 
 // Full-grid rectangle [lo, hi) covered by working texel `pixel` (`work` texels

@@ -41,6 +41,13 @@ std::string SavedNote(std::string_view preference) {
   return std::format("Saved: {}; it runs again by itself when it can.", preference);
 }
 
+// Frame skip (2026-10-31): a skipped frame's carry does not follow the foveation warp, so the two never run together and
+// the foveation rows are hidden rather than shown and quietly ignored. The Vulkan route records through its own pipeline
+// and never skips, so its rows stay.
+bool FoveationHidden(const OverlayView& view, const Settings& settings) {
+  return !view.dlss_explicit && settings.half_rate != HalfRate::OFF;
+}
+
 // One schema row. Returns true when the value changed. Called both from DrawOverlay (the Enable
 // row) and from its own draw_rows lambda (every other row), so it stays a free function. `inline_label`
 // asks for the row's label to sit right against its control instead of in the panel's label column: only
@@ -86,7 +93,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   // gain. Only a foveated grid, thinning toward the edges, gives the two rows an effect of their own
   // (LookConfigFrom clears them when Foveated edges is off).
   const bool density_rows_hidden = ((descriptor.key == "DensityOnBase" || descriptor.key == "EdgeDensityAttenuation")
-                                    && (!settings->foveation || edge_aware_off));
+                                    && (!settings->foveation || edge_aware_off || FoveationHidden(view, *settings)));
+  const bool foveation_hidden = (descriptor.key.starts_with("Foveation") && FoveationHidden(view, *settings));
   // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
   const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
                                  || descriptor.key == "FaceLightingDensity" || descriptor.key == "FaceSpeckSize";
@@ -99,7 +107,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   // ui-review.md §3 rule 1: these rows matter only after a choice in the row just above them, so they
   // are hidden -- not merely greyed -- until that choice is made.
   if (pass_follows || shaping_off || stabilize_off || exposure_hidden || resolution_scale_hidden || upsampling_hidden || guided_gains_hidden
-      || density_rows_hidden || keep_faces_off || fill_off) {
+      || density_rows_hidden || foveation_hidden || keep_faces_off || fill_off) {
     return false;
   }
 
@@ -483,8 +491,7 @@ bool DrawSourceRow(const OverlayView& view, Settings* settings, OverlayState* st
   }
   // ui-review.md §4.1: the latch's one surviving Clear latch button, unless the status card already shows it.
   if (view.dlss_latched && view.card.button != CardButton::CLEAR_LATCH) {
-    gui::SameLine();
-    if (gui::SmallButton("Clear latch")) {
+    if (widgets::ClearLatchButton()) {
       settings->dlss_placement_blocked = false;
       settings->vulkan_native_nr = true;  // Plan 19 fix round (I-C): native Vulkan NR's latch too, from the next start
       changed = true;
@@ -546,8 +553,9 @@ bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& vi
 }
 
 // Frame skip (MFG-Unlocker's Boost, ported): NR's network on one frame of the setting's cycle, the frames between carrying the last change it made. It sits
-// under the NR stage row it qualifies; the Vulkan route does not record through this pipeline, so it cannot skip there.
+// under the NR stage row it qualifies. The Vulkan route records through its own pipeline and never skips, so the row is not drawn there at all.
 bool DrawHalfRateRow(const OverlayView& view, Settings* settings) {
+  if (view.dlss_explicit) return false;
   gui::PushID("HalfRate");
   static constexpr std::array<const char*, 4> OPTIONS = {"Off", "Every 2nd frame", "Every 3rd frame", "Every 4th frame"};
   std::array<std::string_view, 4> tips = {
@@ -559,14 +567,10 @@ bool DrawHalfRateRow(const OverlayView& view, Settings* settings) {
       "NR's network runs on one frame in four. The other three carry the last change the network made along the motion vectors, so they still show NR's "
       "result rather than the game's raw image, but an approximation three frames old is on screen three frames in four.",
   };
-  std::array<std::string_view, 4> why = {};
-  if (view.dlss_explicit) {
-    constexpr std::string_view VULKAN = "Frame skip is not available on this Vulkan route yet.";
-    for (size_t i = 1u; i < why.size(); ++i) why[i] = VULKAN;
-  }
   bool changed = false;
   const int shown = static_cast<int>(settings->half_rate);
-  if (const int clicked = RadioRow("Frame skip", OPTIONS, why, tips, shown); clicked >= 0 && clicked != shown) {
+  // Why[] empty: every option runs wherever the row is drawn at all.
+  if (const int clicked = RadioRow("Frame skip", OPTIONS, {}, tips, shown); clicked >= 0 && clicked != shown) {
     settings->half_rate = static_cast<HalfRate>(clicked);
     changed = true;
   }
@@ -853,7 +857,7 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
   changed |= DrawRow(*FindSetting("EdgeDensityAttenuation"), view, settings, state);
   // Foveated edge scaling (2026-10-21): the five rows below are the centre, its two fall-offs and the density they reach; they only matter while it is on.
   changed |= DrawRow(*FindSetting("Foveation"), view, settings, state);
-  if (settings->foveation) {
+  if (settings->foveation && !FoveationHidden(view, *settings)) {
     widgets::SubCaption("Centre and fall-off");
     changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state);
     changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state);

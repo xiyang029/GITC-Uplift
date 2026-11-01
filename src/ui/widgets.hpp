@@ -162,7 +162,9 @@ inline void InlineLabel(const char* label, const char* tooltip = nullptr) {
 // its default (the caller decides). At rest the arrow is dim and turns the accent while the pointer is over
 // its cell, so a panel with many changed rows does not turn its whole right edge into a column of arrows.
 // `id` keeps the buttons apart; `default_text` names what a click restores. Returns true when clicked.
-inline bool ResetButton(const char* id, const char* default_text) {
+// The row-end icon button shared by ResetButton and ClearLatchButton: the same flat undo arrow in the
+// same slot, with a printf-style tooltip. Both callers use the undo icon; only the tooltip differs.
+inline bool RowIconButton(const char* id, const char* tooltip_fmt, ...) {
   ImGui::SameLine();
   const float height = ImGui::GetFrameHeight();
   const ImVec2 slot(row_slot_x, ImGui::GetCursorScreenPos().y);
@@ -180,9 +182,22 @@ inline bool ResetButton(const char* id, const char* default_text) {
     ImGui::PopID();
   }
   if (ImGui::IsItemHovered(ImGuiHoveredFlags_None)) {
-    ItemTooltip(gui::Display("Reset to default (%s)").c_str(), gui::Display(default_text).c_str());
+    va_list args; va_start(args, tooltip_fmt);
+    const std::string tip = gui::Formatted(tooltip_fmt, args);
+    va_end(args);
+    ItemTooltip("%s", tip.c_str());
   }
   return clicked;
+}
+
+inline bool ResetButton(const char* id, const char* default_text) {
+  return RowIconButton(id, gui::Display("Reset to default (%s)").c_str(), gui::Display(default_text).c_str());
+}
+
+// The Clear latch icon button, drawn in the same row-end slot as ResetButton (call only when the latch is set
+// and the status card is not already showing its own clear button). Returns true when clicked.
+inline bool ClearLatchButton() {
+  return RowIconButton("ClearLatch", "%s", gui::Display("Clear the device-removal latch and restart the game").c_str());
 }
 
 // A muted note under the row RowLabel started, starting at that row's control column and in the small size:

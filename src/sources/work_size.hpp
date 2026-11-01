@@ -39,6 +39,13 @@ class WorkSizeSettle {
  public:
   nr::Size Update(nr::Size target, std::chrono::steady_clock::time_point now, bool held);
   void Reset();
+  // The size last settled to (Update's return value), so a caller can tell whether the current target is
+  // still being held at an older size: while they differ the work size is mid-change and anything rebuilt
+  // against it (boost surfaces, a skipped frame's carry) races the next frame's different canvas.
+  [[nodiscard]] nr::Size LastApplied() const { return applied_; }
+  // True while the latest target Update() was given has not yet been settled into applied_ (a Resolution
+  // change, resize, or slider drag in progress). Anything rebuilt against the work size should wait.
+  [[nodiscard]] bool IsSettling() const { return !applied_.Empty() && last_target_ != applied_; }
 
  private:
   nr::Size applied_;

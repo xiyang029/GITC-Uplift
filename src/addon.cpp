@@ -505,6 +505,20 @@ void PushFgRuntimeChoices(const ui::Settings& settings) {
                             settings.reflex_fps_cap);
 }
 
+// The live DLSS preset swaps' gate: whether any DLSSPreset<Mode> or RayReconstructionPreset<Mode> choice is set
+// (addon/dlss_swap.hpp), and the render scale override's per-mode percents (addon/dlss_ratio.hpp). Both take the two
+// Overrides objects, so they are built once here rather than per call site -- SaveAndApply and both Pushes of the
+// register path ask the same question of the same settings.
+void PushPresetGates(AddonState& state, const ui::Settings& settings) {
+  const bool sr = addon::ToPresetOverrides(settings).Any();
+  const bool rr = addon::ToRrPresetOverrides(settings).Any();
+  state.bridge.NoteDlssPresetChoices(sr || rr);
+  state.bridge.NoteDlssRenderScales(settings.dlss_render_scale);
+  addon::SetSrRrPresetForced(sr, rr);
+  addon::SetFgPresetDesired(static_cast<uint32_t>(settings.fg_preset));
+  PushFgRuntimeChoices(settings);
+}
+
 // After the overlay or the hotkey changed a setting.
 void SaveAndApply(AddonState* state) {
   state->settings = ui::Sanitized(state->settings);
@@ -513,16 +527,7 @@ void SaveAndApply(AddonState* state) {
   ApplyProcessSettings(state->settings);
   ++state->settings_generation;  // Plan 6 (D11): a settings change restarts the retry backoff
   state->front->SettingsChanged(state->settings);  // Plan 10: the helper of a Direct3D 9 game reads them too
-  // The live DLSS preset swap's gate: whether any DLSSPreset<Mode> or RayReconstructionPreset<Mode>
-  // choice is set (addon/dlss_swap.hpp), and the render scale override's per-mode percents
-  // (addon/dlss_ratio.hpp).
-  state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(state->settings).Any()
-                                      || addon::ToRrPresetOverrides(state->settings).Any());
-  state->bridge.NoteDlssRenderScales(state->settings.dlss_render_scale);
-  addon::SetFgPresetDesired(static_cast<uint32_t>(state->settings.fg_preset));
-  addon::SetSrRrPresetForced(addon::ToPresetOverrides(state->settings).Any(),
-                             addon::ToRrPresetOverrides(state->settings).Any());
-  PushFgRuntimeChoices(state->settings);
+  PushPresetGates(*state, state->settings);
 }
 
 // With the add-on's lock held.
@@ -3463,13 +3468,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     // A ReShade runtime rebuild re-loads its add-ons: the state survives, but re-push the static/instance
     // settings gates anyway -- the preset swap's wanted flag lives in the bridge instance and a rebuild
     // that did replace the state would otherwise leave every live switch off until a settings change.
-    addon::SetFgPresetDesired(static_cast<uint32_t>(g_state->settings.fg_preset));
-    addon::SetSrRrPresetForced(addon::ToPresetOverrides(g_state->settings).Any(),
-                               addon::ToRrPresetOverrides(g_state->settings).Any());
-    g_state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(g_state->settings).Any()
-                                          || addon::ToRrPresetOverrides(g_state->settings).Any());
-    g_state->bridge.NoteDlssRenderScales(g_state->settings.dlss_render_scale);
-    PushFgRuntimeChoices(g_state->settings);
+    PushPresetGates(*g_state, g_state->settings);
     return true;
   }
   // Fails when ReShade lacks this API version or ImGui table.
@@ -3485,13 +3484,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   g_state->poller.Seen(g_state->settings.enabled);
   ApplyProcessSettings(g_state->settings);
   // The live DLSS preset swap's gate (SaveAndApply keeps both current): the ini may carry choices already.
-  g_state->bridge.NoteDlssPresetChoices(addon::ToPresetOverrides(g_state->settings).Any()
-                                        || addon::ToRrPresetOverrides(g_state->settings).Any());
-  g_state->bridge.NoteDlssRenderScales(g_state->settings.dlss_render_scale);
-  addon::SetFgPresetDesired(static_cast<uint32_t>(g_state->settings.fg_preset));
-  addon::SetSrRrPresetForced(addon::ToPresetOverrides(g_state->settings).Any(),
-                             addon::ToRrPresetOverrides(g_state->settings).Any());
-  PushFgRuntimeChoices(g_state->settings);
+  PushPresetGates(*g_state, g_state->settings);
   addon::EnsureFgPresetHook();  // the watchdog waits for nvapi64.dll, before any NvAPI caller
   addon::slfg::EnsureSlFgHooks();  // and for sl.interposer.dll, before the game asks for the FG functions
   addon::reflex::EnsureReflexHook();

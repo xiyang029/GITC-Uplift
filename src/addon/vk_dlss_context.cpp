@@ -635,13 +635,11 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
   // Anamorphic (2026-10-29): the height's own Custom scale, and whether it acts on its own axis at all. One
   // switch for the whole chain: a later group reads pass 1's, so two groups never disagree about the shape.
   bool asymmetric = config_.resolution_asymmetric;
-  float custom_scale_y = config_.resolution_scale_y;
   bool slider_held = config_.resolution_slider_held;
   if (!pass1) {
     const FrameConfig::StageResolution& own = config_.stage_resolution[(stage == Stage::AFTER_DLSS ? 0u : 1u)];
     mode = own.mode;
     custom_scale = own.scale;
-    custom_scale_y = own.scale_y;
     slider_held = own.slider_held;
   }
   const bool before_upscaling = (stage == Stage::BEFORE_UPSCALING);
@@ -658,7 +656,7 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
       scale = custom_scale / 100.0;
       // Every preset above is one uniform factor; only Custom may split the axes, and only while the switch
       // is on (both at one value is the uniform case, which WorkSize treats identically).
-      if (asymmetric) scale_y = custom_scale_y / 100.0;
+      if (asymmetric) scale_y = config_.resolution_scale_y / 100.0;
       break;
     case ui::ResolutionMode::MATCH_GAME:
       if (main_snapshot_ && !main_snapshot_->render.Empty() && !before_upscaling && !dlss_off_.Off()) {  // Plan 18 Task 12 (fix round 1, M-1): Full while off

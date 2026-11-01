@@ -63,10 +63,8 @@ FrameConfig BuildFrameConfig(const FrameConfigInputs& inputs, ui::ControlsCoales
       // Split chain (2026-10-10): the later stage groups' own Resolution and "Keep faces here" (After DLSS, Present). `split_capable` is the add-on's.
       .stage_resolution = {
           {{.mode = settings.resolution_mode_after_dlss, .scale = settings.resolution_scale_after_dlss,
-            .scale_y = settings.resolution_scale_y,
             .slider_held = inputs.drag.resolution_scale_after_dlss},
            {.mode = settings.resolution_mode_present, .scale = settings.resolution_scale_present,
-            .scale_y = settings.resolution_scale_y,
             .slider_held = inputs.drag.resolution_scale_present}}},
       .stage_keep_faces = {settings.keep_faces_after_dlss, settings.keep_faces_present},
   };

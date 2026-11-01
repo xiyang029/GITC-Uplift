@@ -176,7 +176,6 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   // for the whole present, so every stage of a split chain agrees. The cycle starts on the network, so every carry has a frame behind it to carry from.
   const uint32_t half_rate_period = ui::HalfRatePeriod(config_.half_rate);
   half_rate_phase_ = (half_rate_period > 1u ? (half_rate_phase_ + 1u) % half_rate_period : 0u);
-  half_rate_skip_ = (half_rate_period > 1u && half_rate_phase_ != 0u);
   // The panel's own frame rate, once a minute, on the same clock as the pipeline's GPU timings: a saving the GPU timings show
   // only counts if the frames really leave faster, and the two numbers are only comparable side by side.
   if (now - last_rate_report_ >= std::chrono::seconds(60)) {
@@ -630,9 +629,39 @@ void DeviceContext::ApplyLookConfig(std::chrono::steady_clock::time_point now, u
     look.keep_faces.enabled = (look.keep_faces.enabled && LaterStageKeepsFaces(chain_.groups[group].stage));
   }
   // Frame skip: the setting says whether it is on, this present's place in the cycle says whether the network runs on it.
-  look.half_rate = (ui::HalfRatePeriod(config_.half_rate) > 1u);
-  look.half_rate_skip = (look.half_rate && half_rate_skip_);
-  look.half_rate_period = ui::HalfRatePeriod(config_.half_rate);
+  // Frame skip (2026-11-01): while the work size is settling (a Resolution change, a resize, or a slider drag) the
+  // boost surfaces are rebuilt against the old canvas one frame and the new canvas the next, which races the device's
+  // upload heaps and trips a device removal. Stand frame skip down until the settled size has held steady for a beat,
+  // so the rebuild lands once on the stable canvas. The setting is untouched; NR simply runs the network every frame
+  // until the settle is quiet again.
+  const ui::HalfRate half_rate_setting = config_.half_rate;
+  // Frame skip is decided once per present (the phase is shared), but the boost surfaces are rebuilt per group
+  // against that group's canvas -- a split chain alternates two canvases, so a size change in any group's stage
+  // counts. Check this group's own stage; the phase reset below keeps every group in step.
+  const StageState& stage_state = stages_[static_cast<size_t>(chain_.groups[group].stage)];
+  // A size change (placement switch, resolution change, resize, slider drag): either the settled size just
+  // jumped (work != last_work) or it is still chasing its target (IsSettling). Either way the boost surfaces
+  // are mid-rebuild, so frame skip stays off until the size has held steady for a beat (a grace of a few frames
+  // covers the split chain's alternating canvases, which each rebuild the shared surfaces on their own turn).
+  const bool size_changed = (stage_state.work != stage_state.last_work);
+  if (size_changed || stage_state.settle.IsSettling()) size_settle_grace_ = 4u;
+  else if (size_settle_grace_ > 0u) --size_settle_grace_;
+  const bool settling = (size_settle_grace_ > 0u);
+  const bool half_rate_on = (ui::HalfRatePeriod(half_rate_setting) > 1u) && !settling;
+  if (half_rate_on != half_rate_armed_) {
+    half_rate_armed_ = half_rate_on;
+    half_rate_phase_ = 0u;  // the cycle restarts on the first present frame skip runs again: a network frame, then carries
+  }
+  look.half_rate = half_rate_on;
+  look.half_rate_skip = (look.half_rate && half_rate_phase_ != 0u);
+  look.half_rate_period = ui::HalfRatePeriod(half_rate_setting);
+  // Frame skip (2026-10-31): a skipped frame's carry does not follow the foveation warp, so SettleLayout stands the grid down to
+  // uniform while it is on. These two only shape a foveated grid (a uniform one's ceiling is a gain), so they go with it -- here,
+  // after the router has picked one, and not in LookConfigFrom, which the Vulkan route shares and where frame skip never runs.
+  if (look.half_rate) {
+    look.fixes.density_on_base = false;
+    look.fixes.edge_density_attenuation = 1.f;
+  }
   // Frame skip: the timings are taken against the present queue's clock, which only the device context knows.
   present_source_->Pipeline().NotePresentQueue(PresentQueue());
   present_source_->Pipeline().SetLookConfig(look);
@@ -791,15 +820,16 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
   // Anamorphic (2026-10-29): the height's own Custom scale, and whether it acts on its own axis at all. One
   // switch for the whole chain: a later group reads pass 1's, so two groups never disagree about the shape.
   bool asymmetric = config_.resolution_asymmetric;
-  float custom_scale_y = config_.resolution_scale_y;
   bool slider_held = config_.resolution_slider_held;
   if (!pass1) {
     const FrameConfig::StageResolution& own = config_.stage_resolution[(stage == Stage::AFTER_DLSS ? 0u : 1u)];
     mode = own.mode;
     custom_scale = own.scale;
-    custom_scale_y = own.scale_y;
     slider_held = own.slider_held;
   }
+  // Anamorphic (2026-10-29): only Custom may split the axes. Every preset above is one uniform factor, so a
+  // switch left on from Custom must not hold the height at native while the width shrinks.
+  asymmetric = (mode == ui::ResolutionMode::CUSTOM && asymmetric);
   const bool before_upscaling = (stage == Stage::BEFORE_UPSCALING);
   double target_width = output.width;
   double target_height = output.height;
@@ -814,7 +844,7 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
       scale = custom_scale / 100.0;
       // Every preset above is one uniform factor; only Custom may split the axes, and only while the switch
       // is on (both at one value is the uniform case, which WorkSize treats identically).
-      if (asymmetric) scale_y = custom_scale_y / 100.0;
+      if (asymmetric) scale_y = config_.resolution_scale_y / 100.0;
       break;
     case ui::ResolutionMode::MATCH_GAME:
       // v2 design §3.8 (D3): DLSS's create-time render size, stable under dynamic resolution. Before
@@ -840,9 +870,14 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
       nr::foveation::FromPercent(config_.foveation_width, config_.foveation_height, config_.foveation_falloff_x, config_.foveation_falloff_y,
                                  config_.foveation_edge, output.width, output.height),
       output.width, output.height, uniform.width, uniform.height);
-  const nr::foveation::Plan plan = nr::foveation::MakePlan(config_.foveation, foveation_params, uniform.width, uniform.height);
+  // Frame skip (2026-10-31): a skipped frame carries the network's change by walking the accumulated vectors, and
+  // that walk does not follow the warp -- with the edges compressed the two disagree by more the faster the view
+  // moves, which is where NR's detail was lost. The two never run together.
+  const bool foveation_on = (config_.foveation && config_.half_rate == ui::HalfRate::OFF);
+  const nr::foveation::Plan plan = nr::foveation::MakePlan(foveation_on, foveation_params, uniform.width, uniform.height);
   const nr::Size image = {plan.width, plan.height};
   const nr::Size canvas = ((before_upscaling && !nr::MeetsNrFloor(image)) ? sources::CanvasSize(image) : image);
+  state.last_work = state.work;
   state.work = image;
   state.canvas = canvas;
   if (pass1) {
