@@ -479,17 +479,9 @@ bool DrawSourceRow(const OverlayView& view, Settings* settings, OverlayState* st
     state->setup_settle.Clicked(SetupRow::STAGE, static_cast<uint32_t>(clicked));
     changed = true;
   }
-  if (!IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"))) {
-    const bool reset_clicked = widgets::ResetButton("Source", view.dlss_explicit ? "Present on Vulkan" : "After DLSS");
-    if (reset_clicked) {
-      // The defaults themselves (Auto, PreUpscale off): After DLSS on Direct3D 12, Present on Vulkan.
-      const SourcePick default_pick = (view.dlss_explicit ? SourcePick::PRESENT : SourcePick::AFTER_DLSS);
-      SetSourcePick(settings, default_pick, view.dlss_explicit);
-      state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(default_pick), view.setup);  // at once, to the best that can run
-      changed = true;
-    }
-  }
-  // ui-review.md §4.1: the latch's one surviving Clear latch button, unless the status card already shows it.
+  // ui-review.md §4.1: the latch's one surviving Clear latch button, unless the status card already shows it. The row's
+  // end slot holds nothing else: a Reset here also drew at this position, and ImGui keeps the hovered id of the first of
+  // two overlapping items, so the latch could not be clicked until that Reset had gone.
   if (view.dlss_latched && view.card.button != CardButton::CLEAR_LATCH) {
     if (widgets::ClearLatchButton()) {
       settings->dlss_placement_blocked = false;

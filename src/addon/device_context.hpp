@@ -391,6 +391,10 @@ class DeviceContext {
   // motion source. NR's heartbeat counts NR frames from these, never from presents: a DLSS placement keeps nr_applied_ while the game's DLSS idles.
   [[nodiscard]] uint64_t NrRecordings() const { return nr_recordings_; }
   [[nodiscard]] sources::MotionSource LatestMotionSource() const { return motion_source_; }
+  // A recompile of Uplift.fx (either Launchpad/Lumenite link's own) gives UPLIFT_MV a new effect texture. The copies
+  // queued against the old one are still on the GPU, and a copy from a freed resource takes the device down, so the
+  // queue is drained before the new texture is used and the frames after it run the network instead of carrying.
+  void PauseForEffectReload() { if (present_source_ != nullptr) present_source_->Pipeline().NoteSurfaceChange(); }
 
  private:
   DeviceContext(ID3D12Device* device, nr::SnippetConfig snippet_config, std::unique_ptr<nr::Timeline> timeline,
@@ -492,12 +496,6 @@ class DeviceContext {
   std::string_view skip_reason_;
   bool skip_from_session_ = false;  // M1 fix round 1: skip_reason_ is Session::Evaluate's own
   uint32_t half_rate_phase_ = 0u;  // Frame skip: where this present sits in the setting's cycle; the network runs on phase 0
-  // Frame skip: presents left to run the network on, after the placement changed. A skipped frame carries the
-  // previous frame's result, so the state it carries was built for the old stage's canvas; switching stages
-  // while one is in flight is what the panel's placement rows do several times a second, and it takes the
-  // device with it. Running the network for these presents lets every stage's carry state fall away on its
-  // own before a skip is asked for again.
-  uint32_t skip_stand_down_ = 0u;
   // Frame skip: the value last pushed to the pipeline, so a switch (not a frame) is what triggers the drain.
   bool half_rate_applied_ = false;
 
