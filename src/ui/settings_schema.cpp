@@ -20,7 +20,6 @@ constexpr std::array<std::string_view, 4> HALF_RATE = {"Off", "Every 2nd frame",
 constexpr std::array<std::string_view, 5> PRESETS = {"Game", "J", "K", "L", "M"};
 constexpr std::array<std::string_view, 4> FG_PRESETS = {"Game", "A", "B", "C"};
 constexpr std::array<std::string_view, 6> FG_MULTIPLIERS = {"Game", "2x", "3x", "4x", "5x", "6x"};
-constexpr std::array<std::string_view, 3> FG_OPTION_CHOICES = {"Game", "On", "Off"};
 constexpr std::array<std::string_view, 4> REFLEX_MODES = {"Game", "On", "Boost", "Off"};
 constexpr std::array<std::string_view, 4> RR_PRESETS = {"Game", "D", "E", "F"};
 constexpr std::array<std::string_view, 6> ENCODINGS = {"Auto", "Linear BT.709", "sRGB", "BT.2100 PQ", "scRGB", "scRGB-nl"};
@@ -56,15 +55,11 @@ constexpr std::string_view DYNAMIC_MFG_TOOLTIP =
     "Direct3D 12 and the release-supported Streamline (2.14.1/2.14.16) with DLSS-G (310.9.1/310.9.16); otherwise it stays off and the "
     "fixed multiplier above applies. Takes priority over the fixed multiplier while active.";
 
-constexpr std::string_view FG_UI_RECOMPOSITION_TOOLTIP =
-    "Asks DLSS Frame Generation to interpolate the HUD and game UI separately from the 3D image (UI recomposition) -- the fix for HUD "
-    "ghosting and jitter at 3x/4x and above. It only works when the game hands DLSS-G its HUD-less and UI colour buffers, so a game that "
-    "does not tag them shows no change. Game keeps the game's own value (an NVIDIA App override can still win).";
-
-constexpr std::string_view FG_MENU_DETECTION_TOOLTIP =
-    "Asks DLSS Frame Generation to detect the game's fullscreen menus and pause interpolation underneath them, which removes the menu "
-    "stutter and smearing. Like UI recomposition it needs the game to hand DLSS-G its UI colour-and-alpha buffer; without that tag the flag "
-    "has nothing to detect. Game keeps the game's own value.";
+constexpr std::string_view XMX_GENERATOR_TOOLTIP =
+    "XMX: Intel's XeFG generates the frames for DLSS-G, on every GPU, through the ported multi-frame model while NVIDIA's NGX keeps owning "
+    "presentation. It needs libxess_fg.dll 1.3.1.78 and libxell.dll beside the game's executable (the panel's Install/update files copies "
+    "them). Turning it on hooks the provider, so NVIDIA's own generation does not come back for the rest of the session: enable it in the "
+    "game folder you are testing, and disable it by deleting the key from ReShade.ini.";
 
 constexpr std::string_view REFLEX_MODE_TOOLTIP =
     "NVIDIA Reflex, rewritten into the game's own latency calls: On is low latency, Boost also forces maximum GPU clocks, Off disables the "
@@ -1021,32 +1016,20 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return static_cast<double>(s.dynamic_mfg_target_fps); },
         .set = [](Settings& s, double v) { s.dynamic_mfg_target_fps = static_cast<uint32_t>(v); },
     },
-    // The DLSS-G option overrides (2026-10-26, addon/sl_fg_hooks.cpp): fields of the same
-    // addon-owned options copy the multiplier rewrite submits, so they apply with or without a
-    // multiplier override, on every enabled submission.
-    {
-        .key = "FGUiRecomposition",
-        .kind = SettingKind::CHOICE,
-        .section = SettingSection::DLSS_REFLEX,
-        .label = "UI recomposition",
-        .tooltip = FG_UI_RECOMPOSITION_TOOLTIP,
-        .choices = FG_OPTION_CHOICES,
-        .get = [](const Settings& s) { return static_cast<double>(s.fg_ui_recomposition); },
-        .set = [](Settings& s, double v) { s.fg_ui_recomposition = FromIndex<FgOptionOverride>(v); },
-    },
-    {
-        .key = "FGMenuDetection",
-        .kind = SettingKind::CHOICE,
-        .section = SettingSection::DLSS_REFLEX,
-        .label = "Fullscreen menu detection",
-        .tooltip = FG_MENU_DETECTION_TOOLTIP,
-        .choices = FG_OPTION_CHOICES,
-        .get = [](const Settings& s) { return static_cast<double>(s.fg_menu_detection); },
-        .set = [](Settings& s, double v) { s.fg_menu_detection = FromIndex<FgOptionOverride>(v); },
-    },
     // The Reflex override (2026-10-25, addon/reflex_override.hpp): the mode and an output-FPS cap,
     // rewritten into the game's NvAPI_D3D_SetSleepMode calls. Works for native Reflex games and
     // Streamline's sl.reflex alike.
+    // The XMX mode (src/xmx/): XeFG's own context generates inside DLSS-G's EvaluateFeature. The
+    // other rows in this card describe NVIDIA's generator, so they stop applying while it is on.
+    {
+        .key = "XmxGenerator",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::DLSS_REFLEX,
+        .label = "XMX (Intel XeFG generator)",
+        .tooltip = XMX_GENERATOR_TOOLTIP,
+        .get = [](const Settings& s) { return Flag(s.xmx_generator); },
+        .set = [](Settings& s, double v) { s.xmx_generator = v != 0.0; },
+    },
     {
         .key = "ReflexMode",
         .kind = SettingKind::CHOICE,

@@ -345,10 +345,16 @@ NVSDK_NGX_Result RunEvaluate(size_t slot, NgxApi api, ID3D12GraphicsCommandList*
   NVSDK_NGX_Result result = NVSDK_NGX_Result_Fail;
   {
     const ColorSwap swap(&call, handle);
-    const NVSDK_NGX_Handle* const use = (call.eval_handle != nullptr ? call.eval_handle : handle);
-    t_vulkan_evaluate = (api == NgxApi::VULKAN);
-    result = original(use);
-    t_vulkan_evaluate = false;
+    if (call.skip_original) {
+      // The XMX mode generated the frame itself, into the same buffers the core would have written:
+      // running the core's generation now would overwrite it (and, hooked, it produces nothing).
+      result = NVSDK_NGX_Result_Success;
+    } else {
+      const NVSDK_NGX_Handle* const use = (call.eval_handle != nullptr ? call.eval_handle : handle);
+      t_vulkan_evaluate = (api == NgxApi::VULKAN);
+      result = original(use);
+      t_vulkan_evaluate = false;
+    }
   }  // the game's Color is back before AfterEvaluate reads the block
   NotifyEvaluate(api, list, handle, parameters, result);
   return result;
@@ -762,9 +768,11 @@ size_t HookInstaller::Scan() {
 
 namespace {
 
-// The modules loaded into this process. Toolhelp32 is the route that works everywhere, including this
-// process's own modules (Phantom Blade Zero: K32EnumProcessModules reported zero modules on every scan,
-// which left the installer blind to every NGX library, the game's DLSS included).
+// The modules loaded into this process. K32EnumProcessModules is asked first; when it fails or reports
+// nothing (Phantom Blade Zero reports zero on every scan, commit 3dcf52c), the loader's own list in the
+// PEB is read instead -- it needs no API, so it is current even under the loader lock (the XMX field log
+// had CreateToolhelp32Snapshot answering ERROR_BAD_LENGTH, 24, on the same process). Toolhelp is the
+// 32-bit half only: the PEB offsets below are the x64 ABI's.
 std::vector<HMODULE> LoadedModules() {
   std::vector<HMODULE> modules(256u);
   for (;;) {
@@ -783,7 +791,44 @@ std::vector<HMODULE> LoadedModules() {
     modules.resize(count);  // the list grew past the buffer: ask again with it
   }
   modules.clear();
-  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+  // The loader's own list, read from the PEB: every module here is a mapped image and the list is
+  // always current, so its three pointers need no API at all.
+#if defined(_WIN64)
+  // PEB_LDR_DATA: Length, Initialized, SsHandle, then the three list heads. InLoadOrderModuleList
+  // comes first, right after the 4-byte fields padded to 8 (x64): 0x00, 0x04, 0x08, 0x10.
+  struct PebLdrData {
+    ULONG Length;
+    BOOLEAN Initialized;
+    PVOID SsHandle;
+    LIST_ENTRY InLoadOrderModuleList;
+  };
+  struct LdrEntry {
+    LIST_ENTRY InLoadOrderLinks;
+    LIST_ENTRY InMemoryOrderLinks;
+    LIST_ENTRY InInitializationOrderLinks;
+    void* DllBase;  // the only field read; the rest of LDR_DATA_TABLE_ENTRY is not needed
+  };
+  // TEB -> PEB -> Ldr, at the offsets the x64 ABI fixes: gs:[0x30] is the TEB, TEB+0x60 the PEB,
+  // PEB+0x18 the PEB_LDR_DATA.
+  const auto* const teb = reinterpret_cast<const unsigned char*>(__readgsqword(0x30));
+  if (teb != nullptr) {
+    const auto* const peb = *reinterpret_cast<const unsigned char* const*>(teb + 0x60);
+    if (peb != nullptr) {
+      const auto* const ldr = *reinterpret_cast<const PebLdrData* const*>(peb + 0x18);
+      if (ldr != nullptr) {
+        const LIST_ENTRY* const head = &ldr->InLoadOrderModuleList;
+        for (const LIST_ENTRY* node = head->Flink; node != head && node != nullptr && modules.size() < 4096u;
+             node = node->Flink) {
+          const auto* const entry = reinterpret_cast<const LdrEntry*>(node);
+          if (entry->DllBase != nullptr) modules.push_back(static_cast<HMODULE>(entry->DllBase));
+        }
+        if (!modules.empty()) return modules;
+      }
+    }
+  }
+  return modules;  // the PEB chain was unreadable or empty: nothing to report
+#else
+  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
   if (snapshot == INVALID_HANDLE_VALUE) {
     nr::Logf(nr::LogLevel::WARN, "could not snapshot this process's modules ({}); no NGX library can be seen", GetLastError());
     return modules;
@@ -797,6 +842,7 @@ std::vector<HMODULE> LoadedModules() {
   }
   CloseHandle(snapshot);
   return modules;
+#endif
 }
 
 }  // namespace

@@ -81,19 +81,30 @@ nvapi::Status __cdecl SetSleepModeDetour(IUnknown* device, nvapi::SleepModeParam
 
   const uint32_t mode = g_desired_mode.load(std::memory_order_relaxed);
   const uint32_t cap_fps = g_desired_cap_fps.load(std::memory_order_relaxed);
-  // Call counting and the last logged values: the log lines below fire on the first few calls and
-  // then only when the game's own request changes. Only this detour reads them.
+  // Call counting and the request shapes already logged: the lines below fire on the first few calls
+  // and then once per distinct shape. Only this detour reads them.
   static std::atomic<uint32_t> calls_seen{0u};
-  static std::atomic<uint32_t> last_logged_mode{UINT32_MAX};
-  static std::atomic<uint32_t> last_logged_interval{UINT32_MAX};
+  // Every (mode, interval) pair seen, not just the previous one: a frame-generation game alternates
+  // its interval between 0 and the frame time on every call, and comparing against the previous value
+  // alone made each call look like a change -- one line per frame, forever.
+  static std::atomic<uint64_t> logged_shapes[16]{};
   const uint32_t call_number = calls_seen.fetch_add(1u, std::memory_order_relaxed) + 1u;
   // Log the first few calls and then only changes: these lines are how a live test tells whether
   // the game's Reflex path reaches NvAPI_D3D_SetSleepMode at all (an OptiScaler-style shim may
   // never call it), and what was rewritten.
-  const uint32_t previous_logged_mode = last_logged_mode.load(std::memory_order_relaxed);
-  const uint32_t previous_logged_interval = last_logged_interval.load(std::memory_order_relaxed);
-  const bool log_this_call = call_number <= 5u || params->bLowLatencyMode != previous_logged_mode
-                             || params->minimumIntervalUs != previous_logged_interval;
+  // Doubled and offset so that (mode 0, interval 0) -- Reflex off -- is not the empty slot's 0.
+  const uint64_t shape = ((static_cast<uint64_t>(params->bLowLatencyMode) << 32) | params->minimumIntervalUs) * 2u + 1u;
+  bool log_this_call = call_number <= 5u;
+  if (!log_this_call) {
+    for (auto& slot : logged_shapes) {
+      uint64_t known = slot.load(std::memory_order_relaxed);
+      if (known == shape) break;
+      if (known == 0u && slot.compare_exchange_strong(known, shape, std::memory_order_relaxed)) {
+        log_this_call = true;
+        break;
+      }
+    }
+  }
   if (log_this_call) {
     nr::Logf(nr::LogLevel::INFO,
              "reflex: SetSleepMode call #{}: params version {:#x}, native mode {} boost {} interval {} us, markers {} min queue {}; panel: mode {} cap {} FPS",
@@ -101,8 +112,6 @@ nvapi::Status __cdecl SetSleepModeDetour(IUnknown* device, nvapi::SleepModeParam
              static_cast<uint32_t>(params->bLowLatencyBoost), params->minimumIntervalUs,
              static_cast<uint32_t>(params->bUseMarkersToOptimize),
              static_cast<uint32_t>(params->bUseMinQueueTime), mode, cap_fps);
-    last_logged_mode.store(params->bLowLatencyMode, std::memory_order_relaxed);
-    last_logged_interval.store(params->minimumIntervalUs, std::memory_order_relaxed);
   }
 
   // Anything this rewrite does not own -- a params version other than the official V1 spelling, or

@@ -36,6 +36,7 @@ struct OverlayView {
   std::string fg_multiplier_line;   // the accepted count, or Dynamic MFG's ownership of it
   std::string dynamic_mfg_line;     // in force, or which gate holds it back
   std::string reflex_live_line;     // the mode and cap the driver accepted
+  std::string xmx_live_line;        // the XMX mode: XeFG generating, hooked, or why it cannot start
   // The game's DLSS sizes, for the live line's "1280x720 -> 2560x1440" (CreateSnapshot's render and
   // output regions; zero until the game created a feature).
   nr::Size dlss_render;

@@ -15,23 +15,9 @@
 
 namespace uplift::addon::slfg {
 
-// A DLSS-G option row: Game keeps the game's own value, On/Off force it into the add-on's own
-// options copy on every enabled submission.
-enum class FgOptionOverride : uint32_t {
-  GAME = 0u,
-  ON = 1u,
-  OFF = 2u,
-};
-
 // 0 = leave the game's request alone; 2..6 = force that exact multiplier. Applied on the
 // game's next enabled slDLSSGSetOptions call (no restart, no config reload).
 void SetForceMultiplier(uint32_t multiplier);
-
-// The two DLSS-G option fields (2026-10-26), applied on every enabled submission -- with or
-// without a multiplier override. UI recomposition asks the provider to interpolate the HUD and
-// game UI separately (only effective when the game tags HUDLessColor/UIColorAndAlpha);
-// fullscreen menu detection is DLSSGFlags::eEnableFullscreenMenuDetection.
-void SetOptionOverrides(FgOptionOverride ui_recomposition, FgOptionOverride menu_detection);
 
 // Dynamic MFG: submit DLSSGMode::eDynamic and let NVIDIA's provider own multiplier selection
 // and pacing. `target_fps` 0 = follow the active display refresh rate.
@@ -41,6 +27,10 @@ void SetDynamicMfg(bool enabled, uint32_t target_fps);
 // multiplier selectors built from it (STALKER 2) offer more than 2x. 0 = do not advertise.
 // Never raises above the runtime's own ceiling (GeneratedFramesCeiling).
 void SetAdvertisedMaxGenerated(uint32_t generated_frames);
+
+// XMX owns the multiplier through its own ported model (src/xmx/), so the provider is never asked
+// for NVIDIA's Dynamic MFG: that row stands down while this is on.
+void SetXmxMode(bool xmx);
 
 // The DLSS-G runtime's own numFramesToGenerateMax, seen before this add-on advertises more
 // (generated frames: 4 = 5x, 5 = 6x). 0 = not observed yet: offer every multiplier.

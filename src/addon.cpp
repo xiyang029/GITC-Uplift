@@ -58,6 +58,8 @@
 #include "addon/swapchain_usage.hpp"
 #include "addon/uplift_catch.hpp"
 #include "addon/vk_dlss_context.hpp"
+#include "xmx/hook.hpp"
+#include "xmx/host.hpp"
 #include "bridge/d3d10_bridge.hpp"
 #include "bridge/d3d11_bridge.hpp"
 #include "bridge/gl_bridge.hpp"
@@ -127,10 +129,6 @@ static_assert(static_cast<uint32_t>(ui::ReflexOverride::GAME) == static_cast<uin
 static_assert(static_cast<uint32_t>(ui::ReflexOverride::ON) == static_cast<uint32_t>(addon::reflex::ReflexModeOverride::ON));
 static_assert(static_cast<uint32_t>(ui::ReflexOverride::BOOST) == static_cast<uint32_t>(addon::reflex::ReflexModeOverride::BOOST));
 static_assert(static_cast<uint32_t>(ui::ReflexOverride::OFF) == static_cast<uint32_t>(addon::reflex::ReflexModeOverride::OFF));
-// The same for the two DLSS-G option rows (settings_schema.cpp's FG_OPTION_CHOICES).
-static_assert(static_cast<uint32_t>(ui::FgOptionOverride::GAME) == static_cast<uint32_t>(addon::slfg::FgOptionOverride::GAME));
-static_assert(static_cast<uint32_t>(ui::FgOptionOverride::ON) == static_cast<uint32_t>(addon::slfg::FgOptionOverride::ON));
-static_assert(static_cast<uint32_t>(ui::FgOptionOverride::OFF) == static_cast<uint32_t>(addon::slfg::FgOptionOverride::OFF));
 
 // Plan 17: DiagnosticRemoveDevice presses Retry now itself about a second (at 60 Hz) after a stop that may still be retried.
 constexpr uint32_t DIAGNOSTIC_RETRY_PRESENTS = 60u;
@@ -480,6 +478,7 @@ bool PinReshade(HMODULE reshade_module) {
 
 // Settings that act outside the per-frame FrameConfig.
 void ApplyProcessSettings(const ui::Settings& settings) {
+  uplift::xmx::SetEnabled(settings.xmx_generator);
   addon::InstallLogBridge(settings.log_level);
   // Spec §12: the NGX runtime reads it when the snippet next loads.
   SetEnvironmentVariableW(L"__NGX_SHOW_INDICATOR", (settings.show_nv_indicator ? L"1024" : nullptr));
@@ -495,10 +494,9 @@ uint32_t FgMultiplierChoice(ui::FgMultiplierOverride choice) {
 // each is a live switch -- the atomics take the choice and the game's next relevant call applies it.
 void PushFgRuntimeChoices(const ui::Settings& settings) {
   const uint32_t multiplier = FgMultiplierChoice(settings.fg_multiplier);
+  addon::slfg::SetXmxMode(settings.xmx_generator);
   addon::slfg::SetForceMultiplier(multiplier);
-  addon::slfg::SetDynamicMfg(settings.dynamic_mfg, settings.dynamic_mfg_target_fps);
-  addon::slfg::SetOptionOverrides(static_cast<addon::slfg::FgOptionOverride>(static_cast<uint32_t>(settings.fg_ui_recomposition)),
-                                  static_cast<addon::slfg::FgOptionOverride>(static_cast<uint32_t>(settings.fg_menu_detection)));
+  addon::slfg::SetDynamicMfg(settings.dynamic_mfg && !settings.xmx_generator, settings.dynamic_mfg_target_fps);
   // Advertise the provider's full ceiling (5 generated frames = 6x) once any override is wanted.
   addon::slfg::SetAdvertisedMaxGenerated(settings.dynamic_mfg || multiplier >= 3u ? 5u : 0u);
   addon::reflex::SetDesired(static_cast<addon::reflex::ReflexModeOverride>(static_cast<uint32_t>(settings.reflex_mode)),
@@ -3257,6 +3255,15 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
           });
           const addon::reflex::LiveState reflex = addon::reflex::ReadLiveState();
           view.reflex_live_line = ui::FormatReflexLive(reflex.known, reflex.mode, reflex.fps_cap);
+          if (state.settings.xmx_generator) {
+            const uplift::xmx::Status xmx = uplift::xmx::Snapshot();
+            view.xmx_live_line = ui::FormatXmxLive({.generation = xmx.generating,
+                                                    .hooked = xmx.hooked,
+                                                    .failure = xmx.failure,
+                                                    .layers = xmx.layers,
+                                                    .launches = xmx.launches,
+                                                    .fallbacks = xmx.fallbacks});
+          }
         }
         if (const std::optional<std::string> warning =
                 ui::FrameGenerationWarning(status.frame_generation.active, state.settings.pass_count)) {

@@ -73,7 +73,32 @@ git -C "%DEPS%\minhook" checkout --quiet FETCH_HEAD || exit /b 1
 >"%DEPS%\minhook-commit.txt" echo !MINHOOK_COMMIT!
 :minhook_done
 
+rem Intel XeSS SDK headers (never committed) at the pinned v3.0.2 tag: the XeFG vtable and XeLL
+rem declarations the XMX mode compiles against. Headers only; Intel's runtime DLLs are never fetched
+rem or shipped (the game's, or OptiScaler's, copy is used at run time).
+set "XESS_TAG=v3.0.2"
+set "FETCHED_XESS="
+if exist "%DEPS%\xess\inc\xess_fg\xefg_swapchain_d3d12.h" if exist "%DEPS%\xess-tag.txt" set /p FETCHED_XESS=<"%DEPS%\xess-tag.txt"
+if "!FETCHED_XESS!"=="%XESS_TAG%" goto xess_done
+if exist "%DEPS%\xess" rmdir /s /q "%DEPS%\xess"
+if exist "%DEPS%\xess-tag.txt" del "%DEPS%\xess-tag.txt"
+git clone --depth 1 --branch %XESS_TAG% --filter=blob:none --sparse https://github.com/intel/xess.git "%DEPS%\xess" || exit /b 1
+git -C "%DEPS%\xess" sparse-checkout set inc || exit /b 1
+>"%DEPS%\xess-tag.txt" echo %XESS_TAG%
+:xess_done
+
+rem The pinned MFGUnlocker v1.6.0 ASI: read as a PE image for its RCDATA resources (Intel's DXIL
+rem programs and the six replacement shaders), never loaded or executed. tools/prepare_xemfg_inputs.py
+rem pins its SHA-256 and fails the build on any other file.
+if exist "%DEPS%\mfgunlocker\MFGUnlocker.dll" goto mfgu_done
+if exist "%DEPS%\mfgunlocker" rmdir /s /q "%DEPS%\mfgunlocker"
+mkdir "%DEPS%\mfgunlocker" || exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/dashdogy/MFG-Unlocker/releases/download/v1.6.0/MFGUnlocker-v1.6.0.zip' -OutFile '%DEPS%\mfgunlocker\mfu.zip'; Expand-Archive -Path '%DEPS%\mfgunlocker\mfu.zip' -DestinationPath '%DEPS%\mfgunlocker' -Force; Remove-Item '%DEPS%\mfgunlocker\mfu.zip'" || exit /b 1
+:mfgu_done
+
 echo NGX SDK headers (%DLSS_COMMIT%): %DEPS%\dlss\include
+echo XeSS SDK %XESS_TAG% headers: %DEPS%\xess\inc
+echo XeSS programs (pinned MFGUnlocker ASI): %DEPS%\mfgunlocker\MFGUnlocker.dll
 echo Streamline SDK %SL_COMMIT% headers: %DEPS%\streamline\include
 echo NVAPI headers (Streamline's external/nvapi): %DEPS%\streamline\external\nvapi
 echo ReShade %RESHADE_TAG% headers: %DEPS%\reshade\include

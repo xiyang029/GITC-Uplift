@@ -17,6 +17,31 @@ under the NVIDIA RTX SDKs license. Not redistributed by this repository or its r
 headers are fetched; no NVIDIA library or binary is linked, committed or redistributed. NVIDIA's DLSS-NR
 runtime (`nvngx_dlssnr.dll`) is supplied by the user and loaded at run time.
 
+## Intel XeSS Frame Generation program data — Intel Corporation's work, under Intel's XeSS SDK licence
+The XMX mode (`src/xmx/`) runs Intel's XeSS Frame Generation multi-frame model inside DLSS-G's
+`EvaluateFeature`. It embeds compute shader programs (DXIL) that run that model on non-Intel GPUs:
+46 of the 54 are derived from programs in Intel's XeSS SDK (`libxess_fg.dll`) and were modified by
+MFG Unlocker; the others are MFG Unlocker's own. Seven replacement shaders shipped here are
+MFG Unlocker's own HLSL (`src/xmx/vendor/port/*.hlsl`), compiled by this build.
+
+These programs are **not** covered by this project's MIT licence and remain subject to Intel's
+licence terms for the XeSS SDK. They are never committed: `tools/fetch_deps.cmd` downloads the pinned
+MFG Unlocker ASI into `third_party/_deps/mfgunlocker/` (ignored by git), and
+`tools/prepare_xemfg_inputs.py` reads the programs out of its RCDATA section at build time, verifying
+the ASI's SHA-256 and every program against the pinned manifest. Do not redistribute `gitc-uplift.addon64`.
+
+No Intel XeSS SDK binary, model weights or tensors are included. The mode uses the `libxess_fg.dll`
+and `libxell.dll` the user supplies beside the add-on. Intel and XeSS are trademarks of Intel
+Corporation or its subsidiaries.
+Source: https://github.com/dashdogy/MFG-Unlocker (v1.6.0, ASI SHA-256 `161b9e12…`), derived from
+https://github.com/intel/xess
+
+## Intel XeSS SDK headers
+Fetched at build time from https://github.com/intel/xess at tag v3.0.2 into `third_party/_deps/xess/`
+under Intel's XeSS SDK licence; sparse-checkout of `inc/` only. Headers only: no XeSS library or
+binary is linked, committed or redistributed by this repository. The headers are used solely to name
+the XeFG/XeLL types the XMX generator drives.
+
 ## ReShade add-on API headers (BSD-3-Clause) — Copyright (C) 2014 Patrick Mours
 `include/` of https://github.com/crosire/reshade at tag v6.8.0, fetched into `third_party/_deps/reshade/` at build
 time. The API is header-only, so its inline code is compiled into `gitc-uplift.addon64` and `gitc-uplift.addon32`. Not redistributed as source.

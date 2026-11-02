@@ -456,7 +456,6 @@ class DeviceContext {
   struct StageState {
     sources::WorkSizeSettle settle;
     nr::Size work;
-    nr::Size last_work;   // last frame's, so ApplyLookConfig can tell when the size just changed
     nr::Size canvas;
     bool nr_applied = false;
     uint32_t passes_run = 0u;
@@ -493,8 +492,15 @@ class DeviceContext {
   std::string_view skip_reason_;
   bool skip_from_session_ = false;  // M1 fix round 1: skip_reason_ is Session::Evaluate's own
   uint32_t half_rate_phase_ = 0u;  // Frame skip: where this present sits in the setting's cycle; the network runs on phase 0
-  bool half_rate_armed_ = false;    // Frame skip: whether half-rate is currently allowed (false while the work size is settling)
-  uint32_t size_settle_grace_ = 0u;  // Frame skip: frames left to wait after a work-size change before half-rate may run again
+  // Frame skip: presents left to run the network on, after the placement changed. A skipped frame carries the
+  // previous frame's result, so the state it carries was built for the old stage's canvas; switching stages
+  // while one is in flight is what the panel's placement rows do several times a second, and it takes the
+  // device with it. Running the network for these presents lets every stage's carry state fall away on its
+  // own before a skip is asked for again.
+  uint32_t skip_stand_down_ = 0u;
+  // Frame skip: the value last pushed to the pipeline, so a switch (not a frame) is what triggers the drain.
+  bool half_rate_applied_ = false;
+
   std::chrono::steady_clock::time_point last_rate_report_{};  // the panel's frame rate, logged beside the pipeline's own GPU timings
   sources::PresentTarget frame_target_;
   nr::Controls controls_;

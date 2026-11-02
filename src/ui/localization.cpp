@@ -91,14 +91,6 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Also smooths NR's small-scale change.", "同时平滑 NR 造成的小范围变化。"},
     {"Always", "始终"},
     {"Another NR tool is running", "检测到其他 NR 工具正在运行"},
-    {"Asks DLSS Frame Generation to detect the game's fullscreen menus and pause interpolation underneath them, which removes the menu "
-     "stutter and smearing. Like UI recomposition it needs the game to hand DLSS-G its UI colour-and-alpha buffer; without that tag the flag "
-     "has nothing to detect. Game keeps the game's own value.",
-     "要求 DLSS 帧生成识别游戏的全屏菜单，并在菜单下暂停插帧，从而消除菜单卡顿和拖影。与 UI 重组一样，这需要游戏向 DLSS-G 提供 UI 颜色与 alpha 缓冲区；没有该标记时这个标志没有可检测的对象。“游戏默认”保持游戏自身的设置。"},
-    {"Asks DLSS Frame Generation to interpolate the HUD and game UI separately from the 3D image (UI recomposition) -- the fix for HUD "
-     "ghosting and jitter at 3x/4x and above. It only works when the game hands DLSS-G its HUD-less and UI colour buffers, so a game that "
-     "does not tag them shows no change. Game keeps the game's own value (an NVIDIA App override can still win).",
-     "要求 DLSS 帧生成把 HUD 与游戏界面从 3D 画面中分离出来单独插帧（UI 重组）——这是解决 3x/4x 及以上倍率下 HUD 重影与抖动的办法。仅当游戏向 DLSS-G 提供 HUD-less 与 UI 颜色缓冲区时才有效，未提供这些通道的游戏不会有任何变化。“游戏默认”保持游戏自身的设置（NVIDIA App 的覆盖仍可能优先）。"},
     {"Asks ReShade to create the game's Direct3D 9 device as 9Ex, so frames reach NR on the GPU. Some games misbehave on 9Ex: if this one does not start, Uplift turns this off by itself.", "请 ReShade 将游戏的 Direct3D 9 设备创建为 9Ex，使帧可通过 GPU 传给 NR。部分游戏无法正常使用 9Ex；如果游戏因此无法启动，Uplift 会自动关闭此选项。"},
     {"Auto", "自动"},
     {"Auto (UPLIFT_MASK)", "自动（UPLIFT_MASK）"},
@@ -344,7 +336,6 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Full protection at (% of brightness)", "完全保护阈值（亮度百分比）"},
     {"Full-density centre height (%)", "全密度中心高度（%）"},
     {"Full-density centre width (%)", "全密度中心宽度（%）"},
-    {"Fullscreen menu detection", "全屏菜单检测"},
     {"GL_EXT_memory_object_win32 is not offered, so the context cannot import Uplift's textures", "驱动未提供 GL_EXT_memory_object_win32 扩展，无法导入 Uplift 纹理"},
     {"GL_EXT_memory_object_win32 is offered but its functions are missing:", "驱动已提供 GL_EXT_memory_object_win32 扩展，但缺少相应函数："},
     {"GRACE", "宽限期"},
@@ -957,7 +948,6 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Turn on", "启用"},
     {"Turn on Keep faces (Look) first", "请先在“外观”中启用“保护面部”。"},
     {"UI correction", "UI 校正"},
-    {"UI recomposition", "UI 重组"},
     {"UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, HRESULT {:#010x})", "无法向 Uplift 辅助进程共享 UPLIFT_MASK（DXGI_FORMAT {}，HRESULT {:#010x}）"},
     {"UPLIFT_MASK could not be shared with Uplift's helper (DXGI_FORMAT {}, {})", "无法向 Uplift 辅助进程共享 UPLIFT_MASK（DXGI_FORMAT {}，{}）"},
     {"UPLIFT_MASK could not be shared with the Direct3D 11 relay (DXGI_FORMAT {}, HRESULT {:#010x})", "无法向 Direct3D 11 中继共享 UPLIFT_MASK（DXGI_FORMAT {}，HRESULT {:#010x}）"},
@@ -1123,6 +1113,18 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Where in the game's frame this pass runs. Before upscaling is cheapest: NR works at the game's render size, and DLSS upscales the result. After DLSS and Present work on the upscaled image (Present with the HUD). A pass never runs before the pass before it.", "选择此层在游戏帧中的运行阶段。“DLSS前”的开销最低：NR 在游戏渲染分辨率下运行，再由 DLSS 升频。“DLSS后”和“后处理”会处理升频后的画面（后处理包含 HUD）。任何一层都不会早于它的前一层运行。"},
     {"Why: ", "当前原因："},
     {"Working at {}x{}{}", "处理尺寸：{}x{}{}"},
+    {"XMX (Intel XeFG generator)", "XMX（Intel XeFG 生成器）"},
+    {"XMX: Intel XeFG is generating", "XMX：Intel XeFG 正在生成帧"},
+    {"XMX: Intel XeFG is generating (tensor cores {} layers, {} launches)", "XMX：Intel XeFG 正在生成帧（张量核心 {} 层，{} 次启动）"},
+    {"XMX: Intel XeFG is generating (tensor cores {} layers, {} launches, {} fell back)", "XMX：Intel XeFG 正在生成帧（张量核心 {} 层，{} 次启动，{} 次回退）"},
+    {"XMX: Intel's XeFG generates the frames for DLSS-G, on every GPU, through the ported multi-frame model while NVIDIA's NGX keeps owning "
+     "presentation. It needs libxess_fg.dll 1.3.1.78 and libxell.dll beside the game's executable (the panel's Install/update files copies "
+     "them). Turning it on hooks the provider, so NVIDIA's own generation does not come back for the rest of the session: enable it in the "
+     "game folder you are testing, and disable it by deleting the key from ReShade.ini.",
+     "XMX：由 Intel 的 XeFG 为 DLSS-G 生成帧，适用于任何显卡；使用移植的多帧模型，而 NVIDIA 的 NGX 仍负责呈现。需要游戏可执行文件旁有 libxess_fg.dll 1.3.1.78 和 libxell.dll（可通过面板的“安装/更新文件”复制）。开启后会挂钩该提供者，因此 NVIDIA 自身的生成在本会话内不会恢复：请只在正在测试的游戏目录开启，删除 ReShade.ini 中对应的键即可关闭。"},
+    {"XMX: XeFG is up, waiting for the game's first DLSS-G frame", "XMX：XeFG 已就绪，等待游戏的第一个 DLSS-G 帧"},
+    {"XMX: cannot start ({})", "XMX：无法启动（{}）"},
+    {"XMX: waiting for the game's DLSS-G to be evaluated", "XMX：正在等待游戏评估 DLSS-G"},
     {"Yield", "让出"},
     {"Yield stands down while another tool runs NR in this game; Observe keeps running.", "“让出”会在其他工具为此游戏运行 NR 时暂停；“观察”则继续运行。"},
     {"[Uplift] error: ", "[Uplift] 错误："},

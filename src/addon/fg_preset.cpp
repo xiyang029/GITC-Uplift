@@ -12,6 +12,7 @@
 #include <psapi.h>
 
 #include "addon/nvapi_query.hpp"
+#include "ngx_hooks/hook_installer.hpp"  // IsNgxCoreFileName: the core is a preset reader too
 #include "ngx_hooks/minhook_once.hpp"
 #include "nr/log.hpp"
 
@@ -236,11 +237,9 @@ bool FindAndHookCachedReader(HMODULE module) {
     nr::Logf(nr::LogLevel::INFO, "the FG preset override found no configuration slot in this provider (helper count {}, helpers {:#x} and {:#x}); "
                                  "other NGX modules may still have one",
              helper_count, helpers[0], helpers[1]);
-    nr::Logf(nr::LogLevel::INFO, "the FG preset override hooked the provider's cached preset reader at {} (live switching on)", selected);
-    return false;  // the reader is hooked but this provider holds no slot: keep hunting others
   }
   nr::Logf(nr::LogLevel::INFO, "the FG preset override hooked the provider's cached preset reader at {} (live switching on)", selected);
-  return true;
+  return slot != nullptr;  // no slot: the reader is hooked, so keep hunting other modules
 }
 
 // The provider module, captured from a DRS read's return address. Hunted until the configuration
@@ -359,16 +358,28 @@ DrsObservation& ObservationOf(uint32_t id) {
   return id == SR_PRESET_ID ? g_sr_observation : g_rr_observation;
 }
 
-// An NGX feature provider (the snippet) exports NVSDK_NGX_GetSnippetVersion; the NGX runtime and every
-// other NvAPI caller do not. Only the provider's own initialization read is ours to answer (MFG-Unlocker's
-// rule): anything else reading these ids -- a diagnostics tool, a game -- gets the driver's answer.
-bool IsNgxProvider(const void* caller) {
+// The modules whose own initialization read of an SR/RR preset id is ours to answer (MFG-Unlocker's
+// rule): the NGX feature provider -- the snippet, which exports NVSDK_NGX_GetSnippetVersion -- and the
+// NGX core itself. A game without a snippet module is served by the core (_nvngx.dll from the
+// DriverStore), and its read is equally the one that outranks every per-create hint: answering only
+// the snippet left the driver's value winning with no evidence line in the log at all. Every other
+// NvAPI caller -- a diagnostics tool, a game -- still gets the driver's answer.
+bool IsNgxPresetReader(const void* caller) {
+  if (caller == nullptr) return false;
   HMODULE module = nullptr;
-  return caller != nullptr
-         && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               static_cast<LPCWSTR>(caller), &module)
-                != FALSE
-         && module != nullptr && GetProcAddress(module, "NVSDK_NGX_GetSnippetVersion") != nullptr;
+  if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         static_cast<LPCWSTR>(caller), &module)
+          == FALSE
+      || module == nullptr) {
+    return false;
+  }
+  if (GetProcAddress(module, "NVSDK_NGX_GetSnippetVersion") != nullptr) return true;
+  wchar_t path[32768] = {};
+  const DWORD length = GetModuleFileNameW(module, path, static_cast<DWORD>(std::size(path)));
+  if (length == 0u || length >= std::size(path)) return false;
+  const std::wstring_view full(path, length);
+  const size_t separator = full.find_last_of(L"\\/");
+  return ngx_hooks::IsNgxCoreFileName(separator == std::wstring_view::npos ? full : full.substr(separator + 1u));
 }
 
 NvAPI_Status SuppressSrRrRead(const void* caller, uint32_t id, NvAPI_Status result, DrsSetting* setting) {
@@ -378,7 +389,7 @@ NvAPI_Status SuppressSrRrRead(const void* caller, uint32_t id, NvAPI_Status resu
     return result;
   }
   const bool sr = (id == SR_PRESET_ID);
-  if (!IsNgxProvider(caller)) return result;
+  if (!IsNgxPresetReader(caller)) return result;
   // The row's evidence, recorded whatever the panel asks for: the value the driver had, and whether it
   // reached the provider.
   DrsObservation& observation = ObservationOf(id);
@@ -507,15 +518,23 @@ void EnsureFgPresetHook() {
   uint32_t state = g_install.load(std::memory_order_relaxed);
   if (state != 0u) return;  // hooked, failed, or the watchdog owns the install
   if (!g_install.compare_exchange_strong(state, 4u, std::memory_order_acq_rel)) return;  // 4 = watchdog started
-  // The FG provider reads its preset once, during engine init -- possibly before the first present,
-  // and always before the add-on's entry-point polls. A short watchdog installs the hook the moment
-  // nvapi64.dll appears, so no NvAPI call can precede it. 25 ms steps, exits on install or failure.
+  // Install right here first: nvapi64.dll is usually already loaded when the add-on attaches, and a
+  // provider that reads its preset during engine init must find the filter already in place. Leaving
+  // that to the watchdog's first step was a real loss: the Ray Reconstruction provider's read slipped
+  // through unprompted (the log showed no "driver had N" line for it at all), the driver's value was
+  // cached, and no per-create hint key could change the model for the rest of the session -- the panel's
+  // D/E/F choice looked dead until a start where the hook happened to win the race.
+  InstallFgPresetHook();
+  if (g_install.load(std::memory_order_acquire) == 1u) return;  // hooked: nothing left to wait for
+  // Otherwise the watchdog owns it. It is stepped at 1 ms rather than 25: this loop only runs until
+  // nvapi64.dll appears, and every millisecond of it is a window for an early NvAPI caller to read the
+  // driver setting before the filter exists.
   std::thread([] {
     for (;;) {
       uint32_t current = g_install.load(std::memory_order_relaxed);
       if (current == 1u || current == 2u) return;  // hooked or failed for good
       if (GetModuleHandleW(L"nvapi64.dll") != nullptr) break;
-      Sleep(25);
+      Sleep(1);
     }
     InstallFgPresetHook();
   }).detach();

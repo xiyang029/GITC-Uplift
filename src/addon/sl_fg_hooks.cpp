@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 
+#include "addon/environment.hpp"  // Utf8FromPath, for the hooked module's path in the log
 #include "addon/fg_preset.hpp"
 #include "addon/frame_rate.hpp"
 #include "ngx_hooks/minhook_once.hpp"
@@ -27,41 +28,18 @@ namespace {
 using SetOptionsFn = PFun_slDLSSGSetOptions*;
 using GetStateFn = PFun_slDLSSGGetState*;
 using GetFeatureFunctionFn = PFun_slGetFeatureFunction*;
-// The resource-tag entry points: the header marks PFun_slSetTag itself deprecated, so the legacy
-// signature is restated here rather than used through that alias.
-using SetTagForFrameFn = sl::Result(const sl::FrameToken&, const sl::ViewportHandle&, const sl::ResourceTag*, uint32_t, sl::CommandBuffer*);
-using SetTagFn = sl::Result(const sl::ViewportHandle&, const sl::ResourceTag*, uint32_t, sl::CommandBuffer*);
-
 // ---- The panel's choices ----
 
 std::atomic<uint32_t> g_force_multiplier{0u};   // 0 = follow the game; 2..kMaxMultiplier = force
 // The provider reports numFramesToGenerateMax 5 (6x) on this stack; the panel offers up to 6x.
 constexpr uint32_t kMaxMultiplier = 6u;
 std::atomic<bool> g_dynamic_enabled{false};
+// XMX owns the multiplier through its own model: every NVIDIA-only DLSS-G option below stands down.
+std::atomic<bool> g_xmx_blocked{false};
 std::atomic<uint32_t> g_dynamic_target_fps{0u};  // 0 = the display's refresh rate
 std::atomic<uint32_t> g_advertised_max{0u};      // GetState ceiling; 0 = do not touch
 std::atomic<uint32_t> g_provider_max_generated{0u};  // the runtime's own numFramesToGenerateMax; 0 = not seen
 std::atomic<bool> g_dynamic_d3d12{false};
-// The two DLSS-G option fields (2026-10-26): 0 = Game (leave the game's value), 1 = On, 2 = Off.
-std::atomic<uint32_t> g_ui_recomposition{0u};
-std::atomic<uint32_t> g_menu_detection{0u};
-// Which of the two buffers those options need the game to tag: bit 0 = kBufferTypeHUDLessColor,
-// bit 1 = kBufferTypeUIColorAndAlpha. The options' hudLessBufferFormat/uiBufferFormat fields are
-// optional declarations (the SDK guide never fills them), so only the tags themselves tell.
-std::atomic<uint32_t> g_tag_mask{0u};
-
-bool OptionOverridesSet() {
-  return g_ui_recomposition.load(std::memory_order_relaxed) != 0u || g_menu_detection.load(std::memory_order_relaxed) != 0u;
-}
-
-const char* OptionOverrideName(uint32_t value) {
-  switch (value) {
-    case 1u: return "on";
-    case 2u: return "off";
-    default: return "game";
-  }
-}
-
 // ---- Retry latches ----
 
 std::atomic<uint32_t> g_force_failed_for{UINT32_MAX};
@@ -140,13 +118,10 @@ bool BuildForwardedOptions(const sl::DLSSGOptions& source, sl::DLSSGOptions& des
   // The interposer validates the structure GUID on entry: a zeroed structType is refused with
   // eErrorMissingInputParameter no matter what else the copy says. Always carry the game's own.
   destination.structType = source.structType;
-  const uint32_t ui_recomposition = g_ui_recomposition.load(std::memory_order_relaxed);
-  const uint32_t menu_detection = g_menu_detection.load(std::memory_order_relaxed);
   // Generating more than one frame needs the newer options fields (the OTA override provider
   // refuses a v2 request with eErrorMissingInputParameter for 3x/4x): promote to v5 whenever the
-  // request is modified, with the added fields at their defaults. eDynamic needs v5 anyway, and
-  // the option overrides need at least v4 (UI recomposition's own field).
-  const bool modified = enable_dynamic || (override_generated && generated_frames > 0u) || ui_recomposition != 0u || menu_detection != 0u;
+  // request is modified, with the added fields at their defaults. eDynamic needs v5 anyway.
+  const bool modified = enable_dynamic || (override_generated && generated_frames > 0u);
   const size_t required_version = modified ? sl::kStructVersion5 : sl::kStructVersion1;
   destination.structVersion = version > required_version ? version : required_version;
 
@@ -172,18 +147,6 @@ bool BuildForwardedOptions(const sl::DLSSGOptions& source, sl::DLSSGOptions& des
       version >= sl::kStructVersion4 ? source.enableUserInterfaceRecomposition : sl::Boolean::eFalse;
   if (version >= sl::kStructVersion5) destination.dynamicTargetFrameRate = source.dynamicTargetFrameRate;
   if (enable_dynamic) destination.dynamicTargetFrameRate = dynamicTargetFrameRate;
-  // The panel's DLSS-G option rows: an explicit On/Off replaces the game's value (the copy is
-  // promoted to v5 above, so the v4 field is always there), Game leaves it as copied.
-  if (ui_recomposition != 0u) {
-    destination.enableUserInterfaceRecomposition = ui_recomposition == 1u ? sl::Boolean::eTrue : sl::Boolean::eFalse;
-  }
-  if (menu_detection != 0u) {
-    // SL_ENUM_OPERATORS_32 gives DLSSGFlags no complement, so the clear goes through the number.
-    constexpr auto kMenuDetection = static_cast<uint32_t>(sl::DLSSGFlags::eEnableFullscreenMenuDetection);
-    uint32_t flags = static_cast<uint32_t>(destination.flags);
-    flags = menu_detection == 1u ? (flags | kMenuDetection) : (flags & ~kMenuDetection);
-    destination.flags = static_cast<sl::DLSSGFlags>(flags);
-  }
   return true;
 }
 
@@ -192,12 +155,25 @@ bool BuildForwardedOptions(const sl::DLSSGOptions& source, sl::DLSSGOptions& des
 // an override did or did not land (called at all? which ABI? which branch? what result?).
 
 void LogSlResult(const char* what, sl::Result result) {
-  // Edge log: one line per distinct (tag, result), not one per call. `what` is always a literal here,
-  // so its address identifies the branch, and a user-space pointer leaves the top bits free.
-  static std::atomic<uint64_t> last{0u};
+  // Edge log: one line per distinct (tag, result) pair, for the process's life. `what` is always a
+  // literal here, so its address identifies the branch and a user-space pointer leaves the top bits
+  // free.
+  //
+  // A single "last key" is not enough: two branches that alternate -- Dynamic MFG submits eDynamic
+  // and the priority passthrough on every frame -- keep replacing each other's key, so every call
+  // looked new and a per-frame game (Phantom Blade Zero) wrote a line per frame, forever. Remembering
+  // every pair seen turns it into the edge log it was meant to be.
   const uint64_t key = reinterpret_cast<uint64_t>(what) | (static_cast<uint64_t>(static_cast<uint32_t>(result)) << 48);
-  if (last.exchange(key, std::memory_order_relaxed) == key) return;
-  nr::Logf(nr::LogLevel::INFO, "sl-fg: {} -> sl result {}", what, static_cast<uint32_t>(result));
+  static std::atomic<uint64_t> seen[64]{};
+  for (auto& slot : seen) {
+    uint64_t known = slot.load(std::memory_order_relaxed);
+    if (known == key) return;
+    if (known == 0u && slot.compare_exchange_strong(known, key, std::memory_order_relaxed)) {
+      nr::Logf(nr::LogLevel::INFO, "sl-fg: {} -> sl result {}", what, static_cast<uint32_t>(result));
+      return;
+    }
+  }
+  // 64 distinct pairs: the table is full, so say nothing rather than log every frame.
 }
 
 // ---- The wrappers ----
@@ -299,38 +275,24 @@ void CacheReplaySubmission(const sl::ViewportHandle& viewport, const sl::DLSSGOp
 }
 
 bool DynamicReady(bool game_enabled) {
+  // XMX: NVIDIA's Dynamic MFG asks the provider to own the multiplier, but in this mode XeFG owns
+  // the generation and its count comes from the ported model, so the row stands down.
+  if (g_xmx_blocked.load(std::memory_order_relaxed)) return false;
   return game_enabled && g_dynamic_enabled.load(std::memory_order_relaxed) && g_dynamic_d3d12.load(std::memory_order_relaxed)
          && g_streamline_owner_seen.load(std::memory_order_acquire) && g_dynamic_support_seen.load(std::memory_order_acquire)
          && g_dynamic_supported.load(std::memory_order_relaxed)
          && !g_dynamic_declined.load(std::memory_order_relaxed);
 }
 
-// Forwards the game's own request with only the panel's DLSS-G option rows applied: the branches
-// that do not rewrite the count still have to carry them, or choosing UI recomposition on its own
-// would never reach the runtime.
+// Forwards the game's own request unchanged, keeping the panel's live row honest: the panel's own
+// count is not in force here, so the row must not keep showing a number nothing applied.
 sl::Result ForwardGameRequest(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options, SetOptionsFn real) {
-  if (!OptionOverridesSet()) {
-    const sl::Result result = real(viewport, options);
-    // The panel's own count is not in force here: the row must not keep showing a number nothing applied.
-    if (result == sl::Result::eOk) {
-      RecordAccepted(options.numFramesToGenerate, false);
-      g_live_dynamic.store(false, std::memory_order_relaxed);
-    }
-    return result;
+  const sl::Result result = real(viewport, options);
+  if (result == sl::Result::eOk) {
+    RecordAccepted(options.numFramesToGenerate, false);
+    g_live_dynamic.store(false, std::memory_order_relaxed);
   }
-  sl::DLSSGOptions forwarded{};
-  if (!BuildForwardedOptions(options, forwarded, 0u, false, false, 0.0f)) return real(viewport, options);
-  const sl::Result result = real(viewport, forwarded);
-  // A provider that does not know the promoted ABI may refuse the copy outright: put the game's
-  // own request through so an option override can never cost frame generation.
-  if (result == sl::Result::eOk) return result;
-  static std::atomic<bool> warned{false};
-  if (!warned.exchange(true, std::memory_order_relaxed)) {
-    nr::Logf(nr::LogLevel::WARN,
-             "the panel's DLSS-G option overrides were refused with sl result {}; the game's own request was submitted instead. Toggle the option rows or frame generation to retry",
-             static_cast<uint32_t>(result));
-  }
-  return real(viewport, options);
+  return result;
 }
 
 // Submits `options` (an addon-owned copy when generated_frames is overridden or dynamic is on),
@@ -344,7 +306,7 @@ sl::Result CallSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
   const bool game_enabled = options.mode != sl::DLSSGMode::eOff;
   const bool dynamic = DynamicReady(game_enabled);
 
-  if (!dynamic && !override_generated && !OptionOverridesSet()) return real(viewport, options);
+  if (!dynamic && !override_generated) return real(viewport, options);
 
   const float target = static_cast<float>(g_dynamic_target_fps.load(std::memory_order_relaxed));
   sl::DLSSGOptions forwarded{};
@@ -420,11 +382,18 @@ sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
   if (real == nullptr) return sl::Result::eErrorNotInitialized;
 
   const bool game_enabled = options.mode != sl::DLSSGMode::eOff;
-  // A game that turns frame generation back on during a drain wins: its own request goes through
-  // unchanged and the drain ends (nothing to resume). The switch is retried later, rate-limited.
+  // A game that submits frame generation on every frame cannot be allowed to cancel the drain by
+  // doing so: Phantom Blade Zero re-submits its enabled options each frame, and stepping back on each
+  // one ended the drain after 9 ms -- far too short for the provider to release its cached model, so
+  // the panel's preset never applied there while every game that submits once (Naraka, and the rest)
+  // switched normally. Withhold the game's enabled submissions while draining instead, and hand its
+  // own request back the moment the drain ends (ResumeGameRequest already does exactly that).
   if (game_enabled && Draining()) {
-    g_drain.store(0u, std::memory_order_release);
-    nr::Logf(nr::LogLevel::INFO, "the FG preset switch stepped back: the game turned frame generation on again; the game's own request goes through");
+    // Cached first: the resume after the drain re-submits the game's newest shape, not the one that
+    // happened to be current when the drain began.
+    CacheReplaySubmission(viewport, options);
+    nr::Logf(nr::LogLevel::TRACE, "sl-fg: the game's enabled submission is held for the running FG preset drain");
+    return sl::Result::eOk;
   }
   if (!game_enabled) {
     // A game-side off/on cycle is a safe retry boundary after a rejection.
@@ -446,8 +415,19 @@ sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
                          | (static_cast<uint64_t>(multiplier & 0xffu) << 40)
                          | (static_cast<uint64_t>(g_dynamic_enabled.load(std::memory_order_relaxed) ? 1u : 0u) << 48)
                          | (static_cast<uint64_t>(dynamic_ready ? 1u : 0u) << 49);
-  static std::atomic<uint64_t> last_shape{~0ull};
-  const bool shape_changed = last_shape.exchange(shape, std::memory_order_relaxed) != shape;
+  // Every shape seen, not just the last one: the off/on shapes a menu toggle alternates between would
+  // otherwise each count as a change on every submit, which is the same spam the last-key scheme let
+  // through in LogSlResult.
+  static std::atomic<uint64_t> known_shapes[16]{};
+  bool shape_changed = false;
+  for (auto& slot : known_shapes) {
+    uint64_t known = slot.load(std::memory_order_relaxed);
+    if (known == shape) break;
+    if (known == 0u && slot.compare_exchange_strong(known, shape, std::memory_order_relaxed)) {
+      shape_changed = true;
+      break;
+    }
+  }
   if (shape_changed) {
     nr::Logf(nr::LogLevel::INFO,
              "sl-fg: slDLSSGSetOptions(mode {}, v{}, numFramesToGenerate {} = {}x, hudless fmt {}, ui fmt {}); panel: multiplier {}, dynamic {} -> {}",
@@ -477,9 +457,7 @@ sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
 
   if (multiplier < 2u || multiplier > kMaxMultiplier) {
     const sl::Result result = ForwardGameRequest(viewport, options, real);
-    LogSlResult(OptionOverridesSet() ? "no panel multiplier selected; forwarded with the panel's DLSS-G options"
-                                     : "no panel multiplier selected; forwarded unchanged",
-                result);
+    LogSlResult("no panel multiplier selected; forwarded unchanged", result);
     return result;
   }
 
@@ -674,8 +652,6 @@ sl::Result HookedGetFeatureFunction(sl::Feature feature, const char* function_na
 
 std::atomic<uint32_t> g_install{0u};  // 0 = not tried, 1 = hooked, 2 = failed, 3/4 = in progress / watchdog started
 
-void InstallTagProbe(HMODULE interposer);
-
 void InstallSlFgHooks() {
   uint32_t state = g_install.load(std::memory_order_relaxed);
   if (state == 1u || state == 2u) return;
@@ -699,8 +675,6 @@ void InstallSlFgHooks() {
     return;
   }
 
-  InstallTagProbe(interposer);
-
   void* original = nullptr;
   if (MH_CreateHook(reinterpret_cast<void*>(target), reinterpret_cast<void*>(&HookedGetFeatureFunction), &original) != MH_OK
       || MH_EnableHook(reinterpret_cast<void*>(target)) != MH_OK) {
@@ -711,7 +685,14 @@ void InstallSlFgHooks() {
   g_real_get_feature_function.store(original, std::memory_order_release);
   hooks::HoldMinHook();
   g_install.store(1u, std::memory_order_release);
-  nr::Logf(nr::LogLevel::INFO, "the FG multiplier hooks hooked sl.interposer.dll's slGetFeatureFunction at {}", reinterpret_cast<void*>(target));
+  // The full path, not just "sl.interposer.dll": a process can hold more than one copy (the game's
+  // own and a loader's), and GetModuleHandleW names whichever the loader mapped under that name. When
+  // the FG rows stay dead while this line says the hook installed, the next question is which copy the
+  // game actually calls -- and this is the only place that answers it.
+  wchar_t hooked_path[512] = {};
+  GetModuleFileNameW(interposer, hooked_path, static_cast<DWORD>(std::size(hooked_path)));
+  nr::Logf(nr::LogLevel::INFO, "the FG multiplier hooks hooked slGetFeatureFunction at {} in {}", reinterpret_cast<void*>(target),
+           Utf8FromPath(hooked_path));
 }
 
 // Probes the provider's Dynamic-MFG support flag directly: many games call GetState once, before
@@ -746,83 +727,6 @@ void ProbeDynamicSupport(const sl::ViewportHandle& viewport) {
   }
 }
 
-// ---- Resource-tag probe (2026-10-26) ----
-// UI recomposition needs the game to tag a HUD-less colour buffer and a UI colour-and-alpha buffer;
-// fullscreen menu detection needs the latter alone. Watching the game's own slSetTag calls is the
-// only conclusive answer: an options-side format field staying 0 means "not declared", not "not
-// tagged". Log only, no rewriting -- tags pass through untouched.
-
-std::atomic<void*> g_real_set_tag_for_frame{nullptr};
-std::atomic<void*> g_real_set_tag{nullptr};
-
-void RecordTags(const sl::ResourceTag* tags, uint32_t count, const char* entry_point) {
-  if (tags == nullptr || count == 0u) return;
-  uint32_t mask = 0u;
-  for (uint32_t index = 0u; index < count; ++index) {
-    if (tags[index].resource == nullptr) continue;
-    if (tags[index].type == sl::kBufferTypeHUDLessColor) {
-      mask |= 1u;
-    } else if (tags[index].type == sl::kBufferTypeUIColorAndAlpha) {
-      mask |= 2u;
-    }
-  }
-  if (mask == 0u) return;
-  const uint32_t added = mask & ~g_tag_mask.fetch_or(mask, std::memory_order_relaxed);
-  if ((added & 1u) != 0u) {
-    nr::Logf(nr::LogLevel::INFO,
-             "sl-tags: the game tags kBufferTypeHUDLessColor via {}; UI recomposition has its HUD-less source here",
-             entry_point);
-  }
-  if ((added & 2u) != 0u) {
-    nr::Logf(nr::LogLevel::INFO,
-             "sl-tags: the game tags kBufferTypeUIColorAndAlpha via {}; fullscreen menu detection has its mask here, and UI recomposition its UI layer",
-             entry_point);
-  }
-}
-
-sl::Result HookedSetTagForFrame(const sl::FrameToken& frame, const sl::ViewportHandle& viewport, const sl::ResourceTag* tags,
-                                uint32_t count, sl::CommandBuffer* cmd_buffer) {
-  const auto real = reinterpret_cast<SetTagForFrameFn*>(g_real_set_tag_for_frame.load(std::memory_order_acquire));
-  if (real == nullptr) return sl::Result::eErrorInvalidParameter;
-  const sl::Result result = real(frame, viewport, tags, count, cmd_buffer);
-  if (result == sl::Result::eOk) RecordTags(tags, count, "slSetTagForFrame");
-  return result;
-}
-
-sl::Result HookedSetTag(const sl::ViewportHandle& viewport, const sl::ResourceTag* tags, uint32_t count,
-                        sl::CommandBuffer* cmd_buffer) {
-  const auto real = reinterpret_cast<SetTagFn*>(g_real_set_tag.load(std::memory_order_acquire));
-  if (real == nullptr) return sl::Result::eErrorInvalidParameter;
-  const sl::Result result = real(viewport, tags, count, cmd_buffer);
-  if (result == sl::Result::eOk) RecordTags(tags, count, "slSetTag");
-  return result;
-}
-
-void InstallTagProbe(HMODULE interposer) {
-  static std::atomic<bool> attempted{false};
-  if (attempted.exchange(true, std::memory_order_acq_rel)) return;
-  struct Entry {
-    const char* name;
-    void* detour;
-    std::atomic<void*>* real;
-  };
-  const Entry entries[] = {
-      {"slSetTagForFrame", reinterpret_cast<void*>(&HookedSetTagForFrame), &g_real_set_tag_for_frame},
-      {"slSetTag", reinterpret_cast<void*>(&HookedSetTag), &g_real_set_tag},
-  };
-  for (const Entry& entry : entries) {
-    const auto target = reinterpret_cast<void*>(GetProcAddress(interposer, entry.name));
-    if (target == nullptr) continue;
-    void* original = nullptr;
-    if (MH_CreateHook(target, entry.detour, &original) != MH_OK || MH_EnableHook(target) != MH_OK) {
-      nr::Logf(nr::LogLevel::WARN, "sl-tags: could not hook {}; the UI buffer tags stay unknown in this game", entry.name);
-      continue;
-    }
-    entry.real->store(original, std::memory_order_release);
-    nr::Logf(nr::LogLevel::INFO, "sl-tags: watching {} for the HUD-less and UI colour-and-alpha tags", entry.name);
-  }
-}
-
 }  // namespace
 
 void SetForceMultiplier(uint32_t multiplier) {
@@ -851,26 +755,15 @@ void SetDynamicMfg(bool enabled, uint32_t target_fps) {
   }
 }
 
-void SetOptionOverrides(FgOptionOverride ui_recomposition, FgOptionOverride menu_detection) {
-  const auto normalize = [](FgOptionOverride value) -> uint32_t {
-    return static_cast<uint32_t>(value) <= 2u ? static_cast<uint32_t>(value) : 0u;
-  };
-  const uint32_t ui = normalize(ui_recomposition);
-  const uint32_t menu = normalize(menu_detection);
-  const uint32_t previous_ui = g_ui_recomposition.exchange(ui, std::memory_order_relaxed);
-  const uint32_t previous_menu = g_menu_detection.exchange(menu, std::memory_order_relaxed);
-  // Re-selecting the same pair is not a change: no replay, no log.
-  if (previous_ui == ui && previous_menu == menu) return;
-  const uint32_t tags = g_tag_mask.load(std::memory_order_relaxed);
-  nr::Logf(nr::LogLevel::INFO,
-           "sl-fg: DLSS-G options from the panel: UI recomposition {}, fullscreen menu detection {} (submitted at the next frame-generation call; the game's tags so far: HUD-less {}, UI colour {})",
-           OptionOverrideName(ui), OptionOverrideName(menu),
-           (tags & 1u) != 0u ? "yes" : "not seen", (tags & 2u) != 0u ? "yes" : "not seen");
-  g_replay_pending.store(true, std::memory_order_release);
-}
-
 void SetAdvertisedMaxGenerated(uint32_t generated_frames) {
   g_advertised_max.store(generated_frames, std::memory_order_relaxed);
+}
+
+void SetXmxMode(bool xmx) {
+  const bool was = g_xmx_blocked.exchange(xmx, std::memory_order_relaxed);
+  if (was == xmx) return;
+  g_replay_pending.store(true, std::memory_order_release);
+  nr::Logf(nr::LogLevel::INFO, "sl-fg: XMX mode {}; NVIDIA's Dynamic MFG stands down", xmx ? "on" : "off");
 }
 
 uint32_t GeneratedFramesCeiling() {

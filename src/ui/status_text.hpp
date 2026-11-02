@@ -248,6 +248,19 @@ struct StatusView {
 [[nodiscard]] std::string FormatFgPresetLive(const std::string& preset_name, bool live_switch, bool pending_drain);
 [[nodiscard]] std::string FormatMultiplierLive(bool dynamic, uint32_t multiplier, bool panel_multiplier, uint32_t panel_choice);
 [[nodiscard]] std::string FormatReflexLive(bool known, uint32_t mode, uint32_t fps_cap);
+// The XMX mode's own line (src/xmx/): whether Intel's generator is the one producing frames, and
+// why it is not when the mode is on. Empty when the mode is off (the caller does not draw it).
+struct XmxFacts {
+  bool generation = false;   // XeFG produced the last frame (not the core's own generation)
+  bool hooked = false;       // the mode can serve this game's DLSS-G (its Intel files passed Preflight)
+  std::string_view failure;  // why the mode could not start; empty when it did
+  // The tensor-core route (src/xmx/vendor/cuda/): "active" only says it installed. Zero launches
+  // while generating, or any fallback at all, means layers stopped going through the tensor cores.
+  uint32_t layers = 0;
+  uint64_t launches = 0;
+  uint64_t fallbacks = 0;
+};
+[[nodiscard]] std::string FormatXmxLive(const XmxFacts& facts);
 
 // Dynamic MFG's own line: the panel's choice, and which gate holds it back when it is on but not in force.
 struct DynamicMfgFacts {

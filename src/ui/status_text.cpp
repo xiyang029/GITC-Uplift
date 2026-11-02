@@ -453,6 +453,23 @@ std::string FormatFrameGenerationLine(bool active, uint32_t multiplier, bool fro
   return std::format("Frame generation: on ({}x{})", multiplier, (from_ngx ? ", NGX" : ""));
 }
 
+std::string FormatXmxLive(const XmxFacts& facts) {
+  if (!facts.failure.empty()) return std::format("XMX: cannot start ({})", facts.failure);
+  if (facts.generation) {
+    if (facts.layers == 0u) return "XMX: Intel XeFG is generating";
+    // The tensor-core line: what the CUDA route has actually run, so a silent regression to the
+    // DXIL port (or a layer it stopped recognizing) is visible without reading the log.
+    if (facts.fallbacks != 0u) {
+      return std::format("XMX: Intel XeFG is generating (tensor cores {} layers, {} launches, {} fell back)",
+                         facts.layers, facts.launches, facts.fallbacks);
+    }
+    return std::format("XMX: Intel XeFG is generating (tensor cores {} layers, {} launches)", facts.layers,
+                       facts.launches);
+  }
+  if (facts.hooked) return "XMX: XeFG is up, waiting for the game's first DLSS-G frame";
+  return "XMX: waiting for the game's DLSS-G to be evaluated";
+}
+
 std::string FormatDlssLive(const std::string& mode_name, const std::string& preset_name, const std::string& driver_preset,
                             uint32_t render_width, uint32_t render_height, uint32_t output_width, uint32_t output_height) {
   // One complete line, whichever parts exist: Localize matches whole strings, so a concatenation would

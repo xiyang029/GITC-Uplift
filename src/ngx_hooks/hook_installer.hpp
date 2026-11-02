@@ -45,6 +45,11 @@ struct EvaluateCall {
   // The live preset swap (addon/dlss_swap.hpp): set by BeforeEvaluate to the handle the original evaluate must run with instead of the
   // game's (Uplift's own SuperSampling feature with the panel's presets). Null evaluates `handle`; AfterEvaluate still sees `handle`.
   const NVSDK_NGX_Handle* eval_handle = nullptr;
+  // The XMX mode (src/xmx/): BeforeEvaluate already produced this frame's output into the DLSS-G
+  // buffers, so the core's FrameGeneration evaluate must not run -- it would overwrite them, and hooked
+  // it produces nothing anyway. A skipped evaluate reports success: the frame exists. Set only for a
+  // frame XeFG really generated; a refusal leaves it false and the core runs its own generation.
+  bool skip_original = false;
 };
 
 // Receives the hooked NGX calls (spec §10, v2 design §3.1). Every method runs on the game's calling

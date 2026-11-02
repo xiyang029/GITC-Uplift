@@ -137,6 +137,37 @@ target_include_directories(uplift_nr SYSTEM PUBLIC "${UPLIFT_VULKAN_INCLUDE}")
 target_compile_definitions(uplift_nr PUBLIC VK_NO_PROTOTYPES)
 target_link_libraries(uplift_nr PUBLIC d3d12 dxgi version)
 
+# The XMX mode (MFGAdaUnlock-RenoDx 1.8): XeFG's own context generates frames inside
+# nvngx_dlssg.dll's EvaluateFeature, and NGX keeps owning presentation. The ported model needs
+# Intel's XeSS headers, the ported DXIL programs (extracted at build time from the pinned
+# MFGUnlocker ASI, see tools/prepare_xemfg_inputs.py) and the six replacement shaders compiled
+# here by the same dxc as every other shader. Nothing Intel ships is committed or redistributed.
+set(UPLIFT_XESS_INCLUDE "${CMAKE_SOURCE_DIR}/third_party/_deps/xess/inc" CACHE PATH "Intel XeSS SDK include directory")
+if(NOT EXISTS "${UPLIFT_XESS_INCLUDE}/xess_fg/xefg_swapchain_d3d12.h")
+  message(FATAL_ERROR "XeSS SDK headers not found in ${UPLIFT_XESS_INCLUDE}; run tools\\fetch_deps.cmd")
+endif()
+set(UPLIFT_XMX_INPUTS "${CMAKE_BINARY_DIR}/xmx-inputs")
+set(UPLIFT_XMX_GENERATED "${CMAKE_BINARY_DIR}/xmx-generated")
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(UPLIFT_XMX_ASI "${CMAKE_SOURCE_DIR}/third_party/_deps/mfgunlocker/MFGUnlocker.dll")
+if(NOT EXISTS "${UPLIFT_XMX_ASI}")
+  message(FATAL_ERROR "the pinned MFGUnlocker ASI is missing at ${UPLIFT_XMX_ASI}; run tools\\fetch_deps.cmd")
+endif()
+add_custom_command(OUTPUT "${UPLIFT_XMX_INPUTS}/embedded_xess_shaders.rc" "${UPLIFT_XMX_INPUTS}/embedded_xefg_cuda.rc"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${UPLIFT_XMX_INPUTS}"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/prepare_xemfg_inputs.py"
+          --asi "${UPLIFT_XMX_ASI}" --output "${UPLIFT_XMX_INPUTS}"
+  DEPENDS "${CMAKE_SOURCE_DIR}/tools/prepare_xemfg_inputs.py"
+  COMMENT "xmx inputs: the pinned ASI's programs, shaders and CUDA kernels"
+  VERBATIM)
+add_custom_command(OUTPUT "${UPLIFT_XMX_GENERATED}/embedded_xess_programs.rc"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${UPLIFT_XMX_GENERATED}"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/generate_xess_programs.py"
+          --programs "${UPLIFT_XMX_INPUTS}" --output "${UPLIFT_XMX_GENERATED}"
+  DEPENDS "${CMAKE_SOURCE_DIR}/tools/generate_xess_programs.py" "${UPLIFT_XMX_INPUTS}/embedded_xess_shaders.rc"
+  COMMENT "xmx programs: RCDATA resources"
+  VERBATIM)
+
 add_library(uplift_ngx_hooks STATIC
   src/ngx_hooks/hook_installer.cpp
   src/ngx_hooks/ngx_parameters.cpp
@@ -321,6 +352,32 @@ target_sources(uplift_vk PRIVATE src/vk/nr_functions.cpp src/vk/nr_timeline.cpp 
 # Plan 11: VkBridge (a Vulkan game device's NR, in-process), on src/vk/.
 # Plan 12: GlBridge (an OpenGL context's NR, in-process), on src/gl/.
 # Plan 18: the Direct3D 11 bridge's mid-frame DLSS hand-off and the Present ring (d3d11_dlss.cpp).
+# The XMX mode's own library: the ported model (shader/model catalog ports and the XeLL/XeFG
+# frame-count unlock), the generator that drives XeFG's context, and the hook on nvngx_dlssg.dll.
+# It links ReShade-free, like the other game-side halves.
+add_library(uplift_xmx STATIC
+  src/xmx/host.cpp
+  src/xmx/model.cpp
+  src/xmx/hook.cpp
+  src/xmx/vendor/runtime_payload.cpp
+  src/xmx/vendor/host_unlock.cpp
+  src/xmx/vendor/cuda/cuda_route.cpp)
+target_include_directories(uplift_xmx PUBLIC "${CMAKE_SOURCE_DIR}/src")
+target_include_directories(uplift_xmx SYSTEM PUBLIC "${UPLIFT_XESS_INCLUDE}/xess_fg" "${UPLIFT_XESS_INCLUDE}/xell"
+  "${UPLIFT_XMX_INPUTS}" "${UPLIFT_XMX_GENERATED}")
+# The generated payload headers include "runtime_payload.h" by bare name.
+target_include_directories(uplift_xmx PUBLIC "${CMAKE_SOURCE_DIR}/src/xmx/vendor")
+target_link_libraries(uplift_xmx PUBLIC uplift_nr PRIVATE uplift_minhook_once bcrypt d3d12 dxgi)
+# runtime_payload.cpp includes the two generated headers, so it must wait for the custom commands
+# above. The .rc files themselves live on the add-on target: a static library's resource members
+# carry no symbol and the linker drops them.
+set(UPLIFT_XMX_GENERATED_HEADERS
+  "${UPLIFT_XMX_GENERATED}/embedded_xess_programs.rc"
+  "${UPLIFT_XMX_INPUTS}/embedded_xess_shaders.rc"
+  "${UPLIFT_XMX_INPUTS}/embedded_xefg_cuda.rc")
+set_source_files_properties(src/xmx/vendor/runtime_payload.cpp src/xmx/vendor/cuda/cuda_route.cpp
+  PROPERTIES OBJECT_DEPENDS "${UPLIFT_XMX_GENERATED_HEADERS}")
+
 add_library(uplift_bridge STATIC
   src/bridge/bridge_sequence.cpp
   src/bridge/d3d12_side.cpp
@@ -346,6 +403,13 @@ add_library(uplift_client STATIC
   src/client/gl_client.cpp)
 target_link_libraries(uplift_client PUBLIC uplift_ipc uplift_bridge uplift_vk uplift_gl d3d9 d3d11 dxgi)
 
+# The XMX mode's minimal check (tests/xmx_layout_test.cpp): the ported ABI layouts, and the four
+# states of its panel line. A console executable, so it needs no ReShade and no device.
+add_executable(xmx_layout_test tests/xmx_layout_test.cpp)
+target_include_directories(xmx_layout_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(xmx_layout_test PRIVATE uplift_xmx uplift_ui uplift_color)
+add_test(NAME xmx_layout_test COMMAND xmx_layout_test)
+
 add_library(uplift_addon SHARED
   src/addon.cpp
   src/addon/helper_front.cpp
@@ -358,12 +422,18 @@ add_library(uplift_addon SHARED
   src/addon/reshade_gl_host.cpp
   src/addon/reshade_d3d12_host.cpp
   src/ui/overlay.cpp
-  src/ui/style.cpp)
+  src/ui/style.cpp
+  # The XMX payload's RCDATA. A static library's resource members carry no symbol, so the linker
+  # would drop them; they live on the add-on itself, which is also where they are read from.
+  ${UPLIFT_XMX_GENERATED}/embedded_xess_programs.rc
+  ${UPLIFT_XMX_INPUTS}/embedded_xess_shaders.rc
+  ${UPLIFT_XMX_INPUTS}/embedded_xefg_cuda.rc)
 set_target_properties(uplift_addon PROPERTIES OUTPUT_NAME "gitc-uplift" SUFFIX ".addon64")
 target_include_directories(uplift_addon SYSTEM PRIVATE "${UPLIFT_RESHADE_INCLUDE}" "${UPLIFT_IMGUI_INCLUDE}")
 target_include_directories(uplift_addon PRIVATE "${UPLIFT_GENERATED}")
 target_compile_definitions(uplift_addon PRIVATE ImTextureID=ImU64 IMGUI_DISABLE_OBSOLETE_FUNCTIONS UPLIFT_VERSION_TEXT="${PROJECT_VERSION}")
-target_link_libraries(uplift_addon PRIVATE uplift_addon_core uplift_bridge uplift_client uplift_vk uplift_gl d3d9)
+# The XMX mode rides in the 64-bit add-on: its hook and generator are D3D12-only, like the NGX hooks.
+target_link_libraries(uplift_addon PRIVATE uplift_addon_core uplift_bridge uplift_client uplift_vk uplift_gl uplift_xmx d3d9)
 add_dependencies(uplift_addon uplift_build_id)
 
 else()

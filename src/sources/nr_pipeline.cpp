@@ -455,7 +455,9 @@ void NrPipeline::SetLookConfig(const LookConfig& config) {
   // v2 design §3.12: a new Detail radius or Stabilize mode starts the stabiliser afresh. Split chain: in every set.
   const bool restart_stabilizer = (config.look.detail_radius != config_.look.detail_radius || config.look.stabilize != config_.look.stabilize
                                    || config.look.stabilize_detail != config_.look.stabilize_detail);
-  // Frame skip: its histories are made with the set (EnsureIntermediates), so turning it on or off rebuilds them; RetireSet frees them at their marks.
+  // Frame skip: its histories are made with the set (EnsureIntermediates), so turning it on or off rebuilds
+  // them; RetireSet frees them at their marks. DeviceContext already folds the motion-vector source into
+  // config.half_rate (no source, no carry), so a source switch arrives here as one too.
   const bool half_rate_changed = (config.half_rate != config_.half_rate);
   for (StageSet& set : sets_) {
     if (restart_stabilizer) {
@@ -1163,6 +1165,10 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   if (!timeline_.IsComplete(slot_marks_[slot])) return {.reason = "descriptors busy"};
   const nr::Size size = {static_cast<uint32_t>(description.Width), description.Height};
   const WorkLayout work = Resolve(layout, size);
+  // No check that the canvas matches the target: a smaller canvas is the whole point of the Resolution rows
+  // (NR works at 1484x836 and hands its change back to a 2560x1440 image). A guard on that difference only
+  // ever fired on legitimate use. The device removal it was meant to catch came from present_layout_ going
+  // stale for the other placement, which is fixed where that layout is produced.
   // Amendment 7, deepened by I-2: the copy of the game's motion vectors made for this very frame, when
   // there is one, from the slot the frame it was made for selects (PresentMotionSlotOf).
   nr::FrameInputs inputs = {.ui_correction = config_.present_ui_correction, .reset_hint = reset_hint};

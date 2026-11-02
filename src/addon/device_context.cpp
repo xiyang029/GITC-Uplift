@@ -260,7 +260,12 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
     output_message_ = std::move(message);
   }
 
-  if (present_group && present_encoding) {
+  // present_layout_ is what the Present placement records at, so it follows the present target's size in
+  // every placement, not only while Present is the one running: the other placement's NR leaves it stale,
+  // and Present then records a 2560x1440 target through a layout still shaped for the 2074x950 render
+  // size (Resolve keeps a non-empty layout.canvas whatever the target is). That is what the diagnostic
+  // line read as "layout canvas 2074x950, target 2560x1440, resolved canvas 2074x950" forever.
+  if (!present_size.Empty()) {
     present_layout_ = SettleLayout(present_size, Stage::PRESENT, now);  // before UpdateSession, so its Tick sees the size
   }
 
@@ -336,8 +341,12 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   host->FlushPending();
   ApplyLookConfig(last_present_.value_or(std::chrono::steady_clock::now()), group);
   host->TargetBarrier(entry_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
-  frame_target_.dlss_motion = {.resource = (motion_is_dlss && config_.motion_vectors ? motion : nullptr),
-                                .rect = (motion_is_dlss ? dlss_motion_region : nr::Rect{})};
+  // Turning the motion-vector source off nulls the resource on this very frame, so the rect has to go
+  // with it: a rect and no resource is not "no vectors", it is a rectangle pointing at nothing, and a
+  // frame skip carry that reads it takes the device down (observed switching DLSS -> off with skip on).
+  const bool dlss_motion_available = (motion_is_dlss && config_.motion_vectors && motion != nullptr);
+  frame_target_.dlss_motion = {.resource = (dlss_motion_available ? motion : nullptr),
+                               .rect = (dlss_motion_available ? dlss_motion_region : nr::Rect{})};
   frame_target_.launchpad_motion = {.resource = (!motion_is_dlss && config_.launchpad_motion ? motion : nullptr)};
   frame_target_.motion_scale_x = config_.motion_scale_x;
   frame_target_.motion_scale_y = config_.motion_scale_y;
@@ -628,33 +637,31 @@ void DeviceContext::ApplyLookConfig(std::chrono::steady_clock::time_point now, u
   if (group > 0u && group < chain_.group_count) {
     look.keep_faces.enabled = (look.keep_faces.enabled && LaterStageKeepsFaces(chain_.groups[group].stage));
   }
-  // Frame skip: the setting says whether it is on, this present's place in the cycle says whether the network runs on it.
-  // Frame skip (2026-11-01): while the work size is settling (a Resolution change, a resize, or a slider drag) the
-  // boost surfaces are rebuilt against the old canvas one frame and the new canvas the next, which races the device's
-  // upload heaps and trips a device removal. Stand frame skip down until the settled size has held steady for a beat,
-  // so the rebuild lands once on the stable canvas. The setting is untouched; NR simply runs the network every frame
-  // until the settle is quiet again.
-  const ui::HalfRate half_rate_setting = config_.half_rate;
-  // Frame skip is decided once per present (the phase is shared), but the boost surfaces are rebuilt per group
-  // against that group's canvas -- a split chain alternates two canvases, so a size change in any group's stage
-  // counts. Check this group's own stage; the phase reset below keeps every group in step.
-  const StageState& stage_state = stages_[static_cast<size_t>(chain_.groups[group].stage)];
-  // A size change (placement switch, resolution change, resize, slider drag): either the settled size just
-  // jumped (work != last_work) or it is still chasing its target (IsSettling). Either way the boost surfaces
-  // are mid-rebuild, so frame skip stays off until the size has held steady for a beat (a grace of a few frames
-  // covers the split chain's alternating canvases, which each rebuild the shared surfaces on their own turn).
-  const bool size_changed = (stage_state.work != stage_state.last_work);
-  if (size_changed || stage_state.settle.IsSettling()) size_settle_grace_ = 4u;
-  else if (size_settle_grace_ > 0u) --size_settle_grace_;
-  const bool settling = (size_settle_grace_ > 0u);
-  const bool half_rate_on = (ui::HalfRatePeriod(half_rate_setting) > 1u) && !settling;
-  if (half_rate_on != half_rate_armed_) {
-    half_rate_armed_ = half_rate_on;
-    half_rate_phase_ = 0u;  // the cycle restarts on the first present frame skip runs again: a network frame, then carries
+  // Frame skip: the setting says whether it is on, this present's place in the cycle says whether the network
+  // runs on it. It also needs vectors to carry with: turning the motion-vector source off leaves half_rate
+  // set, and a carry then runs on a plan with no boost_motion. Gate on the source, not only the period.
+  if (skip_stand_down_ > 0u) --skip_stand_down_;
+  const bool half_rate_on =
+      (ui::HalfRatePeriod(config_.half_rate) > 1u) && config_.motion_vectors && skip_stand_down_ == 0u;
+  // A change in this value retires and rebuilds the set's boost surfaces (NrPipeline::SetLookConfig). Clicking
+  // the row back and forth queues one full set per click, and a retired set cannot go until the GPU passes
+  // its mark -- ten clicks in a row is ten sets still on the queue, and the device runs out of memory (which
+  // arrives as a device removal, not as an allocation failure). Waiting once per actual change keeps one
+  // switch's retirement finished before the next queues another.
+  if (half_rate_on != half_rate_applied_) {
+    half_rate_applied_ = half_rate_on;
+    if (timeline_ != nullptr) {
+      const std::string_view late = timeline_->WaitIdle(std::chrono::milliseconds(250));
+      if (!late.empty()) {
+        nr::Logf(nr::LogLevel::WARN,
+                 "NR: the GPU did not go idle within 250 ms of a frame-skip switch ({}); its surfaces are left to their marks",
+                 late);
+      }
+    }
   }
   look.half_rate = half_rate_on;
   look.half_rate_skip = (look.half_rate && half_rate_phase_ != 0u);
-  look.half_rate_period = ui::HalfRatePeriod(half_rate_setting);
+  look.half_rate_period = ui::HalfRatePeriod(config_.half_rate);
   // Frame skip (2026-10-31): a skipped frame's carry does not follow the foveation warp, so SettleLayout stands the grid down to
   // uniform while it is on. These two only shape a foveated grid (a uniform one's ceiling is a gain), so they go with it -- here,
   // after the router has picked one, and not in LookConfigFrom, which the Vulkan route shares and where frame skip never runs.
@@ -810,6 +817,28 @@ void DeviceContext::NotePlacementChange() {
     case Placement::PRESENT:          stages_[static_cast<size_t>(Stage::PRESENT)].settle.Reset(); break;
     case Placement::NONE:             break;
   }
+  // Every switch retires a whole surface set (tens of MB) and rebuilds another. Retired sets cannot go
+  // until the GPU passes their timing marks, so a row clicked ten times in a row queues ten sets that are
+  // still on the queue and runs the device out of memory -- reading as a device removal, not as an
+  // allocation failure, and only past about ten switches. Waiting here lets each switch's retirement
+  // actually complete before the next one queues another; at ~100 fps the queue drains within a frame or
+  // two, so the wait is a few milliseconds, and it only runs when the placement really changed.
+  if (present_source_ != nullptr) {
+    if (timeline_ != nullptr) {
+      const std::string_view late = timeline_->WaitIdle(std::chrono::milliseconds(250));
+      if (!late.empty()) {
+        nr::Logf(nr::LogLevel::WARN,
+                 "NR: the GPU did not go idle within 250 ms of a placement switch ({}); this switch's surfaces are left to "
+                 "their marks",
+                 late);
+      }
+    }
+    present_source_->Pipeline().RetireSetsFrom(0u);
+  }
+  // And no frame skip until the new stage has run the network itself for a couple of presents: a skipped
+  // frame carries the previous present's result, which was built against the old stage's canvas.
+  skip_stand_down_ = 2u;
+  half_rate_phase_ = 0u;
 }
 
 sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, std::chrono::steady_clock::time_point now) {
@@ -877,7 +906,6 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
   const nr::foveation::Plan plan = nr::foveation::MakePlan(foveation_on, foveation_params, uniform.width, uniform.height);
   const nr::Size image = {plan.width, plan.height};
   const nr::Size canvas = ((before_upscaling && !nr::MeetsNrFloor(image)) ? sources::CanvasSize(image) : image);
-  state.last_work = state.work;
   state.work = image;
   state.canvas = canvas;
   if (pass1) {
@@ -1222,9 +1250,10 @@ bool DeviceContext::NoteDeviceRemoved(std::chrono::steady_clock::time_point now)
                                        static_cast<uint32_t>(removed))
                          : std::format("Device removed ({:#010x}): NR stays off on this device", static_cast<uint32_t>(removed)));
   nr::Log(nr::LogLevel::ERR, output_message_);
-  if (bridged_) {
-    LogDred(device_.Get());  // Plan 17: Uplift's private device (a bridge's, or the helper's): what was in flight, and any page fault
-  }
+  // Plan 17: DRED was enabled for Uplift's private devices only, so a bridge's removal had data and the
+  // game's never did -- and the interesting removals (a mod's command list racing the game's) happen on
+  // the game's device. LogDred asks the device itself, so it works wherever DRED is on.
+  LogDred(device_.Get());
   return true;
 }
 
