@@ -14,21 +14,6 @@
 namespace uplift::sources {
 namespace {
 
-// Frame skip (NoteSurfaceChange): the frames NR runs the network after a change instead of carrying. Eight is a whole
-// four-frame cycle and the one after it: long enough for a switch's surfaces and the session's first recordings to settle
-// under the new sizes, and a skipped frame still shows the frame before it (the carry's own reason for existing), so the
-// cost is the network's time on those frames, not a black frame.
-constexpr uint32_t CHANGE_HOLD_FRAMES = 8u;
-// Presents a changed plan must be reported for before its surfaces are built. A resolution row is dragged, not set, and
-// every value on the way would retire a whole set and a whole NGX feature behind the GPU; only a plan the frames agree
-// on is built, so a drag pays for where it ends.
-constexpr uint32_t REBUILD_SETTLE_FRAMES = 3u;
-// The frames the GPU may be behind before NR sits a frame out. A recording submitted while the queue is deeper than this
-// only deepens it, and a deep queue is what turns a change of surfaces into a device removal: the wait that frees a
-// retired texture cannot outlast a queue that never drains. Eight is two whole skip cycles, so a healthy frame's own
-// latency never reaches it.
-constexpr uint64_t MAX_FRAMES_BEHIND = 8u;
-
 // Superior Scaling's fallback rule (PR #237): a degradation the card only names tersely warns once in the
 // log, then runs degraded quietly -- never a per-frame warning, never a fully silent fallback.
 template <class... Args>
@@ -193,17 +178,6 @@ void NrPipeline::ReleaseIntermediates() {
   RetireLaunchpadMotion();
   RetireDlssPresentMotion();
   RetireMask();
-}
-
-void NrPipeline::NoteSurfaceChange() {
-  change_hold_ = CHANGE_HOLD_FRAMES;
-  // The wait frees what this change retires: RetireSet only queues a set behind its mark, so a change arriving on every
-  // frame (a vector field whose extent flickers between two sizes) queues one whole set per frame and runs the device out
-  // of memory, which arrives as a device removal. Waiting here makes each change pay for its own retirement instead.
-  const std::string_view late = timeline_.WaitIdle(std::chrono::milliseconds(250));
-  if (!late.empty()) {
-    nr::Logf(nr::LogLevel::WARN, "NR: the GPU did not go idle within 250 ms of a surface change ({}); its surfaces are left to their marks", late);
-  }
 }
 
 void NrPipeline::RetireSetsFrom(uint32_t first) {
@@ -395,11 +369,10 @@ NrPipeline::Texture NrPipeline::CreateTexture(nr::Size size, DXGI_FORMAT format,
 }
 
 std::string_view NrPipeline::EnsureIntermediates(SetPlan plan) {
-  // Frame skip: a frame whose vectors have not arrived yet (a Present copy still in flight, a launchpad texture the
-  // game stopped writing) reports a 0x0 boost extent, so the whole set would be rebuilt without the boost surfaces and
-  // rebuilt back with them on the next frame: at 2560x1440 that is two full-canvas fields and the motion field twice a
-  // frame. The surfaces only need that extent's size, so an empty one keeps the last set's: the frame runs the network
-  // instead (which needs no boost surfaces) and the set stays put.
+  // Frame skip: a present whose vectors are not there yet (a copy still in flight, a stage the game stopped
+  // writing) reports no boost_motion, and a plan that differs retires the set and builds both model canvases
+  // afresh -- once for that present, and again when the vectors come back. The extent the surfaces were made at
+  // is still the one to carry at, so keep it: that present's carry goes quiet instead of the whole set.
   if (plan.boost_motion.Empty() && set_->intermediates.model_a) {
     plan.boost_motion = set_->intermediates.plan.boost_motion;
   }
@@ -412,20 +385,7 @@ std::string_view NrPipeline::EnsureIntermediates(SetPlan plan) {
       set_->intermediates.reset_pending = true;
       set_->look.history_valid = false;
     }
-    if (set_->intermediates.plan == plan) {
-      pending_settle_ = 0u;
-      return {};
-    }
-    if (!(pending_plan_ == plan)) {
-      pending_plan_ = plan;
-      pending_settle_ = 0u;
-      return "resizing";
-    }
-    if (++pending_settle_ < REBUILD_SETTLE_FRAMES) return "resizing";
-    pending_settle_ = 0u;
-    // The surfaces under this plan are about to be retired and rebuilt: the change goes through the one path that waits
-    // for the GPU to pass their marks (as a switch does) and holds the carry off while the new ones settle.
-    NoteSurfaceChange();
+    if (set_->intermediates.plan == plan) return {};
   }
   RetireSet(set_);
   constexpr D3D12_RESOURCE_FLAGS UAV = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -995,12 +955,6 @@ void NrPipeline::BoostModel(ID3D12GraphicsCommandList* list, uint32_t slot, ID3D
 nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs inputs,
                                         const nr::Controls& controls, const nr::StageSlice& slice) {
   timer_.Begin(list);
-  const uint64_t queued = timeline_.CurrentFrame();
-  const uint64_t finished = timeline_.CompletedFrame();
-  if (queued > finished && queued - finished > MAX_FRAMES_BEHIND) {
-    timer_.End(list, false);
-    return {.reason = "resizing"};
-  }
   const bool had_motion = (inputs.motion.resource != nullptr);
   if (!had_motion) {
     inputs.motion = {.resource = set_->intermediates.zero_motion.Get()};
@@ -1011,12 +965,8 @@ nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_
   // Frame skip (MFG-Unlocker's Boost, ported): the frames NR's network does not run put this frame's own input through the
   // look model the last frame it ran fitted, and add back the detail that fit does not explain, so the result follows this
   // frame's edges instead of the last frame's. A single pass only: the model and the detail belong to the pass that made them.
-  // Frame skip: see change_hold_. Read and spent here rather than in the recording, so that a multi-pass frame spends
-  // one of them, not one per pass.
-  const bool change_hold = (change_hold_ > 0u && slice.first == 0u);
-  if (change_hold) --change_hold_;
   const bool boost_surfaces = BoostSurfaces();
-  const bool boost_ready = color_.BoostReady() && had_motion && !inputs.reset_hint && !change_hold && slice.first == 0u
+  const bool boost_ready = color_.BoostReady() && had_motion && !inputs.reset_hint && slice.first == 0u
                            && session_.PassCount() == 1u && boost_surfaces;
   const bool boost = config_.half_rate && boost_ready;
   if (config_.half_rate && slice.first == 0u) {
@@ -1028,7 +978,7 @@ nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_
   if (config_.half_rate && config_.half_rate_skip && !boost_ready) {
     if (!color_.BoostReady()) ++skip_misses_.unavailable;
     else if (!had_motion) ++skip_misses_.no_motion;
-    else if (inputs.reset_hint || change_hold) ++skip_misses_.reset;
+    else if (inputs.reset_hint) ++skip_misses_.reset;
     else if (slice.first != 0u) ++skip_misses_.split;
     else if (session_.PassCount() != 1u) ++skip_misses_.multipass;
     else if (!boost_surfaces) ++skip_misses_.unavailable;
@@ -1315,10 +1265,8 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
       counters = {.since = now};
     }
   }
-  const bool motion_switched = (motion_source != set_->present_motion);  // spec §9: a provider switch
-  inputs.reset_hint = (inputs.reset_hint || motion_switched);
+  inputs.reset_hint = (inputs.reset_hint || motion_source != set_->present_motion);  // spec §9: a provider switch
   set_->present_motion = motion_source;
-  if (motion_switched) NoteSurfaceChange();  // the frames after it too: see change_hold_
   chain.Start();
   // 1. Source copy ← target (Plan 3, unchanged).
   Transition(list, source_copy, PIXEL_AND_COMPUTE_READ, D3D12_RESOURCE_STATE_COPY_DEST);

@@ -161,12 +161,6 @@ class NrPipeline final : private nr::PassResolver {
   void SetLookConfig(const LookConfig& config);
   // Frame skip: the queue the GPU timings are taken against, named by the device context's present.
   void NotePresentQueue(ID3D12CommandQueue* queue) { timer_.NoteQueue(queue); }
-  // The one way in for a change that can invalidate what the GPU is still reading: the work size (a resolution row, an
-  // upscale ratio), the placement, the vector source. It waits for the GPU to pass the marks its recordings took, so a
-  // surface retired on this frame is freed now rather than queued behind a backlog, and then holds NR off the carry for
-  // CHANGE_HOLD_FRAMES frames: a held model and vector field describe the old mapping of the image, and carrying across
-  // the change reprojects them onto surfaces that did not exist when they were fitted. Held frames run the network.
-  void NoteSurfaceChange();
   // Plan 5 (v2 design §3.13, key decision 8): Uplift's copy of UPLIFT_MASK, shaped like `mask` (its size and
   // format), which the add-on copies the effect's texture into at the end of ReShade's effects. Recordings bind it
   // from NoteMaskCopied on. `mask` null, or a format Uplift cannot read, releases the copy and returns null.
@@ -387,8 +381,7 @@ class NrPipeline final : private nr::PassResolver {
 
   Texture CreateTexture(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
                         const wchar_t* name);
-  std::string_view EnsureIntermediates(SetPlan plan);  // by value: an empty boost extent keeps the last (see the body).
-                                                       // empty on success, else "out of memory"
+  std::string_view EnsureIntermediates(SetPlan plan);  // empty on success, else "out of memory"
   // `set`'s intermediates only: freed now if the GPU is done with them, else at their mark. The Retire*(StageSet*) free one set's surfaces: the recording's,
   // or any from ReleaseIntermediates and RetireSetsFrom.
   void RetireSet(StageSet* set);
@@ -451,13 +444,6 @@ class NrPipeline final : private nr::PassResolver {
   uint32_t half_rate_frames_ = 0u;
   uint32_t half_rate_asked_ = 0u;
   uint32_t half_rate_carried_ = 0u;
-  // Frame skip: how many frames still run the network after a change (NoteSurfaceChange). The held detail was lifted on
-  // the old surfaces and cannot be reprojected onto the new ones: the frame the change lands on is already told by its
-  // reset hint, this covers the ones whose inputs already come from the new surfaces.
-  uint32_t change_hold_ = 0u;
-  // The plan the last presents reported, and how many of them agreed: see REBUILD_SETTLE_FRAMES.
-  SetPlan pending_plan_{};
-  uint32_t pending_settle_ = 0u;
   color::ColorPipeline color_;
   std::array<StageSet, STAGE_SETS> sets_;
   StageSet* set_ = &sets_[0];  // the recording's (ChainPart::set)

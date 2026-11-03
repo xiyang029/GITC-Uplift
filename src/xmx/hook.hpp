@@ -27,8 +27,13 @@ struct Status {
   // No "enabled" here: the caller already holds the setting it pushed, so a copy in the snapshot
   // would only be a second answer to the same question.
   bool generating{};
-  bool hooked{};    // Preflight passed: the mode can serve this game's DLSS-G (no hook involved)
+  bool hooked{};        // Preflight passed: the mode can serve this game's DLSS-G (no hook involved)
+  bool evaluating{};    // DLSS-G called the generator within the last two seconds
   const char* failure{};
+  // Why the last evaluate produced no generated frame (empty when it did): "waiting for two real
+  // frames in a row" and "the game sent no input" are both "not generating", and only this tells
+  // them apart. A literal, so it lives as long as the process.
+  const char* idle{};
   // The tensor-core route's own counters (src/xmx/vendor/cuda/). "active" only says it installed;
   // a route whose launches stop climbing, or whose fallbacks climb at all, has stopped serving
   // layers -- and the frame rate alone would not show which. 0 layers/launches before the game's

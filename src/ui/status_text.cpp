@@ -466,7 +466,14 @@ std::string FormatXmxLive(const XmxFacts& facts) {
     return std::format("XMX: Intel XeFG is generating (tensor cores {} layers, {} launches)", facts.layers,
                        facts.launches);
   }
-  if (facts.hooked) return "XMX: XeFG is up, waiting for the game's first DLSS-G frame";
+  // Up and no frame: a game that has stopped calling DLSS-G is pausing the mode, and one that is
+  // still calling it has a reason -- and both are a different answer from "not started yet".
+  if (facts.hooked) {
+    if (!facts.evaluating)
+      return "XMX: XeFG is up; DLSS-G is not being called (a menu, a cutscene, or the game's own frame generation off)";
+    if (!facts.idle.empty()) return std::format("XMX: not generating ({})", facts.idle);
+    return "XMX: XeFG is up, waiting for a frame from the game's DLSS-G";
+  }
   return "XMX: waiting for the game's DLSS-G to be evaluated";
 }
 

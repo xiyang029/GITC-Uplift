@@ -2,7 +2,6 @@
 #include "xmx/hook.hpp"
 
 #include <atomic>
-#include <mutex>
 #include <string>
 
 #include "nr/log.hpp"
@@ -19,9 +18,11 @@ std::atomic<int> g_reported_state{-1};
 }  // namespace
 
 bool Evaluate(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* parameters) {
-  if (!generator::Enabled()) return false;
-  if (list == nullptr || parameters == nullptr) return false;
+  if (!Enabled()) return false;
   const uint32_t seen = g_evaluates.fetch_add(1, std::memory_order_relaxed) + 1u;
+  // Read by the panel asynchronously: a game that stops calling DLSS-G (a menu, a cutscene, frame
+  // generation switched off in its own settings) is pausing the mode, not failing it.
+  generator::g_last_evaluate_tick.store(GetTickCount64(), std::memory_order_relaxed);
   // One report every kReportEvaluates frame-generation evaluates: a refused mode always explains
   // itself, and a running one keeps saying what the tensor cores are doing. At 6x five evaluates
   // make one presented frame, so this is roughly one line a minute at 200 fps.
@@ -43,6 +44,10 @@ bool Evaluate(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* parame
   // all, and the frame rate would not show that on its own.
   if (report) {
     const auto route = xefg_cuda::Snapshot();
+    // Launches are cumulative; only the delta says whether the route is serving this interval.
+    static uint64_t reportedLaunches = 0;
+    const uint64_t launches = route.launches - reportedLaunches;
+    reportedLaunches = route.launches;
     const char* state = "not attempted";
     switch (route.state) {
       case xefg_cuda::State::Active: state = "active"; break;
@@ -50,22 +55,21 @@ bool Evaluate(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* parame
       case xefg_cuda::State::Disabled: state = "disabled"; break;
       case xefg_cuda::State::NotAttempted: break;
     }
-    nr::Logf(nr::LogLevel::INFO, "xmx: tensor cores {} ({} layer(s), {} launch(es), {} fallback(s)){}", state,
-             route.layers, route.launches, route.fallbacks,
+    nr::Logf(nr::LogLevel::INFO, "xmx: tensor cores {} ({} layer(s), {} launch(es), +{} this interval, {} fallback(s)){}",
+             state, route.layers, route.launches, launches, route.fallbacks,
              route.reason.empty() ? std::string() : (" [" + route.reason + "]"));
   }
   return generated;
 }
 
 Status Snapshot() {
-  static std::mutex lock;
-  static std::string failure;
+  // The panel holds a string_view into this (ui::FormatXmxLive copies it before it returns), so the
+  // storage has to outlive the call. Per-thread: a caller on another thread then cannot rewrite the
+  // string this one is still reading, which is what the mutex used to stand in for.
+  static thread_local std::string failure;
   const generator::Report report = generator::Snapshot();
   const int state = report.generating ? 1 : 0;
-  {
-    std::lock_guard guard(lock);
-    failure = report.failure;
-  }
+  failure = report.failure;
   if (g_reported_state.exchange(state, std::memory_order_relaxed) != state) {
     if (report.generating) nr::Logf(nr::LogLevel::INFO, "xmx: XeFG is generating this game's DLSS-G frames");
   }
@@ -77,8 +81,14 @@ Status Snapshot() {
   xefg_cuda::Status route;
   if (xefg_cuda::TrySnapshot(route)) cached = route;
   else route = cached;
-  return {report.generating, generator::Enabled() && report.hooked, failure.c_str(),
-          route.layers,      route.launches,                        route.fallbacks};
+  return {report.generating,
+          Enabled() && report.hooked,
+          report.evaluating,
+          failure.c_str(),
+          report.idle == policy::Idle::None ? "" : policy::IdleText(report.idle),
+          route.layers,
+          route.launches,
+          route.fallbacks};
 }
 
 }  // namespace uplift::xmx

@@ -166,7 +166,6 @@ struct DeviceEntry {
   bool launchpad_ready = false;
   bool lumenite_ready = false;      // 2026-10-08: the same for Lumenite's Kernel (Setup's Lumenite option)
   bool uplift_mv_lumenite = false;  // 2026-10-08: Uplift.fx writes Lumenite's vectors into UPLIFT_MV (the links' state; the readouts name it)
-  api::resource last_launchpad_motion = {0u};  // the UPLIFT_MV the last present saw: a new one means ReShade recompiled Uplift.fx
   addon::UpliftMvSource uplift_mv_source = addon::UpliftMvSource::NONE;  // 1.2.1: the source Uplift.fx is compiled with (MotionLinkStep::compiled)
   std::string mask_note;  // Plan 5: the overlay's "NR mask" line
   bool d3d11 = false;     // Plan 7: a D3D11 device; its NR runs through d3d11_bridge
@@ -2785,15 +2784,6 @@ void OnRenderTechnique(api::effect_runtime* runtime, api::effect_technique techn
         }
       }
     }
-    // A Launchpad/Lumenite link's recompile hands ReShade's UPLIFT_MV a new texture while the recordings that copy from the
-    // old one are still queued: the queue is drained (and the carry held off) before anything uses the new one.
-    if (entry->context != nullptr && launchpad.handle != entry->last_launchpad_motion.handle) {
-      const bool had_one = (entry->last_launchpad_motion.handle != 0u);
-      entry->last_launchpad_motion = launchpad;
-      if (had_one) {
-        entry->context->PauseForEffectReload();
-      }
-    }
     if (NativePresent(*entry)) {
       RunNative(*entry, runtime->get_device(), entry->vk_dlss->OnTechnique(is_marker), vk::Usage::RENDER_TARGET, launchpad_view);  // Plan 19
       return;
@@ -3269,7 +3259,9 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
             const uplift::xmx::Status xmx = uplift::xmx::Snapshot();
             view.xmx_live_line = ui::FormatXmxLive({.generation = xmx.generating,
                                                     .hooked = xmx.hooked,
+                                                    .evaluating = xmx.evaluating,
                                                     .failure = xmx.failure,
+                                                    .idle = xmx.idle,
                                                     .layers = xmx.layers,
                                                     .launches = xmx.launches,
                                                     .fallbacks = xmx.fallbacks});

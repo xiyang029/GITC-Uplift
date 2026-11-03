@@ -253,7 +253,9 @@ struct StatusView {
 struct XmxFacts {
   bool generation = false;   // XeFG produced the last frame (not the core's own generation)
   bool hooked = false;       // the mode can serve this game's DLSS-G (its Intel files passed Preflight)
+  bool evaluating = false;   // DLSS-G called the generator within the last two seconds
   std::string_view failure;  // why the mode could not start; empty when it did
+  std::string_view idle;     // why the last evaluate produced no frame; empty when it did
   // The tensor-core route (src/xmx/vendor/cuda/): "active" only says it installed. Zero launches
   // while generating, or any fallback at all, means layers stopped going through the tensor cores.
   uint32_t layers = 0;

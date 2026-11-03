@@ -44,7 +44,6 @@ bool Publish(HMODULE frame_generation, HMODULE latency, std::string& error) {
     static auto models = std::make_unique<ModelPort>(frame_generation, true, true);
     static auto unlock = std::make_unique<xess_host_unlock::Unlock>(
         frame_generation, latency, static_cast<uint8_t>(kGeneratedFrames), false);
-    if (shaders == nullptr || models == nullptr || unlock == nullptr) return Refuse("port_allocation", error);
     g_published = true;
     xess_mod::WriteLog("model_port_published", std::string("\"generated\":") + std::to_string(kGeneratedFrames) +
                                                    ",\"keep_2x_model\":false");

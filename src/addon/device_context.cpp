@@ -640,7 +640,12 @@ void DeviceContext::ApplyLookConfig(std::chrono::steady_clock::time_point now, u
   // Frame skip: the setting says whether it is on, this present's place in the cycle says whether the network
   // runs on it. It also needs vectors to carry with: turning the motion-vector source off leaves half_rate
   // set, and a carry then runs on a plan with no boost_motion. Gate on the source, not only the period.
-  const bool half_rate_on = (ui::HalfRatePeriod(config_.half_rate) > 1u) && config_.motion_vectors;
+  // Counted per recording, not per present: ApplyLookConfig runs once for each group of the chain, so a chain of
+  // several groups spends more than one of these on a single present.
+  const bool stand_down = skip_stand_down_ > 0u;
+  if (stand_down) --skip_stand_down_;
+  const bool half_rate_on =
+      (ui::HalfRatePeriod(config_.half_rate) > 1u) && config_.motion_vectors && !stand_down;
   // A change in this value retires and rebuilds the set's boost surfaces (NrPipeline::SetLookConfig). Clicking
   // the row back and forth queues one full set per click, and a retired set cannot go until the GPU passes
   // its mark -- ten clicks in a row is ten sets still on the queue, and the device runs out of memory (which
@@ -648,9 +653,14 @@ void DeviceContext::ApplyLookConfig(std::chrono::steady_clock::time_point now, u
   // switch's retirement finished before the next queues another.
   if (half_rate_on != half_rate_applied_) {
     half_rate_applied_ = half_rate_on;
-    // Through the pipeline's one path for a change: SetLookConfig retires the boost surfaces below, and this waits for
-    // the GPU to pass their marks (ten clicks in a row would otherwise queue ten sets) before holding the carry off.
-    if (present_source_ != nullptr) present_source_->Pipeline().NoteSurfaceChange();
+    if (timeline_ != nullptr) {
+      const std::string_view late = timeline_->WaitIdle(std::chrono::milliseconds(250));
+      if (!late.empty()) {
+        nr::Logf(nr::LogLevel::WARN,
+                 "NR: the GPU did not go idle within 250 ms of a frame-skip switch ({}); its surfaces are left to their marks",
+                 late);
+      }
+    }
   }
   look.half_rate = half_rate_on;
   look.half_rate_skip = (look.half_rate && half_rate_phase_ != 0u);
@@ -817,13 +827,20 @@ void DeviceContext::NotePlacementChange() {
   // actually complete before the next one queues another; at ~100 fps the queue drains within a frame or
   // two, so the wait is a few milliseconds, and it only runs when the placement really changed.
   if (present_source_ != nullptr) {
-    // Through the pipeline's one path for a change: it waits for the GPU to pass the marks these recordings took (the
-    // wait above) and holds the carry off, since the held model describes the old stage's canvas.
-    present_source_->Pipeline().NoteSurfaceChange();
+    if (timeline_ != nullptr) {
+      const std::string_view late = timeline_->WaitIdle(std::chrono::milliseconds(250));
+      if (!late.empty()) {
+        nr::Logf(nr::LogLevel::WARN,
+                 "NR: the GPU did not go idle within 250 ms of a placement switch ({}); this switch's surfaces are left to "
+                 "their marks",
+                 late);
+      }
+    }
     present_source_->Pipeline().RetireSetsFrom(0u);
   }
-  // No carry across the switch: NoteSurfaceChange above holds it off for a few presents, each of which
-  // runs the network for its own stage's canvas, and the cycle starts over with the new stage's.
+  // And no frame skip until the new stage has run the network itself for a couple of recordings: a skipped
+  // frame carries the previous present's result, which was built against the old stage's canvas.
+  skip_stand_down_ = 2u;
   half_rate_phase_ = 0u;
 }
 
