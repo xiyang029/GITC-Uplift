@@ -107,13 +107,9 @@ namespace icons {
 constexpr const char* kUndo = "\xef\x83\xa2";       // U+F0E2 undo
 }  // namespace icons
 
-// The one text size the panel names: a note under a row, one step (12/13) down from the size the player chose
-// for ReShade. Uplift writes [STYLE] FontSize = 16 before ReShade builds its atlas
-// (addon/reshade_config_store.hpp), and those dense rows need every pixel of it, so nothing scales the panel
-// itself: it draws at the player's size, and a player who enlarges ReShade's font gets a larger panel.
-//
-// FontSizeBase, not ImGui::GetFontSize(): PushFont takes the unscaled size, and the size the global factors
-// were already applied to would have them applied a second time.
+// The one text size the panel names: a note under a row, one step (12/13) below the size the player chose for
+// ReShade. The panel itself draws at that size, so the wheel takes it along. FontSizeBase, not GetFontSize():
+// PushFont takes the unscaled size and the global factors would apply twice.
 inline float SmallFontSize() {
   const float base = ImGui::GetStyle().FontSizeBase;
   return (base > 0.f ? base : 16.f) * (12.f / 13.f);
