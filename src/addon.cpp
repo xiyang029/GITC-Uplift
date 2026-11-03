@@ -512,7 +512,6 @@ void PushPresetGates(AddonState& state, const ui::Settings& settings) {
   const bool rr = addon::ToRrPresetOverrides(settings).Any();
   state.bridge.NoteDlssPresetChoices(sr || rr);
   state.bridge.NoteDlssRenderScales(settings.dlss_render_scale);
-  addon::SetSrRrPresetForced(sr, rr);
   addon::SetFgPresetDesired(static_cast<uint32_t>(settings.fg_preset));
   PushFgRuntimeChoices(settings);
 }
@@ -3229,13 +3228,8 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
           const int mode = view.dlss_preset_mode;
           const uint32_t sr_choice = (mode >= 0 ? static_cast<uint32_t>(state.settings.dlss_presets[static_cast<size_t>(mode)]) : 0u);
           const uint32_t rr_choice = static_cast<uint32_t>(state.settings.rr_preset);
-          // A value the driver held that reached the provider unsuppressed is the one that wins, whatever
-          // the panel asked for: that is an NVIDIA App override, and the line must say so.
-          const addon::PresetEvidence evidence = addon::SrRrPresetEvidence(rr);
-          const std::string driver_preset =
-              (evidence.read_seen && !evidence.suppressed && evidence.driver_value != 0u ? std::to_string(evidence.driver_value) : "");
           view.dlss_live_line = ui::FormatDlssLive(view.dlss_mode_name, (rr ? std::string() : name_of(SR_NAMES, sr_choice)),
-                                                  driver_preset, view.dlss_render.width, view.dlss_render.height,
+                                                  view.dlss_render.width, view.dlss_render.height,
                                                   view.dlss_output.width, view.dlss_output.height);
           view.rr_live_line = (rr ? ui::FormatRrLive(name_of(RR_NAMES, rr_choice)) : std::string());
           view.fg_live_line =

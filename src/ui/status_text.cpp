@@ -477,8 +477,8 @@ std::string FormatXmxLive(const XmxFacts& facts) {
   return "XMX: waiting for the game's DLSS-G to be evaluated";
 }
 
-std::string FormatDlssLive(const std::string& mode_name, const std::string& preset_name, const std::string& driver_preset,
-                            uint32_t render_width, uint32_t render_height, uint32_t output_width, uint32_t output_height) {
+std::string FormatDlssLive(const std::string& mode_name, const std::string& preset_name, uint32_t render_width,
+                            uint32_t render_height, uint32_t output_width, uint32_t output_height) {
   // One complete line, whichever parts exist: Localize matches whole strings, so a concatenation would
   // never be translated. The sizes come from the game's own create, so they are what DLSS is rendering
   // into -- the one place a render-scale override becomes visible.
@@ -490,15 +490,11 @@ std::string FormatDlssLive(const std::string& mode_name, const std::string& pres
                                 ? std::format("{} ({}%)", mode_name, (render_width * 100u + output_width / 2u) / output_width)
                                 : mode_name;
   std::string line;
-  if (driver_preset.empty() && preset_name.empty()) {
+  if (preset_name.empty()) {
     if (mode_name.empty()) return {};
     line = std::format("DLSS: {}", named);
-  } else if (driver_preset.empty()) {
-    line = std::format("DLSS: {} (preset {})", named, preset_name);
-  } else if (preset_name.empty()) {
-    line = std::format("DLSS: NVIDIA App preset {} wins", driver_preset);
   } else {
-    line = std::format("DLSS: {} (preset {}) · NVIDIA App preset {} wins", named, preset_name, driver_preset);
+    line = std::format("DLSS: {} (preset {})", named, preset_name);
   }
   if (sized) line += std::format(" {}x{} -> {}x{}", render_width, render_height, output_width, output_height);
   // The sizes are a plain suffix rather than a format field: Localize matches the sentence, and a

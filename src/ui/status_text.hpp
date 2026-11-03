@@ -242,8 +242,8 @@ struct StatusView {
 // The DLSS / Reflex card's live block, drawn once at the bottom of the card: what the runtime actually
 // holds, as opposed to the choice that asks for it. Each returns an empty string when it has nothing to
 // say, and each is ONE format string (Localize matches whole lines, never a concatenation).
-[[nodiscard]] std::string FormatDlssLive(const std::string& mode_name, const std::string& preset_name, const std::string& driver_preset,
-                                        uint32_t render_width, uint32_t render_height, uint32_t output_width, uint32_t output_height);
+[[nodiscard]] std::string FormatDlssLive(const std::string& mode_name, const std::string& preset_name, uint32_t render_width,
+                                        uint32_t render_height, uint32_t output_width, uint32_t output_height);
 [[nodiscard]] std::string FormatRrLive(const std::string& preset_name);
 [[nodiscard]] std::string FormatFgPresetLive(const std::string& preset_name, bool live_switch, bool pending_drain);
 [[nodiscard]] std::string FormatMultiplierLive(bool dynamic, uint32_t multiplier, bool panel_multiplier, uint32_t panel_choice);

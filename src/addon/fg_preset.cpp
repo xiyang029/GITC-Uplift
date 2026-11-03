@@ -32,9 +32,9 @@ constexpr uint32_t FG_PRESET_ID = 0x10E41DF1u;
 // DLSS Super Resolution's and Ray Reconstruction's own preset settings, read once per provider at its
 // initialization (NGXDLAA / NGXDLSSD's ReadValuesFromDRS) exactly like the FG one. A value found there
 // -- an NVIDIA App override, or the driver's -- outranks the per-Create hint keys the live SR/RR swap
-// writes (ngx_hooks/dlss_overrides.hpp) for the whole session. With a panel SR/RR choice set the read
-// therefore answers "not set", which is the suppression MFG-Unlocker's dlss_sr_policy.h documents; the
-// hints then decide. Ids after MFG-Unlocker, MIT.
+// writes (ngx_hooks/dlss_overrides.hpp) for the whole session. That read is therefore always answered
+// "not set" -- the suppression below, which MFG-Unlocker's dlss_sr_policy.h documents -- and those
+// hints decide. Ids after MFG-Unlocker, MIT.
 constexpr uint32_t SR_PRESET_ID = 0x10E41DF3u;
 constexpr uint32_t RR_PRESET_ID = 0x10E41DF7u;
 
@@ -337,26 +337,14 @@ void** FindConfigSlot(HMODULE module, uintptr_t helper0, uintptr_t helper1) {
 
 // ---- The SR/RR suppression ----
 // A provider reads its own preset key once, at its initialization, and caches what it found; a driver
-// or NVIDIA App value there outranks every hint key a later create carries. With the panel forcing an
-// SR or RR preset, the answer to that read is withheld ("setting not found"), so the per-create hints
-// -- the ones the live swap writes -- are what selects the model. With the panel on Game the driver's
-// answer passes through untouched, so an NVIDIA App override still works.
-std::atomic<bool> g_sr_forced{false};
-std::atomic<bool> g_rr_forced{false};
-
-// The driver's own answer for each id when the provider first read it, for the panel's live row: whether
-// a read was seen at all, the value it carried, and whether we withheld it. This is how a player learns
-// why a chosen preset is not what runs -- an NVIDIA App override we could not answer is the one case.
-struct DrsObservation {
-  std::atomic<bool> seen{false};
-  std::atomic<uint32_t> driver_value{0u};
-  std::atomic<bool> suppressed{false};
-};
-DrsObservation g_sr_observation;
-DrsObservation g_rr_observation;
-DrsObservation& ObservationOf(uint32_t id) {
-  return id == SR_PRESET_ID ? g_sr_observation : g_rr_observation;
-}
+// or NVIDIA App value there outranks every hint key a later create carries, for the rest of the
+// session. That read is answered "setting not found" whatever the panel asks for, because the read
+// happens once and cannot be undone: with the panel on Game the driver's value would be cached, and a
+// choice made later in the session would stay pinned to it until the game restarted (the cached reader
+// behind the FG preset is never asked for these ids, so there is no second chance). Suppressing it
+// leaves the per-create hints -- what the live swap writes -- to decide, so the panel's choice lands
+// at the next create. The cost is that an NVIDIA App DLSS preset override no longer reaches Super
+// Resolution or Ray Reconstruction; the panel's own choices are the ones that set those presets.
 
 // The modules whose own initialization read of an SR/RR preset id is ours to answer (MFG-Unlocker's
 // rule): the NGX feature provider -- the snippet, which exports NVSDK_NGX_GetSnippetVersion -- and the
@@ -390,17 +378,6 @@ NvAPI_Status SuppressSrRrRead(const void* caller, uint32_t id, NvAPI_Status resu
   }
   const bool sr = (id == SR_PRESET_ID);
   if (!IsNgxPresetReader(caller)) return result;
-  // The row's evidence, recorded whatever the panel asks for: the value the driver had, and whether it
-  // reached the provider.
-  DrsObservation& observation = ObservationOf(id);
-  observation.driver_value.store(setting->u32CurrentValue, std::memory_order_relaxed);
-  if (!(sr ? g_sr_forced : g_rr_forced).load(std::memory_order_relaxed)) {
-    observation.seen.store(true, std::memory_order_relaxed);
-    observation.suppressed.store(false, std::memory_order_relaxed);
-    return result;
-  }
-  observation.seen.store(true, std::memory_order_relaxed);
-  observation.suppressed.store(true, std::memory_order_relaxed);
   static std::atomic<bool> logged_sr{false};
   static std::atomic<bool> logged_rr{false};
   if (!(sr ? logged_sr : logged_rr).exchange(true)) {
@@ -483,10 +460,6 @@ void SetFgPresetDesired(uint32_t preset) {
   if (preset == 0u) g_switch_requested.store(0u, std::memory_order_relaxed);
 }
 
-void SetSrRrPresetForced(bool sr, bool rr) {
-  g_sr_forced.store(sr, std::memory_order_relaxed);
-  g_rr_forced.store(rr, std::memory_order_relaxed);
-}
 
 bool FgPresetSwitchPending() {
   // Without a configuration slot there is nothing to reset: the panel's choice only lands at the next
@@ -501,15 +474,6 @@ bool FgPresetSwitchPending() {
 
 uint64_t FgPresetResets() {
   return g_resets.load(std::memory_order_acquire);
-}
-
-PresetEvidence SrRrPresetEvidence(bool ray_reconstruction) {
-  const DrsObservation& observation = ObservationOf(ray_reconstruction ? RR_PRESET_ID : SR_PRESET_ID);
-  return {
-      .read_seen = observation.seen.load(std::memory_order_relaxed),
-      .driver_value = observation.driver_value.load(std::memory_order_relaxed),
-      .suppressed = observation.suppressed.load(std::memory_order_relaxed),
-  };
 }
 
 void InstallFgPresetHook();
