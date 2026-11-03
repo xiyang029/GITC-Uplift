@@ -598,24 +598,27 @@ inline std::string Layout(const FrameData& data) {
 }
 // Every argument the mode hands XeFG, once per distinct combination. A refused mode has to say what it
 // was refused for, and the game's own input sizes are the only arguments that move with an upscaler
-// setting (the context's shape is fixed at init, and only a resize changes it).
+// setting (the context's shape is fixed at init, and only a resize changes it). The frame index and
+// DLSSG.OutputReal stay out of the key: the index walks 1..5 within every pair, so the real-frame
+// output, which is there on the pair's first evaluate and absent on the four that follow, would print
+// the same inputs twice per pair -- well over a hundred lines a second at 5x.
 inline void NoteArguments(const NVSDK_NGX_Parameter* params, ID3D12Resource* backbuffer, ID3D12Resource* depth,
                           ID3D12Resource* motion, ID3D12Resource* hudless, ID3D12Resource* interpolated,
-                          ID3D12Resource* real, uint32_t requested, uint32_t index, uint32_t frames) {
+                          uint32_t requested, uint32_t frames) {
   auto& state = Get();
-  // The frame index walks 1..5 within every pair; only a change in what the mode is handed is worth a line.
+  // Only a change in what the mode is handed is worth a line.
   const std::string shapes = "backbuffer " + Shape(backbuffer) + " depth " + Shape(depth) + " motion " + Shape(motion) +
-                             " hudless " + Shape(hudless) + " interpolated " + Shape(interpolated) + " real " +
-                             Shape(real) + " depth-declared " + AreaText(RawArea(params, "DLSSG.Depth")) +
+                             " hudless " + Shape(hudless) + " interpolated " + Shape(interpolated) +
+                             " depth-declared " + AreaText(RawArea(params, "DLSSG.Depth")) +
                              " mvec-declared " + AreaText(RawArea(params, "DLSSG.MVecs")) + " frames " +
-                             std::to_string(frames) + " context " + std::to_string(state.width) + "x" +
+                             std::to_string(frames) + " requested " + std::to_string(requested) + " context " +
+                             std::to_string(state.width) + "x" +
                              std::to_string(state.height) + " format " +
                              std::to_string(static_cast<int>(state.format)) + " flags " + std::to_string(state.flags);
   static std::string last;
   if (shapes == last) return;
   last = shapes;
-  xess_mod::WriteLog("arguments", shapes + " requested " + std::to_string(requested) + " index " +
-                                       std::to_string(index));
+  xess_mod::WriteLog("arguments", shapes);
 }
 // What XeFG was handed when it refused: the frame's own numbers, not just the resources.
 inline void NoteRefused(const ExecuteParams& execute) {
@@ -720,7 +723,7 @@ inline bool Generate(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter*
   g_requested.store(requested, std::memory_order_relaxed);
   const auto frameCount = plan.count;
   const auto frameIndex = plan.index;
-  NoteArguments(params, backbuffer, depth, motion, hudless, interpolated, real, requested, requestedIndex, frameCount);
+  NoteArguments(params, backbuffer, depth, motion, hudless, interpolated, requested, frameCount);
   if (plan.limited && g_frames_limit.exchange(state.maxFrames) == 0)
     Log(std::to_string(requested) + " generated frames asked for, this model produces " + std::to_string(state.maxFrames));
   // One batch for every copy this evaluate makes. It is flushed before Execute, which reads these
