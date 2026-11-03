@@ -25,4 +25,14 @@ void ReshadeConfigStore::Set(std::string_view key, std::string_view value) {
   reshade::set_config_value(nullptr, ui::CONFIG_SECTION, std::string(key).c_str(), std::string(value).c_str());
 }
 
+void ApplyPanelFonts() {
+  // ReShade writes plain floats into the ini ("13.000000"), so match that rather than fighting its parser.
+  static constexpr char kChineseFont[] = "C:\\Windows\\Fonts\\msyh.ttc";
+  static constexpr char kLatinFont[] = "C:\\Windows\\Fonts\\segoeui.ttf";
+  static constexpr char kFontSize[] = "16.000000";
+  reshade::set_config_value(nullptr, "STYLE", "Font", kChineseFont);
+  reshade::set_config_value(nullptr, "STYLE", "LatinFont", kLatinFont);
+  reshade::set_config_value(nullptr, "STYLE", "FontSize", kFontSize);
+}
+
 }  // namespace uplift::addon

@@ -290,16 +290,13 @@ inline int Guarded(void* function, void* context, void* a, void* b) noexcept {
   }
 }
 
-// The file beside this add-on first, so a game that ships its own (and loads it first) cannot
-// substitute a build this port does not know: Preflight checked that exact file. Only when the
-// add-on's folder has none does the already-loaded copy serve.
+// The file beside this add-on, or nothing: the RVAs this port carries belong to that exact build,
+// and a game that ships its own libxess_fg.dll must not be served instead.
 inline HMODULE OpenRuntime(const wchar_t* name) {
   const auto local = AddonDirectory() / name;
   std::error_code error;
-  if (std::filesystem::exists(local, error)) {
-    if (HMODULE module = LoadLibraryExW(local.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) return module;
-  }
-  return GetModuleHandleW(name);
+  if (!std::filesystem::exists(local, error)) return nullptr;
+  return LoadLibraryExW(local.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 }
 
 inline bool LoadContext(ID3D12Device* device) {

@@ -144,6 +144,9 @@ nvapi::Status __cdecl SetSleepModeDetour(IUnknown* device, nvapi::SleepModeParam
   if (!ApplyPanelChoices(&rewritten, mode, cap_us)) {
     const nvapi::Status result = original(device, params);
     if (log_this_call) nr::Logf(nr::LogLevel::INFO, "reflex: nothing to rewrite (Game mode, no tighter cap); passed through -> {}", static_cast<int32_t>(result));
+    // The panel's row reports the driver, not the override: leaving the state unwritten here made a
+    // game that calls Reflex every frame read as "no call seen".
+    if (result == nvapi::kOk) RecordLive(*params);
     g_refresh_pending.store(false, std::memory_order_relaxed);
     return result;
   }

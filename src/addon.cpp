@@ -3476,6 +3476,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   }
   // Fails when ReShade lacks this API version or ImGui table.
   if (!reshade::register_addon(addon_module, reshade_module)) return false;
+  addon::ApplyPanelFonts();  // ReShade reads [STYLE] once it builds its fonts, right after the add-ons load
   g_state = new AddonState();
   g_state->self_module = addon_module;
   std::vector<std::string> warnings;

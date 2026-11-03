@@ -677,11 +677,9 @@ constexpr const char* DlssReflexGroup(std::string_view key) {
 }
 
 bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state) {
-  // The panel draws at BaseFontSize(), one push for the whole overlay: every row measures itself in font sizes,
-  // so the layout scales with the text, and Ctrl+mouse wheel's change of that size takes the panel with it.
-  // StyleScope pops it on every return path.
-  style::StyleScope panel_font;
-  panel_font.FontSize(style::BaseFontSize());
+  // No font push here: the panel already draws at the size the player chose for ReShade, every row measures
+  // itself in font sizes, and Ctrl+mouse wheel therefore takes the panel with it (PushFont(NULL, FontSizeBase)
+  // would be the same size back again).
   // The panel draws and colours itself out of style.hpp's tokens; without this the global style stays
   // ReShade's (square corners, ReShade's blues). Every frame, not once: ReShade writes its own style back
   // whenever its settings are touched (see RefreshForDpi).

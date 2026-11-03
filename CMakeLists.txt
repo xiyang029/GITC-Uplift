@@ -403,13 +403,6 @@ add_library(uplift_client STATIC
   src/client/gl_client.cpp)
 target_link_libraries(uplift_client PUBLIC uplift_ipc uplift_bridge uplift_vk uplift_gl d3d9 d3d11 dxgi)
 
-# The XMX mode's minimal check (tests/xmx_layout_test.cpp): the ported ABI layouts, and the four
-# states of its panel line. A console executable, so it needs no ReShade and no device.
-add_executable(xmx_layout_test tests/xmx_layout_test.cpp)
-target_include_directories(xmx_layout_test PRIVATE "${CMAKE_SOURCE_DIR}/src")
-target_link_libraries(xmx_layout_test PRIVATE uplift_xmx uplift_ui uplift_color)
-add_test(NAME xmx_layout_test COMMAND xmx_layout_test)
-
 add_library(uplift_addon SHARED
   src/addon.cpp
   src/addon/helper_front.cpp

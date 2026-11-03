@@ -456,7 +456,15 @@ std::string FormatFrameGenerationLine(bool active, uint32_t multiplier, bool fro
 std::string FormatXmxLive(const XmxFacts& facts) {
   if (!facts.failure.empty()) return std::format("XMX: cannot start ({})", facts.failure);
   if (facts.generation) {
-    if (facts.layers == 0u) return "XMX: Intel XeFG is generating";
+    // A route that launched nothing is not the one producing the frames: the DXIL port is, and the
+    // frame rate cannot say which -- it rises either way.
+    if (facts.launches == 0u) {
+      if (facts.layers == 0u) return "XMX: Intel XeFG is generating (DP4A port)";
+      return facts.fallbacks == 0u
+                 ? std::format("XMX: Intel XeFG is generating (DP4A port; {} layers, 0 launches)", facts.layers)
+                 : std::format("XMX: Intel XeFG is generating (DP4A port; {} layers, 0 launches, {} fell back)",
+                               facts.layers, facts.fallbacks);
+    }
     // The tensor-core line: what the CUDA route has actually run, so a silent regression to the
     // DXIL port (or a layer it stopped recognizing) is visible without reading the log.
     if (facts.fallbacks != 0u) {
@@ -518,7 +526,10 @@ std::string FormatMultiplierLive(bool dynamic, uint32_t multiplier, bool panel_m
   if (dynamic) return "Frame generation: Dynamic MFG picks the multiplier";
   if (multiplier < 2u) return {};
   if (panel_multiplier) return std::format("Frame generation: {}x (the panel's choice)", multiplier);
-  if (panel_choice >= 2u) return std::format("Frame generation: {}x (the game's own; {}x was refused)", multiplier, panel_choice);
+  // A game whose own request already equals the panel's choice is forwarded untouched, so the count is
+  // the game's -- but saying that choice was "refused" while the row shows that very multiplier reads as
+  // a contradiction. The refusal is only a fact when the two numbers differ.
+  if (panel_choice >= 2u && panel_choice != multiplier) return std::format("Frame generation: {}x (the game's own; {}x was refused)", multiplier, panel_choice);
   return std::format("Frame generation: {}x (the game's own)", multiplier);
 }
 
@@ -564,10 +575,11 @@ std::string FormatReflexLive(bool known, uint32_t mode, uint32_t fps_cap) {
   // the driver holds, not what happened this second. "None seen" is itself the answer for a game without
   // Reflex, and that is worth showing.
   if (!known) return "Reflex: no call seen (the game does not use it)";
-  if (mode == 0u && fps_cap == 0u) return "Reflex: off";
-  // Without a cap, "off" is already gone (the line above): only the two modes that limit latency remain.
+  // Mode 0 turns Reflex off and the driver then ignores the interval; reporting it as a cap printed
+  // "off, cap 60 FPS" -- two statements that cannot both be true.
+  if (mode == 0u) return "Reflex: off";
   if (fps_cap == 0u) return (mode == 2u ? "Reflex: on + boost" : "Reflex: on");
-  return std::format("Reflex: {}, cap {} FPS", (mode == 2u ? "on + boost" : mode == 1u ? "on" : "off"), fps_cap);
+  return std::format("Reflex: {}, cap {} FPS", (mode == 2u ? "on + boost" : "on"), fps_cap);
 }
 
 std::optional<std::string> FrameGenerationWarning(bool active, uint32_t passes) {
