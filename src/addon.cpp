@@ -165,8 +165,6 @@ struct DeviceEntry {
   bool outer_holds_nr = false;
   bool outer_owns_frame = false;
   uint32_t outer_present_passes = 0u;
-  ui::OverlayView::Activity activity;
-  color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
   std::string before_fg_note;
   std::string message;                                   // why this device has no context
   bool rejected = false;                                 // not NVIDIA, or the context failed to start: decided once
@@ -1083,7 +1081,6 @@ void RunOrWarnOnce(AddonState* state, DeviceEntry& entry, ReshadeFrameHost* host
                    ID3D12Resource* launchpad_motion = nullptr) {
   if (host->Valid()) {
     const auto result = entry.context->Run(host, entry_state, point, launchpad_motion);
-    if (result.nr_applied) entry.activity.passes += result.passes_run;
     if (result.nr_applied && addon::streamline::Installed()) present_counts.nr_passes.fetch_add(result.passes_run, std::memory_order_relaxed);
     return;
   }
@@ -1182,7 +1179,6 @@ void RunNative(DeviceEntry& entry, api::device* device, addon::TriggerPoint poin
   const auto result = native.RunPresent(point, usage, queues, motion, std::chrono::steady_clock::now());
   if (result.nr_applied) {
     NoteNativePresentFrame(device);
-    entry.activity.passes += result.passes_run;
   }
   if (usage == vk::Usage::PRESENT) {
     // Review I-1: only a semaphore orders a present after earlier work on the queue. ReShade's final flush waits on the game's semaphores and signals the
@@ -1748,13 +1744,11 @@ void BeforeFgDxgi(IDXGISwapChain* chain, UINT flags, const DXGI_PRESENT_PARAMETE
       const HoldsLockForNr holds;
       for (auto& [device, entry] : g_state->devices) {
         if (entry.early_dxgi == chain && entry.early_thread == GetCurrentThreadId()) {
-          ++entry.activity.real;
           entry.early_confirmed = true;
           entry.outer_owns_frame = false;
           break;
         }
         if (!route || !route->Inner() || entry.selector.Primary() != route->Inner()) continue;
-        ++entry.activity.real;
         entry.outer_inner = route->Inner();
         entry.outer_present_passes = 0u;
         if (!g_state->settings.enabled || addon::streamline::Mode() == addon::streamline::FgMode::OFF || !entry.outer_owns_frame || !entry.before_fg_config || !entry.context || g_state->settings.fg_present != ui::Settings::FgPresent::BEFORE) break;
@@ -1767,7 +1761,6 @@ void BeforeFgDxgi(IDXGISwapChain* chain, UINT flags, const DXGI_PRESENT_PARAMETE
           break;
         }
         const auto result = route->Record(chain, reinterpret_cast<ID3D12Device*>(device->get_native()), *entry.context, *entry.before_fg_config, std::chrono::steady_clock::now());
-        entry.activity.passes += result.passes;
         entry.outer_present_passes = result.passes;
         if (result.passes) {
           present_counts.nr_passes.fetch_add(result.passes, std::memory_order_relaxed);
@@ -1892,13 +1885,11 @@ void BeforeFgVk(VkQueue queue, const VkPresentInfoKHR* info, addon::streamline::
         for (auto& [device, entry] : g_state->devices) {
           if (!entry.vulkan || !binding.device || device->get_native() != addon::ReshadeHandleOf(binding.device)) continue;
           if (entry.early_vk_chain == info->pSwapchains[0] && entry.early_vk_queue == queue && entry.early_thread == GetCurrentThreadId()) {
-            ++entry.activity.real;
             entry.early_confirmed = true;
             entry.outer_owns_frame = false;
             break;
           }
           if (!binding.inner || binding.inner != entry.selector.Primary()) continue;
-          ++entry.activity.real;
           entry.outer_inner = binding.inner;
           entry.outer_present_passes = 0u;
           if (!g_state->settings.enabled || g_state->settings.fg_present != ui::Settings::FgPresent::BEFORE || addon::streamline::Mode() == addon::streamline::FgMode::OFF
@@ -1921,7 +1912,6 @@ void BeforeFgVk(VkQueue queue, const VkPresentInfoKHR* info, addon::streamline::
             entry.before_fg_note = "Before FG: Vulkan relay submission failed";
           } else if (result.passes) {
             if (native) NoteNativePresentFrame(device);
-            entry.activity.passes += result.passes;
             entry.outer_present_passes = result.passes;
             present_counts.nr_passes.fetch_add(result.passes, std::memory_order_relaxed);
             entry.before_fg_note = "Before FG: game-facing Vulkan Present";
@@ -1967,7 +1957,6 @@ void BeforeFgDestroyChain(api::swapchain* chain, bool /*resize*/) noexcept {
     auto& entry = found->second;
     entry.outer_inner = nullptr;
     entry.outer_present_passes = 0u;
-    entry.activity = {};
     entry.early_dxgi = nullptr;
     entry.early_vk_chain = VK_NULL_HANDLE;
     entry.early_vk_queue = VK_NULL_HANDLE;
@@ -2084,7 +2073,6 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     }
     if (!entry.selector.OnPresent(swapchain, now)) return;
     if (addon::streamline::Installed() && (device_api == api::device_api::d3d12 || vulkan)) {
-      ++entry.activity.reshade;
       const uint64_t count = ++present_counts.reshade;
       if (LogPresentCount(count)) {
         nr::Logf(nr::LogLevel::INFO, "Before FG trace: ReShade swapchain={} native={:#x} queue={:#x} index={} inside outer={} NGX FG handles={} events={}",
@@ -2147,7 +2135,6 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       entry.queue = (entry.runtime != nullptr ? entry.runtime->get_command_queue() : nullptr);
     }
     entry.back_buffer = swapchain->get_current_back_buffer();
-    entry.output_space = static_cast<color::ColorSpace>(swapchain->get_color_space());
     if (!d3d9) {
       const api::resource_desc back_buffer_desc = device->get_resource_desc(entry.back_buffer);
       entry.swapchain_size = {back_buffer_desc.texture.width, back_buffer_desc.texture.height};
@@ -3713,9 +3700,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
               node = (entry.outer_owns_frame || early_fg) ? 2u : 3u;
               if (entry.outer_owns_frame) count = entry.outer_present_passes;
             }
-            auto& row = view.stage_runs[node];
-            row = {group.first, std::min(group.count, count), group.canvas.Empty() ? group.work : group.canvas, group.motion_source, group.count, std::string(group.skip_reason)};
-            if (!row.count && group.stage == addon::Stage::PRESENT && !entry.before_fg_note.empty()) row.skip = entry.before_fg_note;
+            view.stage_runs[node] = {group.first, std::min(group.count, count)};
           }
         }
         if (status.abandoned || (status.device_lost && !Bridged(entry))) {
@@ -3735,9 +3720,6 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
             .diffuse_white_nits = status.diffuse_white_nits,
             .grace_remaining = status.session.grace_remaining,
         });
-        view.details_backend = facts.api;
-        if (Bridged(entry) && !entry.vulkan) view.details_backend = std::format("{} (Direct3D 12 bridge)", facts.api);
-        view.details_note = status.chain_note;
         // The engine's own lines, which the panel's Details header lists under the status line: they describe what
         // NR actually ran on, and the chain while it is split.
         view.placement_line = status.placement_line;
@@ -3749,7 +3731,6 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
           view.chain_line += (view.chain_line.empty() ? status.chain_note : "\n" + status.chain_note);
         }
         view.network_diagnostic = status.session.network_diagnostic;
-        view.lumenite_motion = entry.uplift_mv_lumenite;
         // Split chain (design 6.2): the chain's groups while it is split, and why a stored "Runs at" does not run as stored (the working card's note too).
         chain_note = status.chain_note;
         facts.chain_note = chain_note;
@@ -3846,7 +3827,6 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
           view.api_line = entry.gl_bridge->StatusLine();
         }
         view.runtime_bytes = status.session.runtime_bytes;
-        view.pass_models = status.session.pass_models;
         view.legacy_runtime = status.session.legacy_runtime;
         view.effective_diffuse_white_nits = status.diffuse_white_nits;
         view.card = CardFor(state, entry, &status, view.status_line);
@@ -3920,15 +3900,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     }
     if (found != state.devices.end()) {
       const auto& entry = found->second;
-      view.output_size = entry.swapchain_size;
-      view.output_space = entry.output_space;
       if (entry.outer_owns_frame || addon::streamline::Mode() == addon::streamline::FgMode::ON) view.frame_generation_active = true;
-      if (view.frame_generation_active && entry.activity.real && (entry.outer_owns_frame || (!HelperView(entry) && (!Bridged(entry) || NativePresent(entry))))) {
-        view.activity = entry.activity;
-      }
-    }
-    if (found != state.devices.end() && view.details_note.empty() && found->second.before_fg_note.starts_with("Before FG unavailable")) {
-      view.details_note = found->second.before_fg_note;
     }
     const bool vk = overlay_device_api == api::device_api::vulkan;
     view.AddStartupLocks(state.settings, vk, overlay_device_api == api::device_api::d3d9);

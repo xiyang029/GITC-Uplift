@@ -15,8 +15,9 @@ inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // 6 (Plan 14): Status::placement, motion_source, dlss_motion_gap, launchpad_gap, resolution_applied, upsampling and the work, canvas and frame sizes
 // (12 uint32_t, +48 bytes): what the 32-bit add-on's Setup and status card read; 7 (Plan 17): Status::exposure_line (+256 bytes).
 // 8: Frame::uplift_mv_lumenite (+8 bytes); 9: Status::network_diagnostic (+256 bytes); 10: Status::legacy_runtime (+8 with alignment).
-// 11: network diagnostics for all ten passes (+3840 bytes).
-inline constexpr uint32_t PROTOCOL_VERSION = 13u;
+// 11: network diagnostics for all ten passes (+3840 bytes). 14: Status::models removed (the per-pass model readout
+// went with the upstream panel it was drawn for).
+inline constexpr uint32_t PROTOCOL_VERSION = 14u;
 inline constexpr size_t TEXT_BYTES = 256u;
 inline constexpr size_t NETWORK_DIAGNOSTIC_BYTES = 4096u;
 inline constexpr size_t PATH_BYTES = 1024u;
@@ -190,8 +191,6 @@ struct Status {
   char transport_line[TEXT_BYTES] = {};  // the helper's half of the Details line
   char exposure_line[TEXT_BYTES] = {};   // Plan 17: ContextStatus::exposure_line
   char network_diagnostic[NETWORK_DIAGNOSTIC_BYTES] = {};
-  struct PassModel { uint8_t network = 0u; uint8_t style = 0xffu; };
-  PassModel models[10]{};
 
 };
 
@@ -240,7 +239,7 @@ struct ControlBlock {
   LogRing log;
 };
 
-inline constexpr size_t CONTROL_BLOCK_BYTES = 60264u;  // protocol 13 includes per-pass model and style
+inline constexpr size_t CONTROL_BLOCK_BYTES = 60248u;  // protocol 14: 13's 60264 less the removed per-pass models (20 bytes, padded to 8)
 static_assert(sizeof(ControlBlock) == CONTROL_BLOCK_BYTES, "the add-on and the helper disagree on the control block");
 static_assert(offsetof(ControlBlock, request) % 8u == 0u && offsetof(ControlBlock, reply) % 8u == 0u);
 // Both processes use the Interlocked*64 functions on it, which need 8 alignment on x86 too.

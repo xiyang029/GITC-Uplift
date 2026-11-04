@@ -463,7 +463,6 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
     wire.target = entry.d3d11->Describe(AsNative<ID3D11Resource>(frame.back_buffer.handle), settings.enabled, entry.running);
   }
   wire.target.color_space = frame.outer_vulkan_host ? static_cast<uint32_t>(frame.outer_color_space) : static_cast<uint32_t>(frame.swapchain->get_color_space());
-  entry.output_space = static_cast<color::ColorSpace>(wire.target.color_space);
   wire.game_facing_present = frame.outer_vulkan_host ? 1u : 0u;
   entry.game_facing = frame.outer_vulkan_host != nullptr;
 
@@ -699,7 +698,6 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
     api_label = std::format("{} (helper)", ApiName(device_api));  // T5: a 64-bit Vulkan device's route, as "Vulkan (native NR)" and "Vulkan (Direct3D 12)"
   }
   facts.api = api_label;
-  view->details_backend = std::format("{} (64-bit NR helper)", ApiName(device_api));
   if (d3d9) {
     if (device != nullptr) {
       // Design §2.9: which case applies, from the device, the toggle, and whether ReShade ever raised create_device.
@@ -738,10 +736,6 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   const ipc::Status* const status = (status_known ? &remote->LastStatus() : nullptr);
   if (status != nullptr) {
     view->status_line = std::string(ipc::TextOf(status->status_line));
-    for (size_t i = 0; i < view->pass_models.size(); ++i) view->pass_models[i] = {static_cast<nr::RecordedNetwork>(status->models[i].network), status->models[i].style};
-    view->output_size = {status->frame_width, status->frame_height};
-    view->output_space = device->output_space;
-    view->lumenite_motion = device->uplift_mv_lumenite;
     view->legacy_runtime = status->legacy_runtime != 0u;
     view->ui_correction_note = std::string(ipc::TextOf(status->ui_correction_note));
     view->mask_note = device->mask_note;
@@ -806,8 +800,7 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   // Plan 14: what runs (the helper's context decided it), and the card's detail.
   if (status != nullptr) {
     FillRunning(&facts, *status, view->card.working);
-    if (settings.enabled && status->nr_applied && view->card.working) view->stage_runs[device->game_facing ? 2u : 3u] = {
-        0u, status->passes_run, {status->canvas_width, status->canvas_height}, static_cast<sources::MotionSource>(status->motion_source)};
+    if (settings.enabled && status->nr_applied && view->card.working) view->stage_runs[device->game_facing ? 2u : 3u] = {0u, status->passes_run};
   }
   if (device->strikes.Exhausted() && !helper_problem.empty()) {
     facts.stopped = ui::PRIVATE_DEVICE_STOPPED_TWICE_REASON;  // Plan 17: the helper's second stop is a fixed cause

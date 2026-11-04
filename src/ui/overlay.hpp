@@ -11,7 +11,6 @@
 #include "ui/controls_coalescer.hpp"
 #include "ui/settings.hpp"
 #include "ui/status_text.hpp"
-#include "sources/motion_source.hpp"
 
 namespace uplift::ui {
 
@@ -21,14 +20,6 @@ struct OverlayView {
   std::string network_diagnostic;  // the runtime's own network diagnostics (SessionStatus::network_diagnostic)
   // The bridge's or the helper front's own line (Plan 18/19): which DLSS stage NR runs at, and the one-time cost.
   std::string api_line;
-  std::array<nr::RecordedModel, MAX_PASSES> pass_models{};
-  std::string details_backend, details_note;
-  color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
-  nr::Size output_size;
-  nr::Size first_stage_input, first_stage_canvas;
-  bool lumenite_motion = false;
-  struct Activity { uint64_t real = 0, reshade = 0, passes = 0; };
-  std::optional<Activity> activity;
   bool legacy_runtime = false;
   uint64_t intermediate_bytes = 0u;
   std::optional<uint64_t> runtime_bytes;  // the NR runtime's own allocation, when its stats report it
@@ -45,27 +36,11 @@ struct OverlayView {
   };
   std::vector<SafetyLock> safety_locks;
   void AddStartupLocks(const Settings& settings, bool vulkan, bool d3d9);
+  // One stage of the pipeline diagram: the first pass it runs and how many. Only what the diagram draws.
   struct StageRun {
     uint32_t first = 0, count = 0;
-    nr::Size resolution;
-    sources::MotionSource motion = sources::MotionSource::NONE;
-    uint32_t planned = 0;
-    std::string skip;
-
   };
   std::array<StageRun, 4> stage_runs{};  // Pre-DLSS, After DLSS, Before FG, On Present. Only passes actually evaluated.
-  [[nodiscard]] const char* RecordedStageName(uint32_t pass) const {
-    for (size_t i = 0; i < stage_runs.size(); ++i) {
-      const auto& group = stage_runs[i];
-      if (pass >= group.first && pass - group.first < group.count) return NR_STAGE_NAMES[i];
-    }
-    return nullptr;
-  }
-  [[nodiscard]] const char* SharedPresentName(const Settings& settings) const {
-    if (stage_runs[2].count) return NR_STAGE_NAMES[2];
-    if (stage_runs[3].count) return NR_STAGE_NAMES[3];
-    return StageLabel(SourcePick::PRESENT, settings.fg_present == Settings::FgPresent::BEFORE && before_fg_unavailable.empty());
-  }
   std::string before_fg_unavailable;
   std::string frame_generation_line;     // FormatFrameGenerationLine; empty before a context exists and in 32-bit games
   std::string frame_rate_line;           // FormatFrameRateLine: real and generated frames per second; empty until measured
@@ -140,10 +115,6 @@ struct OverlayView {
 struct OverlayState {
   DragState drag;
   bool language_changed = false;
-  OverlayView::Activity activity_start{}, activity_delta{};
-  std::chrono::steady_clock::time_point activity_since{};
-  double activity_seconds = 0.0;
-  Settings::FgPresent activity_mode = Settings::FgPresent::OFF;
   bool capturing_key = false;
   // Set on the frame a new hotkey is captured. That key press is still "pressed" in the same
   // frame's input snapshot, so the hotkey handler must skip it once instead of toggling Enable.
