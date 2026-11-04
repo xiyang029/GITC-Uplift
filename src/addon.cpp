@@ -82,7 +82,7 @@
 #include "ui/settings.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/status_text.hpp"
-#include "ui/style.hpp"
+#include "ui/overlay_style.hpp"
 #include "vk/device_hook.hpp"
 #include "vk/format.hpp"
 #include "vk/loader.hpp"
@@ -1956,7 +1956,8 @@ void BeforeFgColor(IDXGISwapChain* chain, DXGI_COLOR_SPACE_TYPE space) noexcept 
   try { if (auto route = addon::BeforeFgDx12::Find(chain)) route->ColorSpace(space); } UPLIFT_CATCH("before_fg_color", )
 }
 
-void BeforeFgDestroyChain(api::swapchain* chain) noexcept {
+// ReShade 6.8 passes `resize` with both swapchain events; Uplift's own hooks read the chain only.
+void BeforeFgDestroyChain(api::swapchain* chain, bool /*resize*/) noexcept {
   try {
     const auto graphics = chain->get_device()->get_api();
     if (graphics != api::device_api::d3d12 && graphics != api::device_api::vulkan) return;
@@ -1978,7 +1979,7 @@ void BeforeFgDestroyChain(api::swapchain* chain) noexcept {
   } UPLIFT_CATCH("before_fg_destroy", )
 }
 
-void BeforeFgInitChain(api::swapchain* chain) { addon::streamline::NoteReshadeSwapchain(chain); }
+void BeforeFgInitChain(api::swapchain* chain, bool /*resize*/) { addon::streamline::NoteReshadeSwapchain(chain); }
 
 bool BeforeFgActive(const ui::Settings& settings, uint32_t ngx_fg, bool detected) {
   if (!settings.enabled || settings.fg_present != ui::Settings::FgPresent::BEFORE) return false;
@@ -3737,6 +3738,17 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         view.details_backend = facts.api;
         if (Bridged(entry) && !entry.vulkan) view.details_backend = std::format("{} (Direct3D 12 bridge)", facts.api);
         view.details_note = status.chain_note;
+        // The engine's own lines, which the panel's Details header lists under the status line: they describe what
+        // NR actually ran on, and the chain while it is split.
+        view.placement_line = status.placement_line;
+        view.motion_line = status.motion_line;
+        view.work_line = status.work_line;
+        view.exposure_line = status.exposure_line;
+        view.chain_line = status.chain_line;
+        if (!status.chain_note.empty()) {
+          view.chain_line += (view.chain_line.empty() ? status.chain_note : "\n" + status.chain_note);
+        }
+        view.network_diagnostic = status.session.network_diagnostic;
         view.lumenite_motion = entry.uplift_mv_lumenite;
         // Split chain (design 6.2): the chain's groups while it is split, and why a stored "Runs at" does not run as stored (the working card's note too).
         chain_note = status.chain_note;
@@ -3802,25 +3814,36 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
           view.frame_generation_warning = *warning;
         }
         view.intermediate_bytes = status.intermediate_bytes;
+        if (native_view) {
+          view.api_line = entry.vk_dlss->DetailsLine();  // the one-time cost's note lives here (and in the tips)
+        }
         if (entry.d3d11_bridge) {
           // Final review Minor 1: the bridge's shared textures count as Uplift's, and its busy skips show here.
           view.intermediate_bytes += entry.d3d11_bridge->SharedBytes();
+          view.api_line = entry.d3d11_bridge->StatusLine(status.placement);  // Plan 18: names the DLSS stage NR runs at
         }
         if (entry.d3d10_bridge) {
           // Plan 8: the relay's keyed textures and the bridge's shared ones count as Uplift's; its busy skips show here.
           view.intermediate_bytes += entry.d3d10_bridge->SharedBytes();
+          view.api_line = entry.d3d10_bridge->StatusLine();
         }
         if (entry.vk_bridge && !native_view) {
           // Plan 11: the shared surfaces count as Uplift's, and the Details line names the path (GPU- or CPU-ordered) and why.
           view.intermediate_bytes += entry.vk_bridge->SharedBytes();
           // Plan 14: and so do the four copies of DLSS's motion vectors the native context holds on the game's device while it makes them.
+          view.api_line = entry.vk_bridge->StatusLine(entry.vk_route ? std::string_view(entry.vk_route->reason) : std::string_view());  // Plan 19
           if (const uint64_t copies = (entry.vk_dlss ? entry.vk_dlss->HeldBytes() : 0u); copies > 0u) {
             view.intermediate_bytes += copies;
+            view.api_line += (native_stopped ? std::format("; DLSS's motion vectors' last copies, kept until the game's device goes ({:.1f} MiB)",
+                                                           static_cast<double>(copies) / (1024.0 * 1024.0))
+                                             : std::format("; DLSS's motion vectors copied in the game's frame ({:.1f} MiB)",
+                                                           static_cast<double>(copies) / (1024.0 * 1024.0)));
           }
         }
         if (entry.gl_bridge) {
           // Plan 12: the same for an OpenGL context: the shared surfaces count as Uplift's, and the Details line names the path (GPU- or CPU-ordered) and why.
           view.intermediate_bytes += entry.gl_bridge->SharedBytes();
+          view.api_line = entry.gl_bridge->StatusLine();
         }
         view.runtime_bytes = status.session.runtime_bytes;
         view.pass_models = status.session.pass_models;

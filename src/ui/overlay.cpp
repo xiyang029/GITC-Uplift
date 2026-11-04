@@ -13,8 +13,8 @@
 #include "addon/reshade_api.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/localized_imgui.hpp"
-#include "ui/style.hpp"
-#include "ui/widgets.hpp"
+#include "ui/overlay_style.hpp"
+#include "ui/overlay_widgets.hpp"
 
 namespace uplift::ui {
 namespace {
@@ -428,7 +428,12 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
   }
   if (enable) {
     descriptor.set(*settings, 1.0);
+    if (descriptor.key == "PresentWithFrameGen" && state->confirm_present_stage) {
+      SetSourcePick(settings, SourcePick::PRESENT, /*explicit_dlss=*/false);
+      state->setup_settle.Clicked(SetupRow::STAGE, static_cast<uint32_t>(SourcePick::PRESENT));
+    }
   }
+  state->confirm_present_stage = false;
   gui::EndPopup();
   return enable;
 }
@@ -630,6 +635,20 @@ std::string VramLine(const OverlayView& view) {
 
 }  // namespace
 
+// Startup latches (from upstream): the settings a previous start flipped off after their feature never reached a
+// frame. Drawn as the panel's safety-lock block; the panel's own row keeps its Clear latch button.
+void OverlayView::AddStartupLocks(const Settings& settings, bool vulkan, bool d3d9) {
+  if (d3d9 && (settings.startup_latches & Settings::LATCH_D3D9EX)) {
+    safety_locks.push_back({"Direct3D 9Ex", "The previous 9Ex startup ended before the first frame.", &Settings::use_d3d9ex});
+  }
+  if (vulkan && (settings.startup_latches & Settings::LATCH_VK_DEVICE)) {
+    safety_locks.push_back({"Vulkan device adjustments", "The previous startup ended before the adjusted device presented a frame.", &Settings::adjust_vulkan_devices});
+  }
+  if (vulkan && (settings.startup_latches & Settings::LATCH_VK_NGX)) {
+    safety_locks.push_back({"Vulkan NGX device extensions", "The previous startup with these extensions ended before the first frame.", &Settings::adjust_vulkan_devices_for_ngx});
+  }
+}
+
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now) {
   if (state->setup_device != device) {
     state->setup_device = device;
@@ -755,6 +774,33 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     }
   }
 
+  // Upstream 1.8.0's safety locks: whatever a previous or current start latched off, with the setting that
+  // restores it. Each lock is one line and, where a setting holds the latch, one button.
+  if (!view.safety_locks.empty()) {
+    widgets::SubCaption("Safety latches");
+    for (const auto& lock : view.safety_locks) {
+      gui::PushID(lock.feature.data());
+      gui::BeginDisabled();
+      widgets::RowLabel(lock.feature.data());
+      gui::EndDisabled();
+      if (lock.setting != nullptr) {
+        if (settings->*(lock.setting) == lock.restore_value) {
+          widgets::RowNote("Latch cleared for next launch. Restart the game to retry.");
+        } else if (gui::Button("Clear latch")) {
+          settings->*(lock.setting) = lock.restore_value;
+          changed = true;
+        }
+      } else if (lock.retry_now) {
+        if (gui::Button("Retry now")) state->retry_now = true;
+      } else {
+        widgets::RowNote("Restart the game to retry this feature.");
+      }
+      if (!lock.reason.empty()) widgets::RowNote(lock.reason.c_str());
+      gui::PopID();
+    }
+    widgets::SectionGap();
+  }
+
   // Plan 6 (v2 design §3.18, D1): the status card -- the first failing stage, its reason and its one fix/button.
   // Plan 7 (the controller's addition): a fixed-height region, sized for the card's worst case (a title, a
   // two-line wrapped reason, at most two fix bullets, and one button row), so a transient reason or bullet --
@@ -825,6 +871,9 @@ bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* stat
     state->setup_settle.ClickedBest(SetupRow::RESOLUTION, static_cast<uint32_t>(defaults.resolution_mode), view.setup);
     changed = true;
   }
+  // Upstream 1.8.0's stage diagram: the six pipeline nodes and the four stages tapped off them, with each
+  // tap's pass count. It writes Source and FG placement; the rows below keep the exact choices.
+  changed |= DrawStagePicker(view, settings, state);
   changed |= DrawSourceRow(view, settings, state);
   changed |= DrawHalfRateRow(view, settings);
   changed |= DrawMotionRow(view, settings, state);

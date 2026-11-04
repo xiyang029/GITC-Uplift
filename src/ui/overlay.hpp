@@ -18,6 +18,9 @@ namespace uplift::ui {
 // What the panel shows besides the settings.
 struct OverlayView {
   std::string status_line;
+  std::string network_diagnostic;  // the runtime's own network diagnostics (SessionStatus::network_diagnostic)
+  // The bridge's or the helper front's own line (Plan 18/19): which DLSS stage NR runs at, and the one-time cost.
+  std::string api_line;
   std::array<nr::RecordedModel, MAX_PASSES> pass_models{};
   std::string details_backend, details_note;
   color::ColorSpace output_space = color::ColorSpace::UNKNOWN;

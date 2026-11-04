@@ -292,7 +292,6 @@ struct Settings {
   bool xmx_generator = false;
   ReflexOverride reflex_mode = ReflexOverride::GAME;
   uint32_t reflex_fps_cap = 0u;  // 0 = no cap; an output-FPS cap submitted through Reflex
-  AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
   enum class FgPresent : uint8_t { OFF, AFTER, BEFORE };
   FgPresent fg_present = sizeof(void*) == 8 ? FgPresent::BEFORE : FgPresent::OFF;
   enum class FgMotion : uint8_t { SELECT, OFF, DLSS };
