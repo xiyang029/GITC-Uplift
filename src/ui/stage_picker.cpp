@@ -6,6 +6,7 @@
 #include <string>
 
 #include "ui/overlay_style.hpp"
+#include "ui/overlay_widgets.hpp"
 #include "ui/settings_schema.hpp"
 
 namespace uplift::ui {
@@ -35,35 +36,20 @@ void Arrow(ImDrawList& draw, ImVec2 from, ImVec2 to, ImU32 color, float head) {
 
 bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state) {
   gui::PushID("Source");
-  const bool can_reset = !IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"));
-  const float width_needed = gui::CalcTextSize("Choose a stage for pass 1").x + (can_reset ? gui::ResetButtonWidth() + style::RowGap() : 0.f);
-  gui::AlignTextToFramePadding();
-  gui::TextUnformatted("NR stage");
-  gui::SameLine();
-  if (gui::GetContentRegionAvail().x < width_needed) gui::NewLine();
-  gui::TextDisabled("Choose a stage for pass 1");
   bool changed = false;
-  if (can_reset) {
-    gui::SameLine();
-    if (gui::GetContentRegionAvail().x < gui::ResetButtonWidth()) gui::NewLine();
-    if (gui::ResetButton()) {
-      const auto pick = view.dlss_explicit ? SourcePick::PRESENT : SourcePick::AFTER_DLSS;
-      SetSourcePick(settings, pick, view.dlss_explicit);
-      state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(pick), view.setup);
-      changed = true;
-    }
-    if (gui::IsItemHovered()) gui::SetTooltip(view.dlss_explicit ? "Reset to default (Present on Vulkan)" : "Reset to default (After DLSS)");
-  }
+  // The row's own controls -- the NR stage choice, its Reset and the latch -- are the panel's, drawn under
+  // this; the diagram is a picture of the pipeline they pick from, so the only thing to click here is a stage.
+  widgets::SubCaption("Pipeline");
   const float em = gui::GetFontSize();
   const ImVec2 origin = gui::GetCursorScreenPos();
   const float width = std::max(1.f, gui::GetContentRegionAvail().x);
-  const bool folded = width < style::Units(168);
+  const bool folded = width < em * 52.f;  // no room for six nodes side by side: fold the row
   const int columns = folded ? 3 : 6;
   const float margin = std::min(0.55f * em, width * 0.025f);
   const float gap = std::min(1.05f * em, width * 0.04f);
   const float cell = std::max(1.f, (width - 2.f * margin - gap * (columns - 1)) / columns);
   const float height = em * 3.0f, pitch = cell + gap, row = em * 9.6f;
-  const float button_h = 2.f * em + 2.f * style::ControlPadding(), hook_y = em * 3.f;
+  const float button_h = gui::GetFrameHeight() * 1.6f, hook_y = em * 3.f;
   const float button_w = std::max(1.f, std::min(9.2f * em, pitch - em * 0.28f));
   float bottom = origin.y;
   ImDrawList& draw = *gui::GetWindowDrawList();
@@ -132,15 +118,18 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     if (source == SourcePick::PRESENT && why == FG_PRESENT_OFF_REASON) why = {};
     if (i == 2 && !view.before_fg_unavailable.empty()) why = view.before_fg_unavailable;
     const auto run = view.stage_runs[i];
-    const ImVec4 color = style::PassAccent(run.first, i);
+    // The panel's own accent, as widgets::Segmented marks its selected option: one saturated colour, and
+    // the pass count under the button says which passes run there.
+    const ImVec4 color = style::tokens::kAccent;
     gui::PushID(static_cast<int>(i));
     gui::SetCursorScreenPos({x - button_w * 0.5f, y});
-    gui::PushStyleVar(ImGuiStyleVar_FramePadding, {style::ControlPadding(), style::ControlPadding() * 0.5f});
-    gui::PushStyleVar(ImGuiStyleVar_FrameRounding, button_h * 0.5f);
-    gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, selected == i ? 2.f : 1.f);
-    gui::PushStyleColor(ImGuiCol_Border, run.count ? color : gui::GetStyleColorVec4(selected == i ? ImGuiCol_Text : ImGuiCol_TextDisabled));
+    gui::PushStyleVar(ImGuiStyleVar_FrameRounding, gui::GetStyle().FrameRounding);
+    gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
+    gui::PushStyleColor(ImGuiCol_Border, selected == i ? color : gui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     if (run.count) {
-      gui::PushStyleColor(ImGuiCol_Button, style::SelectedFill(color));
+      // A running stage is the accent's wash with its words in the accent, as a selected segment is.
+      gui::PushStyleColor(ImGuiCol_Button, style::tokens::kAccentWash);
+      gui::PushStyleColor(ImGuiCol_Text, color);
     }
     std::string label = gui::Display(NR_STAGE_NAMES[i]);
     if (i == 2 && ImGui::CalcTextSize(label.c_str()).x + 2.f * gui::GetStyle().FramePadding.x > button_w) label = gui::Display("Before\nFramegen");
@@ -150,8 +139,8 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || (gui::GetIO().NavVisible && gui::IsItemFocused())) {
       gui::SetTooltip("%s", why.empty() ? (i == 0 && view.setup.before_upscaling_on_rr ? "NR works on Ray Reconstruction's input." : TIPS[i]) : why.data());
     }
-    gui::PopStyleColor(run.count ? 2 : 1);
-    gui::PopStyleVar(3);
+    gui::PopStyleColor(run.count ? 3 : 1);
+    gui::PopStyleVar(2);
     gui::PopID();
 
     float stage_bottom = y + button_h;
