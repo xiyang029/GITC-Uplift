@@ -6,6 +6,7 @@
 #include <string>
 
 #include "ui/overlay_style.hpp"
+#include "ui/overlay_widgets.hpp"
 #include "ui/settings_schema.hpp"
 
 namespace uplift::ui {
@@ -35,24 +36,19 @@ void Arrow(ImDrawList& draw, ImVec2 from, ImVec2 to, ImU32 color, float head) {
 
 bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state) {
   gui::PushID("Source");
-  const bool can_reset = !IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"));
-  const float width_needed = gui::CalcTextSize("Choose a stage for pass 1").x + (can_reset ? gui::ResetButtonWidth() + gui::GetStyle().ItemSpacing.x : 0.f);
-  gui::AlignTextToFramePadding();
-  gui::TextUnformatted("NR stage");
-  gui::SameLine();
-  if (gui::GetContentRegionAvail().x < width_needed) gui::NewLine();
-  gui::TextDisabled("Choose a stage for pass 1");
+  // The row's own label column, the hint beside it, and the reset arrow in the row-end slot: the same
+  // RowLabel the panel's other rows use, so the diagram's caption lines up with everything above and below it.
   bool changed = false;
+  const bool can_reset = !IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"));
+  widgets::RowLabel("NR stage", "Choose a stage for pass 1");
   if (can_reset) {
-    gui::SameLine();
-    if (gui::GetContentRegionAvail().x < gui::ResetButtonWidth()) gui::NewLine();
-    if (gui::ResetButton()) {
+    const char* const default_stage = (view.dlss_explicit ? "Present on Vulkan" : "After DLSS");
+    if (widgets::ResetButton("Stage", default_stage)) {
       const auto pick = view.dlss_explicit ? SourcePick::PRESENT : SourcePick::AFTER_DLSS;
       SetSourcePick(settings, pick, view.dlss_explicit);
       state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(pick), view.setup);
       changed = true;
     }
-    if (gui::IsItemHovered()) gui::SetTooltip(view.dlss_explicit ? "Reset to default (Present on Vulkan)" : "Reset to default (After DLSS)");
   }
   const float em = gui::GetFontSize();
   const ImVec2 origin = gui::GetCursorScreenPos();
@@ -67,9 +63,9 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
   const float button_w = std::max(1.f, std::min(9.2f * em, pitch - em * 0.28f));
   float bottom = origin.y;
   ImDrawList& draw = *gui::GetWindowDrawList();
-  const ImU32 wire = gui::GetColorU32(ImGuiCol_TextDisabled);
-  const ImU32 ink = gui::GetColorU32(ImGuiCol_Text);
-  const ImU32 surface = gui::GetColorU32(ImGuiCol_FrameBg);
+  const ImU32 wire = style::ToU32(style::tokens::kTextSecondary);
+  const ImU32 ink = style::ToU32(style::tokens::kTextPrimary);
+  const ImU32 surface = style::ToU32(style::tokens::kBgCard);
   const float head = em * 0.17f;
   std::array<ImVec2, 6> centers{};
   for (int i = 0; i < 6; ++i) centers[i] = {origin.x + margin + cell * 0.5f + (i % columns) * pitch,
@@ -98,8 +94,8 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
       draw.AddConvexPolyFilled(hex, 6, surface);
       draw.AddPolyline(hex, 6, wire, ImDrawFlags_Closed, 1.f);
     } else {
-      draw.AddRectFilled(lo, hi, surface, em * 0.35f);
-      draw.AddRect(lo, hi, wire, em * 0.35f);
+      draw.AddRectFilled(lo, hi, surface, style::tokens::kRadiusSmall);
+      draw.AddRect(lo, hi, wire, style::tokens::kRadiusSmall);
     }
     std::string label = gui::Display(nodes[i]);
     if (ImGui::CalcTextSize(label.c_str()).x > cell - em * (i == 4 ? 1.5f : 0.35f)) label = gui::Display(compact[i]);

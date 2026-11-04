@@ -34,18 +34,12 @@ std::string SavedNote(std::string_view preference) {
 }
 
 bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayState& state, bool align_right, const SetupView& setup) {
+  (void)align_right;  // the panel's own undo arrow already sits in the row's reserved end slot
   if (descriptor.section == SettingSection::TOP || IsDefault(settings, descriptor)) return false;
-  gui::SameLine();
-  if (align_right) {
-    if (gui::GetContentRegionAvail().x + 1.f < gui::ResetButtonWidth()) gui::NewLine();
-    const float remaining = gui::GetContentRegionAvail().x - gui::ResetButtonWidth();
-    if (remaining > 0.f) gui::SetCursorPosX(gui::GetCursorPosX() + remaining);
-  }
-  const bool reset = gui::ResetButton();
-  if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-    const std::string value = descriptor.key == "MotionVectors" ? "DLSS" : FormatSettingValue(descriptor, DefaultSettings());
-    gui::SetTooltip("Reset to default (%s)", value.c_str());
-  }
+  // The row's end slot as RowLabel measured it: an undo arrow in the secondary colour, the accent while the
+  // pointer is over its cell, so a panel with many changed rows does not read as a column of arrows.
+  const std::string default_text = descriptor.key == "MotionVectors" ? "DLSS" : FormatSettingValue(descriptor, DefaultSettings());
+  const bool reset = widgets::ResetButton(descriptor.key.data(), default_text.c_str());
   if (reset) {
     ResetSetting(&settings, descriptor);
     if (descriptor.key == "ResolutionMode") state.setup_settle.ClickedBest(SetupRow::RESOLUTION, static_cast<uint32_t>(DefaultSettings().resolution_mode), setup);
@@ -139,14 +133,16 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   bool changed = false;
   if (descriptor.key == "SkinStructure") {
     bool follows = (settings->skin_structure < 0.f);
-    if (gui::Checkbox("Skin follows Structure", &follows)) {
+    widgets::InlineLabel("Skin follows Structure");
+    if (widgets::Switch("##SkinFollows", &follows)) {
       settings->skin_structure = (follows ? SKIN_SAME_AS_STRUCTURE : settings->local_structure);
       changed = true;
     }
   }
   if (descriptor.key == "DiffuseWhiteNits") {
     bool automatic = (settings->diffuse_white_nits <= 0.f);
-    if (gui::Checkbox("Automatic diffuse white", &automatic)) {
+    widgets::InlineLabel("Automatic diffuse white");
+    if (widgets::Switch("##AutoDiffuseWhite", &automatic)) {
       settings->diffuse_white_nits = (automatic ? 0.f : std::clamp(view.effective_diffuse_white_nits, 48.f, 500.f));
       changed = true;
     }
@@ -187,9 +183,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     const bool follows = settings->skin_structure < 0.f;
     gui::BeginDisabled(follows);
     float skin = (follows ? settings->local_structure : settings->skin_structure);
-    const bool edited = grouped ? widgets::Slider(label.c_str(), &skin, static_cast<float>(descriptor.min),
-                                                  static_cast<float>(SliderMax(descriptor)), "%.2f", nullptr, &state->drag.skin_structure)
-                                : gui::SliderFloat(label.c_str(), &skin, 0.f, 1.f);
+    const bool edited = widgets::Slider(label.c_str(), &skin, static_cast<float>(descriptor.min),
+                                        static_cast<float>(SliderMax(descriptor)), "%.2f", nullptr, &state->drag.skin_structure);
     if (edited) {
       settings->skin_structure = skin;
       changed = true;
@@ -229,8 +224,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         const int low = static_cast<int>(descriptor.min), high = static_cast<int>(descriptor.max);
         bool active = false;  // the slider's own held state: APPLY_ON_RELEASE waits for the release, not for every step
         const bool edited = descriptor.max > 100.0 ? gui::InputInt(label.c_str(), &value, 64, 512)
-            : grouped ? widgets::SliderInt(label.c_str(), &value, low, high, nullptr, &active)
-                      : gui::SliderInt(label.c_str(), &value, low, high);
+                                                   : widgets::SliderInt(label.c_str(), &value, low, high, nullptr, &active);
         if (descriptor.max > 100.0) active = gui::IsItemActive();
         if (!on_release) {
           if (edited) {
@@ -274,10 +268,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                                     : descriptor.key == "StabilizeMs"       ? "%.0f ms"
                                                                             : "%.2f");
         bool active = false;  // the slider's own held state, for the rows that gate work on the release
-        const bool edited = grouped
-            ? widgets::Slider(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format, nullptr, &active, shown_scale)
-            : gui::SliderFloat(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format);
-        if (!grouped) active = gui::IsItemActive();
+        const bool edited =
+            widgets::Slider(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format, nullptr, &active, shown_scale);
         if (edited) {
           descriptor.set(*settings, static_cast<double>(value / shown_scale));
           changed = true;
@@ -382,8 +374,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           for (size_t index = 0u; index < count; ++index) {
             labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
           }
-          if (gui::Combo(label.c_str(), &value, labels.data(), static_cast<int>(count))) {
-            descriptor.set(*settings, static_cast<double>(value));
+          if (const int clicked = widgets::Segmented(label.c_str(), labels.data(), static_cast<int>(count), value);
+              clicked >= 0 && clicked != value) {
+            descriptor.set(*settings, static_cast<double>(clicked));
             changed = true;
           }
         }
