@@ -41,7 +41,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   if (!facts.present_fixed.empty()) {
     at(view.stage_options, SourcePick::PRESENT) = {.why = facts.present_fixed};  // a fixed cause beats the temporary one: it would not clear
   } else if (facts.frame_generation_blocks_present) {
-    at(view.stage_options, SourcePick::PRESENT) = {.why = "Frame generation is on: turn on Present with frame generation (Advanced)", .temporary = true};
+    at(view.stage_options, SourcePick::PRESENT) = {.why = FG_PRESENT_OFF_REASON, .temporary = true};
   }
   // Plan 15: held after the game's NGX shutdown on Direct3D 12, no stage can run until the game's DLSS starts again. That beats the other temporary causes
   // (it is why nothing runs now); a fixed cause keeps its own text, since it would not clear with the hold.
@@ -83,7 +83,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   } else if (view.stage != SourcePick::PRESENT) {
     launchpad = {.why = "Launchpad feeds NR on the presented image only", .temporary = true};
   } else if (!facts.launchpad_ready) {
-    launchpad = {.why = "Turn iMMERSE Launchpad on and enable Uplift.fx's Uplift technique below it", .temporary = true};
+    launchpad = {.why = "Enable Launchpad above Uplift and allow Launchpad motion in Uplift.fx.", .temporary = true};
   }
   // 2026-10-08: Lumenite, as Launchpad.
   OptionState& lumenite = at(view.motion_options, MotionPick::LUMENITE);
@@ -94,7 +94,11 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   } else if (view.stage != SourcePick::PRESENT) {
     lumenite = {.why = "Lumenite feeds NR on the presented image only", .temporary = true};
   } else if (!facts.lumenite_ready) {
-    lumenite = {.why = "Turn LumeniteFX's Kernel on and enable Uplift.fx's Uplift technique below it", .temporary = true};
+    lumenite = {.why = "Enable Lumenite Kernel above Uplift and allow Lumenite motion in Uplift.fx.", .temporary = true};
+  }
+  if (facts.before_fg_late_effects) {
+    launchpad = {.why = "Launchpad runs after frame generation", .temporary = true};
+    lumenite = {.why = "Lumenite runs after frame generation", .temporary = true};
   }
   hold(&dlss);
   hold(&launchpad);
@@ -154,14 +158,6 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     }
   }
   view.split_capable = facts.split_capable;
-  const auto runs_at = [](SourcePick stage) -> std::string_view {
-    switch (stage) {
-      case SourcePick::BEFORE_UPSCALING: return "before upscaling";
-      case SourcePick::AFTER_DLSS:       return "after DLSS";
-      case SourcePick::PRESENT:          break;
-    }
-    return "at Present";
-  };
   for (uint32_t pass = 1u; pass < passes; ++pass) {
     PassStageRow& row = view.pass_stages[pass - 1u];
     const SourcePick pass_before = runs[pass - 1u];
@@ -183,7 +179,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
       const auto pick = static_cast<SourcePick>(stage);
       const OptionState& setup_option = view.stage_options[stage];
       if (pick < pass_before) {
-        option = {.why = std::format("Runs the chain backwards: pass {} runs {}", pass, runs_at(pass_before))};
+        option = {.why = std::format("Pass {} already runs at {}.", pass, StageLabel(pass_before, facts.before_framegen))};
       } else if (pick != pass_before && !setup_option.why.empty()) {
         option = {.why = std::string(setup_option.why), .temporary = setup_option.temporary};  // never the pass before's stage, which always takes it
       }
@@ -228,7 +224,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
   const bool motion_falls_back = (facts.preferred_motion == MotionPick::DLSS && view.motion != MotionPick::DLSS);
   const bool motion_waits = (motion_falls_back
                              && (motion_wish.why == DLSS_NOT_SEEN_REASON || (selectable(motion_wish) && facts.dlss_motion_gap == MotionGap::NONE)));
-  const std::string_view stage_name = (facts.preferred_stage == SourcePick::BEFORE_UPSCALING ? "Before upscaling" : "After DLSS");
+  const std::string_view stage_name = StageLabel(facts.preferred_stage, facts.before_framegen);
   // Plan 18 Task 12: the game switched its DLSS off: what fell back returns when it is on again.
   const bool stage_off = (view.stage != facts.preferred_stage && facts.preferred_stage != SourcePick::PRESENT && stage_wish.why == DLSS_OFF_REASON);
   const bool motion_off = (motion_falls_back && motion_wish.why == DLSS_OFF_REASON);
@@ -239,7 +235,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     add(motion_waits ? std::format("{} and DLSS's motion vectors start when the game renders with DLSS.", stage_name)
                      : std::format("{} starts when the game renders with DLSS.", stage_name));
   } else if (view.stage != facts.preferred_stage && stage_wish.temporary && facts.preferred_stage == SourcePick::BEFORE_UPSCALING) {
-    add("Before upscaling returns when the game's DLSS is not Ray Reconstruction.");
+    add("Pre-DLSS returns when the game's DLSS is not Ray Reconstruction.");
   }
   if (motion_off) {
     if (!stage_off) {
@@ -277,7 +273,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     add("Match game applies when the game renders with DLSS.");
   } else if (view.resolution != facts.preferred_resolution && facts.preferred_resolution == ResolutionMode::MATCH_GAME
              && resolution_wish.why == VULKAN_MATCH_GAME_REASON) {
-    add("Match game applies when NR runs at After DLSS or Before upscaling.");
+    add("Match game applies when NR runs at After DLSS or Pre-DLSS.");
   } else if (view.resolution != facts.preferred_resolution && facts.preferred_resolution == ResolutionMode::MATCH_GAME
              && resolution_wish.why == DLSS_OFF_REASON) {
     add("Match game applies when the game's DLSS is on again.");  // Plan 18 Task 12 (fix round 1, M-1)
@@ -287,11 +283,7 @@ SetupView ResolveSetup(const SetupFacts& facts) {
 
 LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown) {
   LiveCard card;
-  switch (shown.stage) {
-    case SourcePick::BEFORE_UPSCALING: card.stage = "Before upscaling"; break;
-    case SourcePick::AFTER_DLSS:       card.stage = "After DLSS"; break;
-    case SourcePick::PRESENT:          card.stage = "Present"; break;
-  }
+  card.stage = StageLabel(shown.stage);
   switch (shown.motion) {
     case MotionPick::OFF:       card.motion = "none"; break;
     case MotionPick::DLSS:      card.motion = (facts.motion_copied ? "DLSS (the game's, copied for Present)" : "DLSS (the game's)"); break;

@@ -83,6 +83,9 @@ struct HelperDevice {
   // Plan 17: the 2-strike rule for the helper's stops (its own device removed, a hang, an exit), as for a bridge's private device: Retry now restarts it once.
   BridgeStrikes strikes;
   bool claimed_elsewhere = false;
+  uint64_t before_fg_passes = 0u;
+  bool game_facing = false;
+  color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
   bool nr_returned_logged = false;  // "NR ran on the game's frame" was logged since the client last attached (Reset, helper exit)
   bool ex_checked = false;
   uint32_t ex_presents = 0u;  // present events of a 9Ex device, counted up to 2: the second proves the first real Present returned
@@ -183,7 +186,7 @@ struct HelperFrame {
   // Null for every other API, and for a Vulkan or OpenGL device whose runtime is not up yet (nothing runs then).
   reshade::api::command_queue* queue = nullptr;
   reshade::api::command_queue* present_queue = nullptr;
-  std::string_view vk_hook_error;  // why the vkCreateDevice hook is not installed (an unseen device's Details reason); empty when it is
+  std::string vk_hook_error;  // why the vkCreateDevice hook is not installed (an unseen device's Details reason); empty when it is
   reshade::api::resource back_buffer = {0u};
   reshade::api::effect_technique marker = {0u};  // 0 when the Uplift technique is off
   const ui::Settings* settings = nullptr;
@@ -192,6 +195,9 @@ struct HelperFrame {
   bool claimed_elsewhere = false;  // NR is on and the claim went to another device: Present returns after noting it
   bool drain_now = false;          // transitions (64-bit Vulkan): NR's owner moved away from the helper, which drains with no grace
   std::chrono::steady_clock::time_point now;
+  vk::GameHost* outer_vulkan_host = nullptr;
+  vk::ImageInfo outer_vulkan_image;
+  color::ColorSpace outer_color_space = color::ColorSpace::UNKNOWN;
 };
 
 class HelperFront {
@@ -220,9 +226,8 @@ class HelperFront {
   // reshade_render_technique on the frame's own immediate list: NR at the Uplift technique, with LaunchPad's motion (Direct3D 9, and 10 and 11
   // with fences). `rtv` is the event's render target (bit 0 marks sRGB).
   void Technique(HelperDevice& device, reshade::api::effect_runtime* runtime, bool is_marker, uint64_t rtv, const ui::Settings& settings);
-  // reshade_finish_effects on the frame's own immediate list: NR when the technique never came, then UPLIFT_MASK (Direct3D 9, and 10 and 11 with
-  // fences).
-  void FinishEffects(HelperDevice& device, reshade::api::effect_runtime* runtime, uint64_t rtv, const ui::Settings& settings);
+  // Copy UPLIFT_MASK at finish-effects on the frame's own immediate list.
+  void FinishEffects(HelperDevice& device, reshade::api::effect_runtime* runtime, const ui::Settings& settings);
   // A D3D9 device's destroy_command_queue, raised before every Reset and ResetEx (helper design §2.7): everything the client made on
   // the device goes (a live D3DPOOL_DEFAULT object fails the game's Reset) and the helper is detached; its Session stays.
   void DestroyQueue(HelperDevice& device, reshade::api::device* owner);
@@ -252,14 +257,13 @@ class HelperFront {
   void Quit();
 
  private:
-  // NR at `point` for this frame: out through the device's client, RUN, back. `source`: a Direct3D 9 surface (the back buffer at PRESENT; the
-  // event's render target at the marker and after the effects) or an OpenGL image (FB0 at PRESENT; ReShade's intermediate, the event's rtv resource, at the
-  // marker and after the effects); `launchpad_motion`: this frame's UPLIFT_MV (a ReShade resource handle: an IDirect3DTexture9 on Direct3D 9). When no RUN
+  // NR at `point` for this frame: out through the device's client, RUN, back. `source` is the D3D9 back buffer or OpenGL FB0 at PRESENT,
+  // or ReShade's render target at the marker; `launchpad_motion`: this frame's UPLIFT_MV (a ReShade resource handle: an IDirect3DTexture9 on Direct3D 9). When no RUN
   // goes out the helper never sees a marker point, so the next FRAME reports it. Vulkan, OpenGL and Direct3D 12: `game_device` and `queue` (the effect
   // runtime's) make the client's host; `at_present`: the calling event is the present event (the back buffer is in the present state, and on OpenGL the
   // present queue's context is checked).
   void RunClient(HelperDevice& device, reshade::api::device* game_device, reshade::api::command_queue* queue, TriggerPoint point, uint64_t source,
-                 uint64_t launchpad_motion, bool at_present);
+                 uint64_t launchpad_motion, bool at_present, vk::GameHost* outer_host = nullptr, const vk::ImageInfo* outer_image = nullptr);
 
   std::string addon_file_;
   std::filesystem::path addon_directory_;

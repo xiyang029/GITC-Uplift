@@ -257,17 +257,7 @@ void Helper::ApplySettings(uint64_t generation) {
 }
 
 void Helper::ReplayPoint(uint32_t point) {
-  switch (static_cast<addon::TriggerPoint>(point)) {
-    case addon::TriggerPoint::MARKER:
-      context_->OnTechnique(true);
-      break;
-    case addon::TriggerPoint::AFTER_EFFECTS:
-      context_->OnFinishEffects();
-      break;
-    case addon::TriggerPoint::NONE:
-    case addon::TriggerPoint::PRESENT:
-      break;
-  }
+  if (static_cast<addon::TriggerPoint>(point) == addon::TriggerPoint::MARKER) context_->OnTechnique(true);
 }
 
 void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
@@ -310,6 +300,7 @@ void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
           .ngx_frame_generation = 0u,
           .nr_allowed = (frame.nr_allowed != 0u),
           .settings_generation = settings_generation_,
+          .game_facing_present = frame.game_facing_present != 0u,
           .uplift_mv_lumenite = (frame.uplift_mv_lumenite != 0u),  // 2026-10-08: the readouts name UPLIFT_MV's source
       },
       &coalescer_, now);
@@ -386,6 +377,8 @@ void Helper::FillStatus(ipc::Status* out) const {
   out->frame_height = status.frame.height;
   ipc::CopyText(out->session_message, session.message);
   ipc::CopyText(out->network_diagnostic, session.network_diagnostic);
+  static_assert(std::size(out->models) == nr::MAX_PASSES);
+  for (size_t i = 0; i < nr::MAX_PASSES; ++i) out->models[i] = {static_cast<uint8_t>(session.pass_models[i].network), session.pass_models[i].style};
   out->legacy_runtime = session.legacy_runtime ? 1u : 0u;
   ipc::CopyText(out->blocked, status.blocked);
   ipc::CopyText(out->output_problem, status.output_problem);

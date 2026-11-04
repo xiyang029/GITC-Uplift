@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.23)
-project(uplift VERSION 1.7.0 LANGUAGES C CXX)
+project(uplift VERSION 1.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -342,7 +342,7 @@ target_link_libraries(uplift_vk PUBLIC uplift_addon_core)
 # Plan 13: native Vulkan NR's device functions and completion (on nr::Timeline), the 64-bit half only. Batch 3: the native context of the DLSS
 # placements (addon::VkDlssContext, ReShade-free), which sits on both and on the add-on core.
 # Plan 19: native NR at Present's own command buffers on the effect queue (vk::CommandRing).
-target_sources(uplift_vk PRIVATE src/vk/nr_functions.cpp src/vk/nr_timeline.cpp src/vk/command_ring.cpp src/addon/vk_dlss_context.cpp)
+target_sources(uplift_vk PRIVATE src/vk/nr_functions.cpp src/vk/nr_timeline.cpp src/vk/command_ring.cpp src/vk/present_relay_host.cpp src/addon/vk_dlss_context.cpp)
 
 # Plan 7: the D3D11 bridge (design 2026-09-28-uplift-d3d11-design-draft.md). ReShade-free.
 # Plan 8: the D3D10 bridge on it (design 2026-09-29-uplift-d3d10-design.md); no new link library.
@@ -405,6 +405,9 @@ target_link_libraries(uplift_client PUBLIC uplift_ipc uplift_bridge uplift_vk up
 
 add_library(uplift_addon SHARED
   src/addon.cpp
+  src/addon/streamline_present.cpp
+  src/addon/before_fg_dx12.cpp
+  src/addon/before_fg_vk.cpp
   src/addon/helper_front.cpp
   src/addon/live_facts.cpp
   src/addon/log_bridge.cpp
@@ -415,7 +418,7 @@ add_library(uplift_addon SHARED
   src/addon/reshade_gl_host.cpp
   src/addon/reshade_d3d12_host.cpp
   src/ui/overlay.cpp
-  src/ui/style.cpp
+  src/ui/stage_picker.cpp
   # The XMX payload's RCDATA. A static library's resource members carry no symbol, so the linker
   # would drop them; they live on the add-on itself, which is also where they are read from.
   ${UPLIFT_XMX_GENERATED}/embedded_xess_programs.rc
@@ -433,6 +436,7 @@ else()
 
 # Plan 9: the 32-bit add-on's own code. No NGX include path, no shaders, no D3D12 pipeline.
 add_library(uplift_ui32 STATIC
+  src/sources/work_size.cpp
   src/nr/log.cpp src/color/encoding.cpp src/look/look_math.cpp
   src/ui/localization.cpp src/ui/settings.cpp src/ui/settings_schema.cpp src/ui/controls_coalescer.cpp src/ui/status_text.cpp
   src/addon/frame_trigger.cpp src/addon/swapchain_selector.cpp src/addon/launchpad_link.cpp
@@ -491,7 +495,7 @@ add_library(uplift_addon32 SHARED
   src/addon/reshade_gl_host.cpp
   src/addon/reshade_d3d12_host.cpp
   src/ui/overlay.cpp
-  src/ui/style.cpp)
+  src/ui/stage_picker.cpp)
 set_target_properties(uplift_addon32 PROPERTIES OUTPUT_NAME "gitc-uplift" SUFFIX ".addon32")
 target_include_directories(uplift_addon32 SYSTEM PRIVATE "${UPLIFT_RESHADE_INCLUDE}" "${UPLIFT_IMGUI_INCLUDE}")
 target_include_directories(uplift_addon32 PRIVATE "${UPLIFT_GENERATED}")

@@ -42,7 +42,7 @@
 #include "ui/settings.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/status_text.hpp"
-#include "ui/style.hpp"
+#include "ui/overlay_style.hpp"
 #include "vk/device_hook.hpp"
 
 // The name ReShade shows in its Add-ons list. The log lines keep their "[Uplift]" prefix (addon/log_bridge.cpp).
@@ -367,13 +367,13 @@ void OnRenderTechnique(api::effect_runtime* runtime, api::effect_technique techn
   UPLIFT_CATCH("render_technique", )
 }
 
-void OnFinishEffects(api::effect_runtime* runtime, api::command_list* cmd_list, api::resource_view rtv,
+void OnFinishEffects(api::effect_runtime* runtime, api::command_list* cmd_list, api::resource_view /*rtv*/,
                      api::resource_view /*rtv_srgb*/) {
   try {
     const std::unique_lock lock(g_state->mutex);
     DeviceEntry32* const entry = FindFrameEntry(g_state, runtime, cmd_list);
     if (entry == nullptr) return;
-    g_state->front->FinishEffects(entry->helper, runtime, rtv.handle, g_state->settings);
+    g_state->front->FinishEffects(entry->helper, runtime, g_state->settings);
   }
   UPLIFT_CATCH("finish_effects", )
 }
@@ -382,6 +382,8 @@ void OnReshadePresent(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState32& state = *g_state;
+    const auto found = state.devices.find(runtime->get_device());
+    if (found != state.devices.end() && found->second.runtime == runtime) found->second.helper.trigger.EndFrame();
     ui::ExpireKeyCapture(&state.overlay, std::chrono::steady_clock::now());
     if (state.overlay.key_captured_this_frame) {
       // The press that bound the hotkey is still in this frame's input: do not let it toggle Enable.
@@ -390,7 +392,6 @@ void OnReshadePresent(api::effect_runtime* runtime) {
     }
     const uint32_t key = state.settings.enable_key;
     if (key == 0u || state.overlay.capturing_key || !runtime->is_key_pressed(key)) return;
-    const auto found = state.devices.find(runtime->get_device());
     if (found == state.devices.end()) return;
     [[maybe_unused]] const auto& [device, entry] = *found;
     if (entry.runtime != runtime) return;  // toggle once per frame: the primary swap chain's runtime only
@@ -409,7 +410,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       return;
     }
     const auto now = std::chrono::steady_clock::now();
-    ui::OverlayView view = {.status_line = "OFF", .last_key_pressed = runtime->last_key_pressed(), .placement_line = "Placement: NR is off", .motion_line = "Motion vectors: NR is off"};
+    ui::OverlayView view = {.status_line = "OFF", .last_key_pressed = runtime->last_key_pressed()};
     view.dlss_unavailable = std::string(ui::BRIDGED_DLSS_REASON);  // no DLSS placement without a Direct3D 12 game
     const api::device_api overlay_api = runtime->get_device()->get_api();
     const auto found = state.devices.find(runtime->get_device());
@@ -431,6 +432,8 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       facts.dlss_unavailable = view.dlss_unavailable;
       ui::FinishSetup(&view, &state.overlay, runtime->get_device(), facts, now);
     }
+    view.before_fg_unavailable = "Before FG needs a game-facing 64-bit Streamline integration";
+    view.AddStartupLocks(state.settings, overlay_api == api::device_api::vulkan, overlay_api == api::device_api::d3d9);
     ui::BeginPanel();
     if (ui::DrawOverlay(view, &state.settings, &state.overlay)) {
       SaveAndApply(&state);
@@ -516,6 +519,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   const std::optional<addon::ModuleVersion> reshade_version = addon::ReadModuleVersion(reshade_module);
   const std::filesystem::path vk_marker = addon::LatchMarkerPath(addon::UpliftStateDirectory(), game_exe_path).replace_extension(L".vkdevice-pending");
   if (vk::DeviceHook::CheckMarker(vk_marker) != vk::DeviceHook::MarkerVerdict::NONE) {  // the 32-bit half never adds NGX's: one tier
+    g_state->settings.startup_latches |= ui::Settings::LATCH_VK_DEVICE;
     g_state->settings.adjust_vulkan_devices = false;
     ui::SaveSettings(g_state->settings, &g_state->config);
     g_state->front->SettingsChanged(g_state->settings);

@@ -45,7 +45,7 @@ void ApplyPanelFonts() {
   static constexpr char kChineseFont[] = "C:\\Windows\\Fonts\\msyh.ttc";
   static constexpr char kLatinFont[] = "C:\\Windows\\Fonts\\segoeui.ttf";
   static constexpr char kFontSize[] = "16.000000";
-  // Fill in only what the player never chose: rows measure themselves in font sizes (ui/style.hpp), so any
+  // Fill in only what the player never chose: rows measure themselves in font sizes (ui/overlay_style.hpp), so any
   // size renders.
   if (!StyleIsSet("Font")) reshade::set_config_value(nullptr, "STYLE", "Font", kChineseFont);
   if (!StyleIsSet("LatinFont")) reshade::set_config_value(nullptr, "STYLE", "LatinFont", kLatinFont);

@@ -73,6 +73,13 @@ enum class SourcePick : uint32_t {
   PRESENT,
 };
 
+inline constexpr std::array<const char*, 4> NR_STAGE_NAMES{"Pre-DLSS", "After DLSS", "Before Framegen", "On Present"};
+
+inline constexpr const char* StageLabel(SourcePick stage, bool before_framegen = false) {
+  return NR_STAGE_NAMES[stage == SourcePick::PRESENT ? (before_framegen ? 2u : 3u) : static_cast<size_t>(stage)];
+}
+
+
 // ui-review.md §4.2: the Motion vectors toggle, in pipeline order. `MotionPickOf`/`SetMotionPick` translate
 // to and from the persisted MotionVectorSource.
 enum class MotionPick : uint32_t {
@@ -264,6 +271,7 @@ struct Settings {
   PlacementSource source = PlacementSource::AUTO;
   MotionVectorSource motion_vectors = MotionVectorSource::AUTO;
   std::array<DlssPresetOverride, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_presets = {};
+
   // The render scale override (2026-10-25, addon/dlss_ratio.hpp): each mode's render size as percent of
   // the output, 100 = the game's choice. Applied at the game's next OptimalSettings query.
   std::array<uint32_t, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_render_scale {100u, 100u, 100u, 100u, 100u, 100u};
@@ -284,7 +292,11 @@ struct Settings {
   bool xmx_generator = false;
   ReflexOverride reflex_mode = ReflexOverride::GAME;
   uint32_t reflex_fps_cap = 0u;  // 0 = no cap; an output-FPS cap submitted through Reflex
-  bool present_with_frame_gen = false;
+  AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
+  enum class FgPresent : uint8_t { OFF, AFTER, BEFORE };
+  FgPresent fg_present = sizeof(void*) == 8 ? FgPresent::BEFORE : FgPresent::OFF;
+  enum class FgMotion : uint8_t { SELECT, OFF, DLSS };
+  FgMotion before_fg_motion = FgMotion::SELECT;
   bool allow_cross_queue_passes = false;
   float motion_scale_x = 1.f;  // multiplies DLSSNR.MVecScaleX; negative flips the axis
   float motion_scale_y = 1.f;
@@ -355,6 +367,9 @@ struct Settings {
   bool dlss_placement_blocked = false;       // hidden: the device-removal latch (v2 design §3.2)
   uint32_t config_version = CONFIG_VERSION;  // hidden: the version the loaded file declared
   bool auto_retry = true;                    // Plan 6 (D11): retry a failed session on the backoff
+  // These settings can also be turned off manually. Remember which ones Uplift disabled after a failed start.
+  static constexpr uint32_t LATCH_D3D9EX = 1u, LATCH_VK_DEVICE = 2u, LATCH_VK_NGX = 4u;
+  uint32_t startup_latches = 0u;
   bool use_d3d9ex = false;                   // Plan 9 (design §2.9): ask ReShade for a Direct3D 9Ex device (Direct3D 9 games, 32- and 64-bit)
   bool adjust_vulkan_devices = true;         // Plan 11 (Vulkan design §2.3): hidden; 0 keeps the vkCreateDevice hook recording devices but adding nothing
   bool adjust_vulkan_devices_for_ngx = true;  // Plan 19 T1b: hidden; 0 keeps NGX's extensions and bufferDeviceAddress off the game's device (64-bit)
