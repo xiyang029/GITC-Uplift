@@ -11,15 +11,38 @@
 #include "ui/controls_coalescer.hpp"
 #include "ui/settings.hpp"
 #include "ui/status_text.hpp"
+#include "sources/motion_source.hpp"
 
 namespace uplift::ui {
 
 // What the panel shows besides the settings.
 struct OverlayView {
   std::string status_line;
-  std::string network_diagnostic;  // the runtime's own network diagnostics (SessionStatus::network_diagnostic)
-  // The bridge's or the helper front's own line (Plan 18/19): which DLSS stage NR runs at, and the one-time cost.
-  std::string api_line;
+  // The DLSS / Reflex card's live block: what the runtime actually holds, as opposed to the choice that asks for
+  // it (ui/status_text.hpp's FormatXLive). Empty lines are left out.
+  std::string dlss_live_line;       // the mode, its preset, and a driver override that wins over it
+  std::string rr_live_line;         // Ray Reconstruction's preset, when the game runs RR
+  std::string fg_live_line;         // the frame-generation model preset, and whether it landed live
+  std::string fg_multiplier_line;   // the accepted count, or Dynamic MFG's ownership of it
+  std::string dynamic_mfg_line;     // in force, or which gate holds it back
+  std::string reflex_live_line;     // the mode and cap the driver accepted
+  std::string xmx_live_line;        // the XMX mode: XeFG generating, hooked, or why it cannot start
+  std::string frame_rate_line;      // FormatFrameRateLine: real and generated frames per second; empty until measured
+  // The game's DLSS sizes, for the live line's "1280x720 -> 2560x1440", and its quality mode.
+  nr::Size dlss_render;
+  nr::Size dlss_output;
+  std::string dlss_mode_name;
+  int dlss_preset_mode = -1;
+  // The FG multiplier row: only choices the DLSS-G runtime's own ceiling allows are offered (generated frames + 1).
+  std::size_t fg_multiplier_options = 6;
+  std::array<nr::RecordedModel, MAX_PASSES> pass_models{};
+  std::string details_backend, details_note;
+  color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
+  nr::Size output_size;
+  nr::Size first_stage_input, first_stage_canvas;
+  bool lumenite_motion = false;
+  struct Activity { uint64_t real = 0, reshade = 0, passes = 0; };
+  std::optional<Activity> activity;
   bool legacy_runtime = false;
   uint64_t intermediate_bytes = 0u;
   std::optional<uint64_t> runtime_bytes;  // the NR runtime's own allocation, when its stats report it
@@ -36,49 +59,34 @@ struct OverlayView {
   };
   std::vector<SafetyLock> safety_locks;
   void AddStartupLocks(const Settings& settings, bool vulkan, bool d3d9);
-  // One stage of the pipeline diagram: the first pass it runs and how many. Only what the diagram draws.
   struct StageRun {
     uint32_t first = 0, count = 0;
+    nr::Size resolution;
+    sources::MotionSource motion = sources::MotionSource::NONE;
+    uint32_t planned = 0;
+    std::string skip;
+
   };
   std::array<StageRun, 4> stage_runs{};  // Pre-DLSS, After DLSS, Before FG, On Present. Only passes actually evaluated.
+  [[nodiscard]] const char* RecordedStageName(uint32_t pass) const {
+    for (size_t i = 0; i < stage_runs.size(); ++i) {
+      const auto& group = stage_runs[i];
+      if (pass >= group.first && pass - group.first < group.count) return NR_STAGE_NAMES[i];
+    }
+    return nullptr;
+  }
+  [[nodiscard]] const char* SharedPresentName(const Settings& settings) const {
+    if (stage_runs[2].count) return NR_STAGE_NAMES[2];
+    if (stage_runs[3].count) return NR_STAGE_NAMES[3];
+    return StageLabel(SourcePick::PRESENT, settings.fg_present == Settings::FgPresent::BEFORE && before_fg_unavailable.empty());
+  }
   std::string before_fg_unavailable;
   std::string frame_generation_line;     // FormatFrameGenerationLine; empty before a context exists and in 32-bit games
-  std::string frame_rate_line;           // FormatFrameRateLine: real and generated frames per second; empty until measured
-  // The DLSS / Reflex card's live block, drawn once at the bottom of the card (status_text.hpp's
-  // FormatXLive): what the runtime actually holds, as opposed to the choice that asks for it. Empty
-  // lines are left out.
-  std::string dlss_live_line;       // the mode, its preset, and a driver override that wins over it
-  std::string rr_live_line;         // Ray Reconstruction's preset, when the game runs RR
-  std::string fg_live_line;         // the frame-generation model preset, and whether it landed live
-  std::string fg_multiplier_line;   // the accepted count, or Dynamic MFG's ownership of it
-  std::string dynamic_mfg_line;     // in force, or which gate holds it back
-  std::string reflex_live_line;     // the mode and cap the driver accepted
-  std::string xmx_live_line;        // the XMX mode: XeFG generating, hooked, or why it cannot start
-  // The game's DLSS sizes, for the live line's "1280x720 -> 2560x1440" (CreateSnapshot's render and
-  // output regions; zero until the game created a feature).
-  nr::Size dlss_render;
-  nr::Size dlss_output;
-  // The game's DLSS quality mode: its bare name for the live line, and its ui::DlssPresetMode index (the
-  // row whose preset the game reads; -1 before its DLSS is seen).
-  std::string dlss_mode_name;
-  int dlss_preset_mode = -1;
   bool frame_generation_active = false;  // the working card shows frame_generation_line only when this is set
-  // The FG multiplier row: only choices the DLSS-G runtime's own ceiling allows are offered
-  // (generated frames + 1, i.e. 3 = 2x..4x). A stored choice above it stays saved and returns
-  // by itself where it is supported. 6 = the runtime has not said yet: offer every choice.
-  std::size_t fg_multiplier_options = 6;
   bool dlss_latched = false;              // DlssPlacementBlocked: the device-removal latch is set (Plan 19 fix round: or, in a Vulkan game, VulkanNativeNr = 0)
   std::string ui_correction_note;  // Plan 5 (D7): why UI correction does nothing on this placement
   std::string keep_faces_unavailable;  // Keep faces (2026-10-08): non-empty greys its rows, and says why (ui::KeepFacesUnavailable)
   StatusCard card;  // Plan 6 (D1): replaces the message line at the top
-
-  // The engine's own lines, which Details lists under the status line (Plan 14: the rows no longer repeat them as "Now: ..." readouts).
-  std::string placement_line;  // FormatPlacementLine; "Placement: NR is off" before a device exists
-  std::string motion_line;     // "Motion vectors: DLSS (the game's own, scale 1 x 1)"; never empty
-  std::string dlss_mode_line;  // "DLSS mode: Ultra Performance (1536x864 of 2560x1440)"; the game feature's create-time mode, empty before its DLSS is seen
-  std::string work_line;       // "Working at 1920x1080 of 3840x2160 (Edge-aware)"; empty before a frame
-  std::string exposure_line;   // Plan 17: "Input exposure: metered (the game's exposure was 6.3 stops off)"; empty when none is used
-  std::string chain_line;      // split chain: "Chain: pass 1 before upscaling (960x540), 2 at Present (1920x1080)", and the chain's note; empty otherwise
   std::string mask_note;       // "NR mask: UPLIFT_MASK (1920x1080)", or why not
   std::string frame_generation_warning;  // shown under Pass count when it applies; empty otherwise
   // ui-review.md §4.1: why no DLSS placement can run this session (bridged, hooks, ReShade version, the
@@ -115,6 +123,10 @@ struct OverlayView {
 struct OverlayState {
   DragState drag;
   bool language_changed = false;
+  OverlayView::Activity activity_start{}, activity_delta{};
+  std::chrono::steady_clock::time_point activity_since{};
+  double activity_seconds = 0.0;
+  Settings::FgPresent activity_mode = Settings::FgPresent::OFF;
   bool capturing_key = false;
   // Set on the frame a new hotkey is captured. That key press is still "pressed" in the same
   // frame's input snapshot, so the hotkey handler must skip it once instead of toggling Enable.
@@ -138,18 +150,16 @@ struct OverlayState {
 // `view->setup` and `view->live`; `view->card` must be set already. `device`: the shown device's identity. `facts`' views must outlive the draw.
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now);
 
-// The stage diagram above the Setup rows: the six pipeline nodes, the four stages tapped off them, and each tap's
-// pass count. Writes Source and FG placement, and asks the caller to confirm a present-with-FG change.
 bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state);
-
-// Draws the Uplift panel (spec §12) inside the panel's own window, editing `settings`
-// in place. Returns true when a setting changed; the caller then sanitises, saves and applies.
-bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state);
 
 // The panel's own window (ReShade passes a registered overlay's window no flags of the add-on's, so one that
 // wants no title bar and no border opens its own). BeginPanel must be followed by EndPanel on every path.
 void BeginPanel();
 void EndPanel();
+
+// Draws the Uplift panel (spec §12) inside the window ReShade opened for it, editing `settings`
+// in place. Returns true when a setting changed; the caller then sanitises, saves and applies.
+bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state);
 
 // 1.1.0: a hotkey capture the overlay has not shown for a moment (Esc closed ReShade's overlay, or another tab is open) ends, keeping the old hotkey, so
 // the hotkey (which a capture holds off) works again. Called at each present.

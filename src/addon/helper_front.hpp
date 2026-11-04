@@ -85,6 +85,7 @@ struct HelperDevice {
   bool claimed_elsewhere = false;
   uint64_t before_fg_passes = 0u;
   bool game_facing = false;
+  color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
   bool nr_returned_logged = false;  // "NR ran on the game's frame" was logged since the client last attached (Reset, helper exit)
   bool ex_checked = false;
   uint32_t ex_presents = 0u;  // present events of a 9Ex device, counted up to 2: the second proves the first real Present returned
