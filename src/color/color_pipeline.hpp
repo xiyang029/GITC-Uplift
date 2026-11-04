@@ -24,7 +24,6 @@ inline constexpr uint32_t PRIMARIES_MASK = 3u;    // bits 0-1: the SourcePrimari
 inline constexpr uint32_t NEAR_BLACK_GUARD = 4u;  // F16: read by the change pass
 inline constexpr uint32_t CONSISTENT = 8u;        // F15: read by the compose
 inline constexpr uint32_t MASK = 16u;             // set by RecordDecode/RecordComputeDecode when a mask is given
-inline constexpr uint32_t DENSITY_ON_BASE = 32u;  // the density correction lands on the base band, not the detail band
 }  // namespace shader_options
 
 struct EncodePass {
@@ -63,8 +62,6 @@ struct DecodePass {
   uint32_t options = 0u;                              // Plan 5: shader_options (the primaries, Consistent)
   float chroma_clamp = 0.f;                           // Plan 5 (F14): stops; 0 = off
   float guided_low_gain = 1.f;                        // Edge-aware: the base band's gain
-  float guided_high_gain = 1.f;                       // Edge-aware: the detail band's gain
-  float edge_density_attenuation = 0.85f;             // the band ceiling per unit of extra work-grid density
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
   nr::foveation::Grid foveation;
@@ -95,8 +92,6 @@ struct ComputeDecodePass {
   uint32_t options = 0u;                              // Plan 5: shader_options (the primaries, Consistent)
   float chroma_clamp = 0.f;                           // Plan 5 (F14): stops; 0 = off
   float guided_low_gain = 1.f;                        // Edge-aware: the base band's gain
-  float guided_high_gain = 1.f;                       // Edge-aware: the detail band's gain
-  float edge_density_attenuation = 0.85f;             // the band ceiling per unit of extra work-grid density
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
   nr::foveation::Grid foveation;

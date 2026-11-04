@@ -78,12 +78,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && !reduced_any);
   // Edge-aware's own rows matter only while Edge-aware itself does (below Full); Classic has no bands.
   const bool edge_aware_off = (!reduced_any || settings->upsampling != color::Upsampling::EDGE_AWARE);
-  const bool guided_gains_hidden = ((descriptor.key == "GuidedBaseGain" || descriptor.key == "GuidedDetailGain") && edge_aware_off);
-  // The ceiling and the band it lands on say nothing a gain cannot while the work grid is uniform: its density is
-  // one number screen-wide. Only a foveated grid, thinning toward the edges, gives the two rows an effect of their
-  // own (LookConfigFrom clears them when Foveated edges is off).
-  const bool density_rows_hidden =
-      ((descriptor.key == "DensityOnBase" || descriptor.key == "EdgeDensityAttenuation") && (!settings->foveation || edge_aware_off));
+  const bool guided_gains_hidden = (descriptor.key == "GuidedBaseGain" && edge_aware_off);
   // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
   const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
                                  || descriptor.key == "FaceLightingDensity" || descriptor.key == "FaceSpeckSize";
@@ -96,7 +91,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   // ui-review.md §3 rule 1: these rows matter only after a choice in the row just above them, so they
   // are hidden -- not merely greyed -- until that choice is made.
   if (pass_follows || shaping_off || stabilize_off || exposure_hidden || resolution_scale_hidden || upsampling_hidden || guided_gains_hidden
-      || density_rows_hidden || keep_faces_off || fill_off) {
+      || keep_faces_off || fill_off) {
     return false;
   }
 
@@ -647,11 +642,8 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
     }
     DrawWorkingSize(view, *settings);
     changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
-    // Edge-aware's two band gains and the foveated grid's density rows, right below the choice they depend on.
+    // Edge-aware's base band gain, right below the choice it depends on.
     changed |= DrawRow(*FindSetting("GuidedBaseGain"), view, settings, state, true);
-    changed |= DrawRow(*FindSetting("GuidedDetailGain"), view, settings, state, true);
-    changed |= DrawRow(*FindSetting("DensityOnBase"), view, settings, state, true);
-    changed |= DrawRow(*FindSetting("EdgeDensityAttenuation"), view, settings, state, true);
     changed |= DrawRow(*FindSetting("Foveation"), view, settings, state, true);
     if (settings->foveation) {
       changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state, true);

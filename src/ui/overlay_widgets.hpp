@@ -156,11 +156,18 @@ inline void InlineLabel(const char* label, const char* tooltip = nullptr) {
 // clicked. ResetButton below is the setting-row spelling of it.
 inline bool RowIconButton(const char* id, const char* tooltip_fmt, ...) {
   const float height = ImGui::GetFrameHeight();
-  // The slot RowLabel reserved, on the line the row's control is on. SameLine(0, 0) rather than SameLine():
-  // the cursor is then moved to the slot by hand, and a slot that lands outside the visible region -- a
-  // narrow panel with a long label -- must not make ImGui wrap the button onto a line of its own.
+  // The slot RowLabel reserved, centred on the control the row just drew. Centring on that item's own rect
+  // rather than on the cursor's line (2026-11-04) is what keeps the arrow on the slider rail's midline: a
+  // slider leaves the cursor at the top of its value text, half a text line above the rail, so top-aligning
+  // there put the arrow's centre the padding's difference below the row -- the dropdowns and switches, whose
+  // last item is the frame itself, were the rows that happened to look right. SameLine(0, 0) rather than
+  // SameLine(): the cursor is then moved to the slot by hand, and a slot that lands outside the visible
+  // region -- a narrow panel with a long label -- must not make ImGui wrap the button onto a line of its own.
   ImGui::SameLine(0.f, 0.f);
-  const float y = ImGui::GetCursorScreenPos().y;
+  const ImVec2 last_min = ImGui::GetItemRectMin();
+  const ImVec2 last_max = ImGui::GetItemRectMax();
+  const float y = last_max.y > last_min.y ? (last_min.y + last_max.y - height) * 0.5f
+                                          : ImGui::GetCursorScreenPos().y;
   const float window_right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
   const ImVec2 slot((std::min)(row_slot_x, window_right - height), y);
   const bool over = ImGui::IsWindowHovered()
