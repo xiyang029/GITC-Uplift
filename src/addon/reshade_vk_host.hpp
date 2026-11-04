@@ -36,7 +36,7 @@ template <class VulkanHandle>
 // ReShade's description of a Vulkan image as the ReShade-free side wants it (api::format is DXGI-numbered). A null resource is an empty description.
 [[nodiscard]] vk::ImageInfo VulkanImageInfo(reshade::api::device* device, reshade::api::resource resource);
 
-// The LUID of the NVIDIA adapter `device` runs on: ReShade 6.8's adapter_luid property (raw id 9; the pinned headers stop at 8), else DXGI's NVIDIA adapter.
+// The LUID of the NVIDIA adapter `device` runs on: ReShade 6.8's adapter_luid property (reshade_api_device.hpp), else DXGI's NVIDIA adapter.
 // False, with `error` set, when the device is not NVIDIA's or its adapter is unknown.
 [[nodiscard]] bool VulkanAdapterLuid(reshade::api::device* device, LUID* luid, std::string* error);
 

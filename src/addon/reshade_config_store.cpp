@@ -44,7 +44,7 @@ void ApplyPanelFonts() {
   // ReShade writes plain floats into the ini ("13.000000"), so match that rather than fighting its parser.
   static constexpr char kChineseFont[] = "C:\\Windows\\Fonts\\msyh.ttc";
   static constexpr char kLatinFont[] = "C:\\Windows\\Fonts\\segoeui.ttf";
-  static constexpr char kFontSize[] = "16.000000";
+  static constexpr char kFontSize[] = "19.000000";
   // Fill in only what the player never chose: rows measure themselves in font sizes (ui/overlay_style.hpp), so any
   // size renders.
   if (!StyleIsSet("Font")) reshade::set_config_value(nullptr, "STYLE", "Font", kChineseFont);

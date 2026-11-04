@@ -8,7 +8,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <utility>
 
 #include "addon/reshade_api.hpp"
 #include "ui/settings_schema.hpp"
@@ -17,7 +16,6 @@
 
 namespace uplift::ui {
 namespace {
-
 
 // Plan 14 (R90): the tooltip line of a highlighted option while the highlight is not the stored preference (what runs differs from what ReShade.ini holds).
 std::string SavedNote(std::string_view preference) {
@@ -96,6 +94,12 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   }
 
   gui::PushID(label.c_str());
+  // The row's note, if it has one, drawn once the reset arrow is placed: RowIconButton centres the arrow on the
+  // row's last item, and a note is a line of its own, so drawing it earlier took the arrow down a line on the five
+  // rows that have one -- Pass count's frame-generation warning, Mask, UICorrection, UseD3D9Ex and VulkanNr.
+  std::string deferred_note;
+  bool deferred_note_wraps = false;
+  const ImVec2 row_top = gui::GetCursorScreenPos();  // the row's own top: its tooltip is asked for over the whole row
   // ui-review.md §3 rule 1 / §2 finding 5: Game state after NR only matters once NR can run inside the
   // game's frame; while no DLSS placement can run this session, it is greyed and says why.
   // Plan 9: the Direct3D 9Ex row is greyed the same way where it does nothing (every game but a Direct3D 9 one).
@@ -169,12 +173,14 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     gui::BeginDisabled(follows);
     float skin = (follows ? settings->local_structure : settings->skin_structure);
     const bool edited = widgets::Slider(label.c_str(), &skin, static_cast<float>(descriptor.min),
-                                        static_cast<float>(SliderMax(descriptor)), "%.2f", nullptr, &state->drag.skin_structure);
+                                        static_cast<float>(SliderMax(descriptor)), "%.2f", &state->drag.skin_structure);
     if (edited) {
       settings->skin_structure = skin;
       changed = true;
     }
-    state->drag.skin_structure = gui::IsItemActive();
+    // The Slider already reported its held state through &state->drag.skin_structure; re-reading
+    // gui::IsItemActive() here asked its trailing value label instead and always said "not held", which
+    // dropped the drag coalescing (the row then re-applied, and reset NR's history, every frame).
     gui::EndDisabled();
   } else if (descriptor.key == "DiffuseWhiteNits") {
     // ui-review.md §3 rule 2 (the Skin pattern): an Automatic checkbox, the control greyed at the value
@@ -182,7 +188,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     const bool automatic = settings->diffuse_white_nits <= 0.f;
     gui::BeginDisabled(automatic);
     float nits = (automatic ? view.effective_diffuse_white_nits : settings->diffuse_white_nits);
-    if (widgets::Slider(label.c_str(), &nits, 48.f, 500.f, "%.0f", nullptr, nullptr) && !automatic) {
+    if (widgets::Slider(label.c_str(), &nits, 48.f, 500.f, "%.0f", nullptr) && !automatic) {
       settings->diffuse_white_nits = nits;
       changed = true;
     }
@@ -215,10 +221,11 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         const bool held_here = (on_release && state->pending_release.has_value() && state->pending_key == descriptor.key);
         int value = (held_here ? *state->pending_release : applied);
         const int low = static_cast<int>(descriptor.min), high = static_cast<int>(descriptor.max);
-        bool active = false;  // the slider's own held state: APPLY_ON_RELEASE waits for the release, not for every step
-        const bool edited = descriptor.max > 100.0 ? gui::InputInt(label.c_str(), &value, 64, 512)
-                                                   : widgets::SliderInt(label.c_str(), &value, low, high, nullptr, &active);
-        if (descriptor.max > 100.0) active = gui::IsItemActive();
+        bool active = false;  // the control's own held state: APPLY_ON_RELEASE waits for the release, not for every step
+        const bool typed = descriptor.max > 100.0;  // past a slider's range: a typed field, whose own held state is the release below
+        const bool edited = typed ? gui::InputInt(label.c_str(), &value, 64, 512)
+                                  : widgets::SliderInt(label.c_str(), &value, low, high, &active);
+        if (typed) active = gui::IsItemActive();
         if (!on_release) {
           if (edited) {
             descriptor.set(*settings, std::clamp(static_cast<double>(value), descriptor.min, descriptor.max));
@@ -231,20 +238,21 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
             state->pending_release = value;
             state->pending_key = descriptor.key;
           }
-          if (gui::IsItemDeactivatedAfterEdit() && state->pending_key == descriptor.key && state->pending_release) {
+          // The release is read from the control's own held state, never gui::IsItemDeactivated[AfterEdit]: the
+          // row's widgets draw their rail and value after ImGui's own control, so the last item is a label with no
+          // ID and those flags never fire. That silently dropped the setting of every APPLY_ON_RELEASE row (Pass
+          // count: the slider showed 2..10, settings.pass_count stayed 1, so NR never ran the extra passes).
+          if (!active && state->pending_key == descriptor.key && state->pending_release) {
             const int released = *std::exchange(state->pending_release, std::nullopt);
             if (released != applied) {
               descriptor.set(*settings, std::clamp(static_cast<double>(released), descriptor.min, descriptor.max));
               changed = true;
             }
-          } else if (gui::IsItemDeactivated() && state->pending_key == descriptor.key) {
-            state->pending_release.reset();  // released without an edit
           }
         }
         if (descriptor.key == "PassCount" && !view.frame_generation_warning.empty()) {
-          gui::PushTextWrapPos(0.f);
-          gui::TextDisabled("%s", view.frame_generation_warning.c_str());
-          gui::PopTextWrapPos();
+          deferred_note = view.frame_generation_warning;
+          deferred_note_wraps = true;
         }
         break;
       }
@@ -262,7 +270,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                                                                             : "%.2f");
         bool active = false;  // the slider's own held state, for the rows that gate work on the release
         const bool edited =
-            widgets::Slider(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format, nullptr, &active, shown_scale);
+            widgets::Slider(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format, &active, shown_scale);
         if (edited) {
           descriptor.set(*settings, static_cast<double>(value / shown_scale));
           changed = true;
@@ -313,9 +321,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           const std::span<const char* const> options(labels.data(), descriptor.choices.size());
           const std::span<const std::string_view> why_span(why.data(), descriptor.choices.size());
           const std::span<const std::string_view> tips_span(tips.data(), descriptor.choices.size());
-          // Show FG placements in pipeline order while retaining the stored values used by existing presets.
-          static constexpr size_t fg_order[]{static_cast<size_t>(Settings::FgPresent::OFF), static_cast<size_t>(Settings::FgPresent::BEFORE), static_cast<size_t>(Settings::FgPresent::AFTER)};
-          const std::span<const size_t> order = descriptor.key == "PresentWithFrameGen" ? std::span<const size_t>{fg_order} : std::span<const size_t>{};
+          // Shown in the order the schema declares its choices (FG_PRESENT_MODES); the stored values are the ones presets use.
           if (const int clicked = widgets::Segmented(label.c_str(), options.data(), static_cast<int>(options.size()), value,
                                                      why_span.data(), tips_span.data()); clicked >= 0) {
             if (descriptor.key == "PresentWithFrameGen" && clicked == static_cast<int>(Settings::FgPresent::AFTER)) {
@@ -362,6 +368,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
             gui::EndCombo();
           }
         } else {
+          // Eight short choices fit a row: a longer set would lose its tail here (the longest today, QUALITY_MODES, has seven).
           std::array<const char*, 8> labels = {};
           const size_t count = std::min(descriptor.choices.size(), labels.size());
           for (size_t index = 0u; index < count; ++index) {
@@ -387,7 +394,16 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       case SettingKind::KEY: break;  // the Enable hotkey is drawn beside Enable
     }
   }
-  if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && (!descriptor.tooltip.empty() || !disabled_reason.empty())) {
+  // The row answers a hover over the whole of itself, never through gui::IsItemHovered: the row's own widgets
+  // draw their rail and their value after ImGui's own control (overlay_widgets.hpp:292/355), and a segment group
+  // its surfaces after its last InvisibleButton, so the last item by now is a label with no ID. Asking it left a
+  // slider answering only over its number and a 2-3 choice row only over its last segment. The end slot is the
+  // reset arrow's own cell, which carries its own tooltip and must not collect this one as well.
+  const float row_bottom = gui::GetCursorScreenPos().y - gui::GetStyle().ItemSpacing.y;
+  const float row_right = (std::min)(widgets::row_slot_x, gui::GetWindowPos().x + gui::GetWindowSize().x);
+  const bool over_row = gui::IsWindowHovered()
+                        && gui::IsMouseHoveringRect(ImVec2(gui::GetWindowPos().x, row_top.y), ImVec2(row_right, row_bottom));
+  if (over_row && (!descriptor.tooltip.empty() || !disabled_reason.empty())) {
     std::string tooltip;
     if (!disabled_reason.empty()) {
       tooltip = std::format("Greyed: {}", disabled_reason);
@@ -399,26 +415,29 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     if (!saved_note.empty()) {
       tooltip += "\n" + saved_note;
     }
-    gui::SetTooltip("%s", tooltip.c_str());
+    widgets::MouseTooltip("%s", tooltip.c_str());
   }
-  if (descriptor.key == "Mask" && !view.mask_note.empty()) {
-    gui::TextDisabled("%s", view.mask_note.c_str());
+  if (descriptor.key == "Mask") {
+    deferred_note = view.mask_note;
   }
-  if (descriptor.key == "UICorrection" && !view.ui_correction_note.empty()) {
-    gui::TextDisabled("%s", view.ui_correction_note.c_str());
+  if (descriptor.key == "UICorrection") {
+    deferred_note = view.ui_correction_note;
   }
   if (descriptor.key == "UseD3D9Ex") {
-    const std::string& note = (view.d3d9ex_unavailable.empty() ? view.d3d9ex_readout : view.d3d9ex_unavailable);
-    if (!note.empty()) {
-      gui::TextDisabled("%s", note.c_str());
-    }
+    deferred_note = (view.d3d9ex_unavailable.empty() ? view.d3d9ex_readout : view.d3d9ex_unavailable);
   }
-  if (descriptor.key == "VulkanNr" && view.vulkan_nr_unavailable.empty() && !view.vulkan_nr_note.empty()) {
-    gui::TextDisabled("%s", view.vulkan_nr_note.c_str());
+  if (descriptor.key == "VulkanNr" && view.vulkan_nr_unavailable.empty()) {
+    deferred_note = view.vulkan_nr_note;
   }
-  // The reset arrow last, on the control's own line: RowLabel reserved its slot before the control was drawn,
-  // so drawing it earlier moved the cursor to the row's end and the control itself wrapped to a new line.
+  // The reset arrow here, on the control's own line: RowLabel reserved its slot before the control was drawn, so
+  // drawing it earlier moved the cursor to the row's end and the control itself wrapped to a new line. It has to
+  // come before the note above all, or the note becomes the row's last item and the arrow drops a line below it.
   changed |= DrawReset(descriptor, *settings, *state, view.setup);
+  if (!deferred_note.empty()) {
+    if (deferred_note_wraps) gui::PushTextWrapPos(0.f);
+    gui::TextDisabled("%s", deferred_note.c_str());
+    if (deferred_note_wraps) gui::PopTextWrapPos();
+  }
   gui::EndDisabled();
   gui::PopID();
   return changed && !read_only;
@@ -929,15 +948,15 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
 
   widgets::NextGap(style::BlockGap());
   if (!view.safety_locks.empty()) {
-    const ImVec4 red = style::tokens::kBad;
+    const ImVec4& bad = style::tokens::kBad;
     const ImVec2 warning_start = gui::GetCursorScreenPos();
     widgets::Panel("##safety_locks", [&] {
-      gui::PushStyleColor(ImGuiCol_Text, red);
+      gui::PushStyleColor(ImGuiCol_Text, bad);
       gui::SeparatorText("SAFETY LATCH ACTIVE");
       gui::PopStyleColor();
       for (const auto& lock : view.safety_locks) {
         gui::PushID(lock.feature.data());
-        gui::TextColored(red, "%s", lock.feature.data());
+        gui::TextColored(bad, "%s", lock.feature.data());
         gui::TextWrapped("%s", lock.reason.c_str());
         if (lock.setting != nullptr) {
           if (settings->*(lock.setting) == lock.restore_value) {
@@ -955,7 +974,7 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       }
     });
     const float bottom = gui::GetCursorScreenPos().y - gui::GetStyle().ItemSpacing.y;
-    gui::GetWindowDrawList()->AddRectFilled(warning_start, {warning_start.x + 0.75f * style::LabelGap(), bottom}, gui::GetColorU32(red));
+    gui::GetWindowDrawList()->AddRectFilled(warning_start, {warning_start.x + 0.75f * style::LabelGap(), bottom}, gui::GetColorU32(bad));
     widgets::NextGap(style::BlockGap());
   }
 
@@ -1060,7 +1079,6 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     const char* stage = view.RecordedStageName(pass - 1u);
     if (!stage) stage = stage_row.runs == SourcePick::PRESENT ? view.SharedPresentName(*settings) : StageLabel(stage_row.runs);
     const std::string summary = gui::Display(stage) + " · " + gui::Display(follows ? "Same look as pass 1" : "Own look");
-    const std::string label = std::format("{}###pass{}", gui::Display(std::format("Pass {}", pass)), pass);
     if (widgets::SectionHeader(gui::Display(std::format("Pass {}", pass)).c_str(), summary.c_str(), nullptr, false, nullptr)) {
       gui::PushID(static_cast<int>(pass));
       widgets::Panel("##pass_body", [&] {

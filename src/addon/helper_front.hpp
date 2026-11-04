@@ -283,8 +283,8 @@ class HelperFront {
   std::string settings_text_;          // ui::SaveSettings of the host's settings, for the helper
 };
 
-// Registers `callback` raw for ReShade's create_device event (id 96, add-on API 11+; the pinned v6.0.0 headers stop at 92): a ReShade
-// without the event ignores the id (addon_manager.cpp:556-560), and CreateDevice is never called. Both hosts do it in AddonInit.
+// Registers `callback` raw for ReShade's create_device event (id 96, add-on API 11+; the pinned v6.8.0 headers declare it): a ReShade
+// older than the event ignores the id (addon_manager.cpp:556-560), and CreateDevice is never called. Both hosts do it in AddonInit.
 void RegisterCreateDeviceEvent(bool (*callback)(reshade::api::device_api device_api, uint32_t& api_version));
 
 }  // namespace uplift::addon

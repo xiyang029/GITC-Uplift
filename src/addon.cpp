@@ -4036,7 +4036,7 @@ bool OnCreateDevice(api::device_api device_api, uint32_t& api_version) {
 
 }  // namespace
 
-// ReShade calls this after loading the add-on, outside the loader lock (v6.0.0's add-on loader), so
+// ReShade calls this after loading the add-on, outside the loader lock (its add-on loader), so
 // MinHook and the module enumeration can run here. A second call comes when ReShade reloads a pinned
 // Uplift after the last device went away: everything is still registered, so it only reports success.
 extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE reshade_module) {

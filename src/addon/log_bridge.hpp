@@ -4,7 +4,7 @@
 
 namespace uplift::addon {
 
-// reshade::log_level values (v6.0.0): error = 1, warning = 2, info = 3, debug = 4.
+// reshade::log::level values (v6.8.0, reshade.hpp): error = 1, warning = 2, info = 3, debug = 4.
 [[nodiscard]] constexpr int ToReshadeLogLevel(nr::LogLevel level) {
   return static_cast<int>(level) + 1;
 }

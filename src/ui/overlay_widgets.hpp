@@ -32,10 +32,17 @@ inline void SecondaryText(const char* text) {
   gui::TextUnformatted(text);
 }
 
+// The contents of a tooltip: wrapped after kTooltipEm font sizes, as the panel's own tooltips do.
+inline void TooltipBody(const std::string& text) {
+  StyleScope pad;
+  pad.Var(ImGuiStyleVar_WindowPadding, ImVec2(Px(tokens::kTooltipPadX), Px(tokens::kTooltipPadY)));
+  ImGui::PushTextWrapPos(ImGui::GetFontSize() * tokens::kTooltipEm);
+  ImGui::TextUnformatted(text.c_str());
+  ImGui::PopTextWrapPos();
+}
 
-// A tooltip that wraps after kTooltipEm font sizes, as the panel's own tooltips do. The message is drawn
-// from what the format came out as; nothing to say, no bubble: ImGui draws an empty one for an empty
-// string, which reads as a glitch.
+// A tooltip on the item just drawn. The message is drawn from what the format came out as; nothing to say, no
+// bubble: ImGui draws an empty one for an empty string, which reads as a glitch.
 inline void ItemTooltip(const char* fmt, ...) {
   va_list args;
   va_start(args, fmt);
@@ -47,13 +54,22 @@ inline void ItemTooltip(const char* fmt, ...) {
   if (!ImGui::BeginItemTooltip()) {
     return;
   }
-  {
-    StyleScope pad;
-    pad.Var(ImGuiStyleVar_WindowPadding, ImVec2(tokens::kTooltipPadX, tokens::kTooltipPadY));
-    ImGui::PushTextWrapPos(ImGui::GetFontSize() * tokens::kTooltipEm);
-    ImGui::TextUnformatted(text.c_str());
-    ImGui::PopTextWrapPos();
+  TooltipBody(text);
+  ImGui::EndTooltip();
+}
+
+// The same bubble, anchored to the pointer rather than to an item: a row asks for its tooltip once the whole
+// row is drawn, and the last item by then is the control's own value label, which the pointer is usually not
+// on -- BeginItemTooltip would then refuse to show it.
+inline void MouseTooltip(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  const std::string text = gui::Formatted(fmt, args);
+  va_end(args);
+  if (text.empty() || !ImGui::BeginTooltip()) {
+    return;
   }
+  TooltipBody(text);
   ImGui::EndTooltip();
 }
 
@@ -106,8 +122,8 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
   row_stacked = stacked;
   row_label_y = at.y;
   row_slot_x = at.x + avail - ImGui::GetFrameHeight();
-  // A little more air than the item spacing between a control and the reset slot, so a slider's value and
-  // the undo arrow do not read as one crowded pair.
+  // A little more air than the item spacing between a control and the row's end slot, so the undo arrow does
+  // not crowd whatever the row ends in. Switch places itself by the same measure.
   const float slot_gap = style.ItemSpacing.x * 1.5f;
   // The label column: kLabelEm font sizes wide, never more than kLabelShare of the panel. A label wider than
   // the column keeps its words and pushes its own control right, but it is clipped to the column so one long
@@ -140,6 +156,8 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
 // caller's own. Call right before the control.
 inline void InlineLabel(const char* label, const char* tooltip = nullptr) {
   row_stacked = false;
+  // The row's end slot, as RowLabel sets it: the caller asks its row's own rect by it.
+  row_slot_x = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight();
   const std::string text = gui::Display(label);
   ImGui::AlignTextToFramePadding();
   SecondaryText(text.c_str());
@@ -156,13 +174,11 @@ inline void InlineLabel(const char* label, const char* tooltip = nullptr) {
 // clicked. ResetButton below is the setting-row spelling of it.
 inline bool RowIconButton(const char* id, const char* tooltip_fmt, ...) {
   const float height = ImGui::GetFrameHeight();
-  // The slot RowLabel reserved, centred on the control the row just drew. Centring on that item's own rect
-  // rather than on the cursor's line (2026-11-04) is what keeps the arrow on the slider rail's midline: a
-  // slider leaves the cursor at the top of its value text, half a text line above the rail, so top-aligning
-  // there put the arrow's centre the padding's difference below the row -- the dropdowns and switches, whose
-  // last item is the frame itself, were the rows that happened to look right. SameLine(0, 0) rather than
-  // SameLine(): the cursor is then moved to the slot by hand, and a slot that lands outside the visible
-  // region -- a narrow panel with a long label -- must not make ImGui wrap the button onto a line of its own.
+  // The slot RowLabel reserved, centred on the control the row just drew: one rule for every row type, the
+  // arrow placed from that item's own rect whatever its height. SameLine(0, 0) rather than SameLine(): the
+  // cursor is then moved to the slot by hand, and a slot that lands outside the visible region -- a narrow
+  // panel with a long label -- must not make ImGui wrap the button onto a line of its own. The caller draws
+  // this before any note of the row's: a note is an item of its own, and the arrow would centre on it.
   ImGui::SameLine(0.f, 0.f);
   const ImVec2 last_min = ImGui::GetItemRectMin();
   const ImVec2 last_max = ImGui::GetItemRectMax();
@@ -183,7 +199,7 @@ inline bool RowIconButton(const char* id, const char* tooltip_fmt, ...) {
     clicked = gui::Button(icons::kUndo, ImVec2(height, 0.f));
     ImGui::PopID();
   }
-  if (ImGui::IsItemHovered(ImGuiHoveredFlags_None)) {
+  if (ImGui::IsItemHovered()) {
     va_list args; va_start(args, tooltip_fmt);
     const std::string tip = gui::Formatted(tooltip_fmt, args);
     va_end(args);
@@ -207,9 +223,9 @@ inline void SliderRail(const ImVec2& lo, const ImVec2& hi, float t, bool hot) {
   const float x1 = hi.x - 2.f - knob;
   const float x = x0 + t * (x1 - x0);
   const float y = (lo.y + hi.y) * 0.5f;
-  const float rail = (std::max)(2.f, height * 0.12f);
+  const float rail = (std::max)(Px(2.f), height * 0.12f);
   ImDrawList* draw = ImGui::GetWindowDrawList();
-  draw->AddRectFilled(ImVec2(x0, y - rail * 0.5f), ImVec2(x1, y + rail * 0.5f), ToU32(tokens::kBgControlHover), rail * 0.5f);
+  draw->AddRectFilled(ImVec2(x0, y - rail * 0.5f), ImVec2(x1, y + rail * 0.5f), ToU32(tokens::kBgControl), rail * 0.5f);
   draw->AddRectFilled(ImVec2(x0, y - rail * 0.5f), ImVec2(x, y + rail * 0.5f), ToU32(tokens::kAccent), rail * 0.5f);
   if (hot) {
     draw->AddCircleFilled(ImVec2(x, y), knob + 2.f, ToU32(tokens::kAccentHalo));
@@ -225,8 +241,8 @@ inline void SliderRail(const ImVec2& lo, const ImVec2& hi, float t, bool hot) {
 // `display_scale` what the row shows it as (a 0..1 blend shown as 0-100 %), so the caller keeps one
 // storage form. Returns true on the frames *value changed; *dragging, when asked for, is ImGui's own "the
 // control is held" state for this frame (Uplift's rows hold back work until the release).
-inline bool Slider(const char* id, float* value, float min, float max, const char* format, const char* tooltip,
-                   bool* dragging = nullptr, float display_scale = 1.f) {
+inline bool Slider(const char* id, float* value, float min, float max, const char* format, bool* dragging = nullptr,
+                   float display_scale = 1.f) {
   static ImGuiID typing = 0;
   const ImGuiID item = ImGui::GetID(id);
   const bool was_typing = (typing == item);
@@ -261,9 +277,6 @@ inline bool Slider(const char* id, float* value, float min, float max, const cha
   if (changed) {
     *value = shown / display_scale;
   }
-  if (tooltip != nullptr) {
-    ItemTooltip("%s", tooltip);
-  }
   const bool active = ImGui::IsItemActive();
   if (dragging != nullptr) {
     *dragging = active;
@@ -284,12 +297,12 @@ inline bool Slider(const char* id, float* value, float min, float max, const cha
   const float t = (max > min) ? std::clamp((shown - min) / (max - min), 0.f, 1.f) : 0.f;
   SliderRail(lo, hi, t, active || ImGui::IsItemHovered());
 
-  // The value sits on the rail's own line: SameLine moves the cursor to the next item's y, which after a
-  // slider whose width shrank is a line below the rail it belongs to.
-  // The value is centred on the rail's own line, as the knob is: the rail's top edge is a knob-radius above
-  // the row's centre, so anchoring to it left the number sitting visibly high.
-  gui::SetCursorScreenPos(ImVec2(hi.x + value_width - text_width, (lo.y + hi.y - gui::GetTextLineHeight()) * 0.5f));
-  gui::TextUnformatted(text);
+  // The value is drawn on the rail's own line, not laid out as an item of the row: it is centred on the rail
+  // as the knob is (the rail's top edge is a knob-radius above the row's centre, so anchoring to it left the
+  // number sitting visibly high), the next row's gap stays the slider's own height, and the row's "last item"
+  // stays the slider instead of a shorter line of text.
+  ImGui::GetWindowDrawList()->AddText(ImVec2(hi.x + value_width - text_width, (lo.y + hi.y - gui::GetTextLineHeight()) * 0.5f),
+                                      ImGui::GetColorU32(ImGuiCol_Text), text);
   return changed;
 }
 
@@ -297,7 +310,7 @@ inline bool Slider(const char* id, float* value, float min, float max, const cha
 // of whole numbers (a percentage, a mode, the pass count) sits in the same visual system as the rest. Call
 // after RowLabel. Ctrl+click typing works as on Slider: while the value is typed, ImGui's own slider draws.
 // *dragging, when asked for, is ImGui's held state for this frame.
-inline bool SliderInt(const char* id, int* value, int min, int max, const char* tooltip, bool* dragging = nullptr) {
+inline bool SliderInt(const char* id, int* value, int min, int max, bool* dragging = nullptr) {
   static ImGuiID typing = 0;
   const ImGuiID item = ImGui::GetID(id);
   const bool was_typing = (typing == item);
@@ -326,9 +339,6 @@ inline bool SliderInt(const char* id, int* value, int min, int max, const char* 
     ImGui::SetNextItemWidth(was_typing ? width : (std::max)(width - value_width, height * 2.f));
     changed = ImGui::SliderInt(id, value, min, max, "%d");
   }
-  if (tooltip != nullptr) {
-    ItemTooltip("%s", tooltip);
-  }
   const bool active = ImGui::IsItemActive();
   if (dragging != nullptr) {
     *dragging = active;
@@ -347,12 +357,12 @@ inline bool SliderInt(const char* id, int* value, int min, int max, const char* 
   const float t = (max > min) ? std::clamp(static_cast<float>(*value - min) / static_cast<float>(max - min), 0.f, 1.f) : 0.f;
   SliderRail(lo, hi, t, active || ImGui::IsItemHovered());
 
-  // The value sits on the rail's own line: SameLine moves the cursor to the next item's y, which after a
-  // slider whose width shrank is a line below the rail it belongs to.
-  // The value is centred on the rail's own line, as the knob is: the rail's top edge is a knob-radius above
-  // the row's centre, so anchoring to it left the number sitting visibly high.
-  gui::SetCursorScreenPos(ImVec2(hi.x + value_width - text_width, (lo.y + hi.y - gui::GetTextLineHeight()) * 0.5f));
-  gui::TextUnformatted(text);
+  // The value is drawn on the rail's own line, not laid out as an item of the row: it is centred on the rail
+  // as the knob is (the rail's top edge is a knob-radius above the row's centre, so anchoring to it left the
+  // number sitting visibly high), the next row's gap stays the slider's own height, and the row's "last item"
+  // stays the slider instead of a shorter line of text.
+  ImGui::GetWindowDrawList()->AddText(ImVec2(hi.x + value_width - text_width, (lo.y + hi.y - gui::GetTextLineHeight()) * 0.5f),
+                                      ImGui::GetColorU32(ImGuiCol_Text), text);
   return changed;
 }
 
@@ -372,7 +382,7 @@ inline bool SectionCaption(const char* caption, const char* reset_label, bool mo
   // No gap of its own: the call site's NextGap puts the same space above a caption as above a collapsible
   // header, so the two kinds of section start at one rhythm down the panel. The inset is SectionHeader's, so
   // a caption's link and a header's end at one x down the panel.
-  const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x - tokens::kCardPadding * 0.75f;
+  const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x - Px(tokens::kCardPadding) * 0.75f;
   bool clicked = false;
   {
     StyleScope caption_text;
@@ -425,7 +435,7 @@ inline void GroupHeading(const char* title, const char* note = nullptr) {
 template <typename Contents>
 void Panel(const char* id, Contents contents, float min_height = 0.f) {
   StyleScope panel;
-  panel.Var(ImGuiStyleVar_WindowPadding, ImVec2(tokens::kCardPadding, tokens::kCardPadding))
+  panel.Var(ImGuiStyleVar_WindowPadding, ImVec2(Px(tokens::kCardPadding), Px(tokens::kCardPadding)))
       .Var(ImGuiStyleVar_ChildRounding, tokens::kRadiusCard)
       .Var(ImGuiStyleVar_ChildBorderSize, 1.f)
       .Color(ImGuiCol_ChildBg, tokens::kBgCard)
@@ -490,8 +500,8 @@ inline bool SectionHeader(const char* english, const char* hint, const char* res
   const std::string reset_text = (reset_label != nullptr ? gui::Display(reset_label) : std::string());
   // The header's vertical padding, which is also where the hint's baseline sits: the two must match or the
   // hint drifts off the title line.
-  constexpr float kPadY = 7.f;
-  const float pad = tokens::kCardPadding * 0.75f;
+  const float kPadY = Px(7.f);
+  const float pad = Px(tokens::kCardPadding) * 0.75f;
   const float font = ImGui::GetFontSize();
   const ImVec2 at = ImGui::GetCursorScreenPos();
   const float right = at.x + ImGui::GetContentRegionAvail().x - pad;
@@ -567,7 +577,7 @@ inline bool Switch(const char* id, bool* value, bool at_row_end = true) {
                                : (hovered ? tokens::kBgControlHover : tokens::kBgControl));
   ImDrawList* draw = ImGui::GetWindowDrawList();
   draw->AddRectFilled(at, ImVec2(at.x + width, at.y + height), ToU32(track), radius);
-  draw->AddCircleFilled(ImVec2(*value ? at.x + width - radius : at.x + radius, at.y + radius), radius - 3.5f,
+  draw->AddCircleFilled(ImVec2(*value ? at.x + width - radius : at.x + radius, at.y + radius), radius - Px(3.5f),
                         ToU32(tokens::kTextPrimary));
   return pressed;
 }
@@ -600,7 +610,7 @@ inline void SegmentTip(const std::string_view& why, const std::string_view& tip)
 // same choices instead of clipped words.
 inline int Segmented(const char* id, const char* const* english, int count, int current,
                      const std::string_view* why = nullptr, const std::string_view* tips = nullptr) {
-  constexpr float kGap = 2.f;
+  const float kGap = Px(2.f);
   constexpr int kMaxSegments = 8;
   count = (std::min)(count, kMaxSegments);
   std::string shown[kMaxSegments];  // the local text owns the pointers labels[] hands out
@@ -703,7 +713,6 @@ inline int Segmented(const char* id, const char* const* english, int count, int 
   gui::PopID();
   return clicked;
 }
-
 
 // The one action a callout offers -- a safety lock's Clear latch, the status card's Retry: the accent as its
 // fill and the window's colour as its words, so it stands out from the rows' quiet controls.

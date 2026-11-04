@@ -111,10 +111,16 @@ namespace icons {
 constexpr const char* kUndo = "\xef\x83\xa2";       // U+F0E2 undo
 }  // namespace icons
 
-
 // The panel's spacing rhythm, resolved from the live font size, so every gap, inset and control follows
 // ReShade's font-size setting instead of a fixed pixel grid. Each step is one of the same rhythm the rows use.
 inline float Units(float count) { return gui::GetFontSize() * (4.f / 13.f) * count; }
+// A size token as the live window's pixels. RefreshForDpi scales the fields it writes into ImGui's global style;
+// the ones the panel pushes itself (a card's inset, a tooltip's, a section header's) never go through it, so they
+// take the same scale here -- without this a 150% panel drew those at their 100% size.
+inline float Px(float value) {
+  const float dpi = gui::GetWindowDpiScale();
+  return value * ((dpi > 0.01f && dpi < 8.f) ? dpi : 1.f);
+}
 inline float LabelGap() { return Units(0.75f); }
 inline float RowGap() { return Units(1.25f); }
 inline float BlockGap() { return Units(3); }
@@ -341,6 +347,8 @@ inline void ApplyAt(float scale) {
 
   style.WindowPadding = ImVec2(16.f * scale, 14.f * scale);
   style.FramePadding = ImVec2(9.f * scale, 6.f * scale);
+  // Rows sit on the DPI scale, the paragraph gaps inside them on the font (style::Units): ReShade's own Ctrl +
+  // wheel font size then moves the air between groups and leaves the row grid alone.
   style.ItemSpacing = ImVec2(tokens::kRowGap * scale, tokens::kRowGap * scale);
   style.ItemInnerSpacing = ImVec2(6.f * scale, 5.f * scale);
   style.CellPadding = ImVec2(8.f * scale, 4.f * scale);
