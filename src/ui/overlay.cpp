@@ -136,9 +136,6 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       changed = true;
     }
   }
-  // A row that already drew its own label and switch above (Skin follows Structure, Automatic diffuse white)
-  // has no caption of its own: its control goes on the line under them, in the same column.
-  const bool skip_caption = (descriptor.key == "SkinStructure" || descriptor.key == "DiffuseWhiteNits");
   const bool captioned = grouped && descriptor.kind != SettingKind::BOOL;
   if (captioned) {
     const char* caption = descriptor.key == "ResolutionMode" ? "Working resolution" : descriptor.key == "ResolutionScale" ? "Custom scale" : label.c_str();
@@ -154,19 +151,13 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     else if (descriptor.kind == SettingKind::FLOAT) value = FormatSettingValue(descriptor, *settings);
     else if (descriptor.kind == SettingKind::UINT && descriptor.key != "MaskBlendMode" && descriptor.max <= 100.0)
       value = state->pending_key == descriptor.key && state->pending_release ? std::to_string(*state->pending_release) : FormatSettingValue(descriptor, *settings);
-    if (!skip_caption) {
-      gui::BeginDisabled(inherited_skin);
-      widgets::RowLabel(caption);
-      gui::EndDisabled();
-      label = "##value";
-    } else {
-      // The rows above already drew their own label and switch on this line: the slider goes on the line under
-      // them, from the row's control column to its end slot, without a second label.
-      // The switch above says "Skin follows Structure"; the slider's own line still names what it is, so the
-      // number it shows has a label of its own.
-      widgets::RowLabel(caption);
-      label = "##value";
-    }
+    // Two rows (Skin follows Structure, Automatic diffuse white) drew their own label and switch just above:
+    // their control goes on the line under it, from the row's control column to its end slot, and still names
+    // itself there -- the switch's words say "follows", the number below has to say what it is.
+    // Nothing is disabled around that label: the only row that can be inherited is SkinStructure, whose own
+    // switch already carried the disable when it was drawn above.
+    widgets::RowLabel(caption);
+    label = "##value";
   }
   std::string saved_note;  // Plan 14 (R90): the Resolution combo's tooltip, while the mode that runs is not the stored one
   if (grouped && descriptor.key == "MaskBlendMode") {

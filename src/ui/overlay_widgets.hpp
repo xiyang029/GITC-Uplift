@@ -436,8 +436,6 @@ void Panel(const char* id, Contents contents, float min_height = 0.f) {
   gui::SetCursorScreenPos(ImVec2(gui::GetCursorScreenPos().x, card_bottom + gui::GetStyle().ItemSpacing.y));
 }
 
-// Two groups side by side while the panel is wide enough for both, stacked when it is not (ReShade docks the
-// panel narrow). `fill` is the surface both take; a caller that wants the wells inside to differ passes its own.
 // Two halves of a section side by side while the panel is wide enough for both, and stacked when it is not:
 // ReShade docks the panel narrow, and two columns there leave neither side room for a label beside its control.
 // `id` keeps the two halves' ImGui ids apart.
@@ -709,7 +707,4 @@ inline bool CardActionButton(const char* label) {
   return gui::Button(label);
 }
 
-// ---- Layout controls: the groups, pairs, panels and disclosures the panel's sections are built from. ----
-
-// ImGui checkboxes and buttons do not wrap their own labels. Wrap the display text but keep the original widget ID.
 }  // namespace uplift::ui::widgets
