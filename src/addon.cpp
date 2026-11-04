@@ -342,6 +342,7 @@ class AddonRouting final : public addon::NgxRouting {
  public:
   ngx_hooks::SrOverrides DlssPresetOverrides() override;
   ngx_hooks::SrOverrides RrPresetOverrides() override;
+  ngx_hooks::SrOverrides SrCreateOverrides() override;
   const void* DeviceOf(ID3D12GraphicsCommandList* list) override;
   nr::Size SwapchainSize(const void* device) override;
   bool IsOwnCode(const void* address) override;
@@ -380,7 +381,6 @@ struct AddonState {
   ui::OverlayState overlay;
   // ReShade calls the overlay event on every frame, open or not, so the panel draws only while its overlay is
   // open. Written by OnOpenOverlay; the initial value suits a ReShade that starts with the overlay closed.
-  bool overlay_open = false;
   std::unordered_map<api::device*, DeviceEntry> devices;
   std::vector<api::effect_runtime*> runtimes;
   addon::BeforeFgVk before_fg_vk;
@@ -644,6 +644,11 @@ ngx_hooks::SrOverrides AddonRouting::DlssPresetOverrides() {
 ngx_hooks::SrOverrides AddonRouting::RrPresetOverrides() {
   const std::unique_lock lock(g_state->mutex);
   return addon::ToRrPresetOverrides(g_state->settings);
+}
+
+ngx_hooks::SrOverrides AddonRouting::SrCreateOverrides() {
+  const std::unique_lock lock(g_state->mutex);
+  return addon::ToSrOverrides(g_state->settings);
 }
 
 const void* AddonRouting::DeviceOf(ID3D12GraphicsCommandList* list) {
@@ -2006,7 +2011,6 @@ std::string_view ConfigureOuterInputs(DeviceEntry& entry, const ui::Settings& se
 bool OnOpenOverlay(api::effect_runtime* /*runtime*/, bool open, api::input_source /*source*/) {
   try {
     const std::unique_lock lock(g_state->mutex);
-    g_state->overlay_open = open;
     if (!open) {
       // Plan 6 (D6): defaults_view is session-only and survives closing the overlay; a slider held as
       // it closes must not stay coalesced, so everything else about the panel still resets.
@@ -3569,9 +3573,6 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState& state = *g_state;
-    if (!state.overlay_open) {
-      return;
-    }
     const auto now = std::chrono::steady_clock::now();
     ui::OverlayView view = {.status_line = "OFF", .last_key_pressed = runtime->last_key_pressed()};
     const auto found = state.devices.find(runtime->get_device());
@@ -3579,11 +3580,6 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     // Plan 13 (the user's decision 1): on Vulkan, Before upscaling and After DLSS are explicit choices, offered where native NR can run.
     view.dlss_explicit = (overlay_device_api == api::device_api::vulkan);
     view.cross_queue_passes_available = (sizeof(void*) == 8u && overlay_device_api == api::device_api::d3d12);
-    // The DLSS-G runtime's own multiplier ceiling: the FG row offers only what it allows, and the
-    // advertisement site never raises the game's selector above it either. Unknown yet: offer all.
-    if (const uint32_t generated_max = addon::slfg::GeneratedFramesCeiling(); generated_max != 0u) {
-      view.fg_multiplier_options = (std::min)(static_cast<size_t>(6), static_cast<size_t>(generated_max) + 1u);
-    }
     // Plan 14 (design §1): Setup's facts. The stored preference here; what is possible and what runs below, per path; the draw resolves them.
     ui::SetupFacts facts;
     std::string after_dlss_problem;  // Plan 18: Setup's facts view these; they outlive FinishSetup
@@ -3938,7 +3934,6 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
                                      nullptr, true, entry.strikes.RetryAllowed() && !HelperView(entry)});
       }
     }
-    ui::BeginPanel();
     if (ui::DrawOverlay(view, &state.settings, &state.overlay)) {
       if (overlay_device_api == api::device_api::vulkan && MoveStageForVkRoute(&state.settings, vulkan_nr_before)) {
         state.overlay.setup_settle.Clicked(ui::SetupRow::STAGE, static_cast<uint32_t>(ui::SourcePick::PRESENT));  // as a click on Present
@@ -3970,7 +3965,6 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         found->second.context->RetryNow();
       }
     }
-    ui::EndPanel();
   }
   UPLIFT_CATCH("draw_overlay", )
 }
@@ -4227,10 +4221,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     addon::RegisterTrackingEvents();  // once, and never unregistered while the game runs (amendment 2)
     g_state->tracking_registered = true;
   }
-  // The event rather than register_overlay: the panel opens its own window (ui::BeginPanel). ReShade calls this
-  // one every frame, open or not (runtime_gui.cpp's has_addon_event early-out), which is why OnDrawOverlay
-  // checks `overlay_open` first.
-  reshade::register_event<reshade::addon_event::reshade_overlay>(OnDrawOverlay);
+  // ReShade's own overlay window: it calls OnDrawOverlay only while the panel is open, inside the window it
+  // opened for it, so the panel draws no title bar and no border of its own.
+  reshade::register_overlay(NAME, OnDrawOverlay);
 
   nr::Logf(nr::LogLevel::INFO, "Uplift {} registered (ReShade API {}, Dear ImGui {}, ReShade {})", UPLIFT_VERSION,
            RESHADE_API_VERSION, IMGUI_VERSION_NUM,

@@ -99,6 +99,12 @@ void NgxBridge::BeforeCreate(ngx_hooks::CreateCall* call) {
   // Uplift's runtime creates no SuperSampling feature today, but this must hold even if a future NR
   // version ever did).
   if (routing_.IsOwnCode(call->caller)) return;
+  // The hidden DLSS-SR create overrides (spec §10): the quality mode and auto-exposure flag the game's own
+  // block is asked for, saved first so the detour can put the game's values back on every path.
+  if (call->feature == NVSDK_NGX_Feature_SuperSampling && call->parameters != nullptr) {
+    const ngx_hooks::SrOverrides overrides = routing_.SrCreateOverrides();
+    if (overrides.Any()) ngx_hooks::ApplySrOverrides(call->parameters, overrides, &call->saved);
+  }
   EnsureFgPresetHook();  // early: the FG provider's single preset read can precede the first present
 }
 

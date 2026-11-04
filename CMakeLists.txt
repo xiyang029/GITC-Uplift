@@ -170,6 +170,7 @@ add_custom_command(OUTPUT "${UPLIFT_XMX_GENERATED}/embedded_xess_programs.rc"
 
 add_library(uplift_ngx_hooks STATIC
   src/ngx_hooks/hook_installer.cpp
+  src/ngx_hooks/dlss_overrides.cpp
   src/ngx_hooks/ngx_parameters.cpp
   src/ngx_hooks/feature_registry.cpp
   src/ngx_hooks/dlss_capture.cpp
@@ -210,8 +211,7 @@ file(MAKE_DIRECTORY "${UPLIFT_SHADER_OUTPUT}")
 set(UPLIFT_SHADER_HEADERS)
 foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0" "decode_cs|cs_6_0" "motion_cs|cs_6_0"
                         "look_pyramid_cs|cs_6_0" "look_stabilize_cs|cs_6_0" "look_shape_cs|cs_6_0" "resolve_cs|cs_6_0"
-                        "meter_cs|cs_6_0" "faces_cs|cs_6_0" "boost_fit_cs|cs_6_0" "boost_solve_cs|cs_6_0"
-                        "boost_hold_cs|cs_6_0" "boost_carry_cs|cs_6_0" "boost_compose_cs|cs_6_0")
+                        "meter_cs|cs_6_0" "faces_cs|cs_6_0")
   string(REPLACE "|" ";" shader_parts "${shader}")
   list(GET shader_parts 0 shader_name)
   list(GET shader_parts 1 shader_profile)
@@ -223,7 +223,7 @@ foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0"
     DEPENDS "${CMAKE_SOURCE_DIR}/shaders/${shader_name}.hlsl" "${CMAKE_SOURCE_DIR}/shaders/color_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/change_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/decode_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/foveation.hlsli" "${CMAKE_SOURCE_DIR}/shaders/look_common.hlsli"
-            "${CMAKE_SOURCE_DIR}/shaders/nr_boost_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/vk_common.hlsli"
+            "${CMAKE_SOURCE_DIR}/shaders/vk_common.hlsli"
     COMMENT "dxc ${shader_name}.hlsl (${shader_profile})"
     VERBATIM)
   list(APPEND UPLIFT_SHADER_HEADERS "${shader_header}")

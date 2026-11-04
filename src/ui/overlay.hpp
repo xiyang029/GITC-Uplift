@@ -33,8 +33,6 @@ struct OverlayView {
   nr::Size dlss_output;
   std::string dlss_mode_name;
   int dlss_preset_mode = -1;
-  // The FG multiplier row: only choices the DLSS-G runtime's own ceiling allows are offered (generated frames + 1).
-  std::size_t fg_multiplier_options = 6;
   std::array<nr::RecordedModel, MAX_PASSES> pass_models{};
   std::string details_backend, details_note;
   color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
@@ -151,11 +149,6 @@ struct OverlayState {
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now);
 
 bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state);
-
-// The panel's own window (ReShade passes a registered overlay's window no flags of the add-on's, so one that
-// wants no title bar and no border opens its own). BeginPanel must be followed by EndPanel on every path.
-void BeginPanel();
-void EndPanel();
 
 // Draws the Uplift panel (spec §12) inside the window ReShade opened for it, editing `settings`
 // in place. Returns true when a setting changed; the caller then sanitises, saves and applies.

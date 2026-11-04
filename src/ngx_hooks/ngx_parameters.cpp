@@ -1,7 +1,10 @@
 #include "ngx_hooks/ngx_parameters.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <span>
+
 
 namespace uplift::ngx_hooks {
 

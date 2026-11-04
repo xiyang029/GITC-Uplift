@@ -25,22 +25,6 @@ inline constexpr float SKIN_SAME_AS_STRUCTURE = -1.f;
 inline constexpr uint32_t CONFIG_VERSION = 3u;
 
 // v2 design §5. Every combo is stored as its index, in the order below.
-// Frame skip (MFG-Unlocker's Boost, ported): NR's network runs on one frame of the setting's cycle, and the frames it skips carry the last change it made.
-enum class HalfRate : uint32_t {
-  OFF = 0u,          // the network runs on every frame
-  SKIP = 1u,         // one frame in two
-  SKIP_THREE = 2u,   // one frame in three
-  SKIP_FOUR = 3u,    // one frame in four
-};
-
-// How many presents the network runs on one of: 2, 3 or 4 for every 2nd, 3rd or 4th frame, 1 when frame skip is off.
-[[nodiscard]] constexpr uint32_t HalfRatePeriod(HalfRate rate) {
-  if (rate == HalfRate::SKIP_FOUR) return 4u;
-  if (rate == HalfRate::SKIP_THREE) return 3u;
-  if (rate == HalfRate::SKIP) return 2u;
-  return 1u;
-}
-
 enum class PlacementSource : uint32_t {
   AUTO = 0u,     // after DLSS once the game has used DLSS, else Present
   DLSS = 1u,     // after DLSS only
@@ -87,6 +71,25 @@ enum class MotionPick : uint32_t {
   DLSS,
   LAUNCHPAD,
   LUMENITE,  // 2026-10-08
+};
+
+// The DLSS-SR quality mode an override asks the game's next feature create for (spec §10). The stored index is
+// NVSDK_NGX_PerfQuality_Value + 1; GAME keeps the game's own mode.
+enum class DlssQualityOverride : uint32_t {
+  GAME = 0u,
+  PERFORMANCE = 1u,
+  BALANCED = 2u,
+  QUALITY = 3u,
+  ULTRA_PERFORMANCE = 4u,
+  ULTRA_QUALITY = 5u,
+  DLAA = 6u,
+};
+
+// The DLSS-SR auto-exposure flag the same create asks for; GAME keeps DLSS's own.
+enum class AutoExposureOverride : uint32_t {
+  GAME = 0u,
+  OFF = 1u,
+  ON = 2u,
 };
 
 // GAME keeps the game's preset; J..M are DLSS render presets 10..13 (spec §10).
@@ -271,6 +274,10 @@ struct Settings {
   PlacementSource source = PlacementSource::AUTO;
   MotionVectorSource motion_vectors = MotionVectorSource::AUTO;
   std::array<DlssPresetOverride, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_presets = {};
+  // The two hidden DLSS-SR create-time overrides (schema rows DLSSQualityMode / DLSSAutoExposure): applied when
+  // the game next creates its DLSS feature. Nothing reads them back into a live feature on its own.
+  DlssQualityOverride dlss_quality_mode = DlssQualityOverride::GAME;
+  AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
 
   // The render scale override (2026-10-25, addon/dlss_ratio.hpp): each mode's render size as percent of
   // the output, 100 = the game's choice. Applied at the game's next OptimalSettings query.
@@ -346,7 +353,6 @@ struct Settings {
   bool keep_faces_after_dlss = false;
   bool keep_faces_present = false;
   bool pre_upscale = false;  // Before upscaling (pre-SR), off until E13
-  HalfRate half_rate = HalfRate::OFF;  // NR on one frame of the cycle: a skipped frame carries the last change the network made, along the motion vectors
   std::array<PassSettings, MAX_PASSES - 1u> passes = {};  // passes 2..10
   look::LookSettings look;                                // Shape result and its rows
   MaskMode mask = MaskMode::AUTO;

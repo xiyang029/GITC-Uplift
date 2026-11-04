@@ -40,6 +40,12 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
   // RowLabel the panel's other rows use, so the diagram's caption lines up with everything above and below it.
   bool changed = false;
   const bool can_reset = !IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"));
+  // The caption row: the label in its column, and the reset arrow at the row's end. The diagram below takes the
+  // row's whole width from the panel's edge, so it must not inherit the caption's control width -- reading the
+  // origin and the available width before RowLabel sets them is what keeps it the same size whether or not the
+  // arrow is drawn.
+  const ImVec2 diagram_origin = gui::GetCursorScreenPos();
+  const float diagram_width = std::max(1.f, gui::GetContentRegionAvail().x);
   widgets::RowLabel("NR stage", "Choose a stage for pass 1");
   if (can_reset) {
     const char* const default_stage = (view.dlss_explicit ? "Present on Vulkan" : "After DLSS");
@@ -50,9 +56,12 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
       changed = true;
     }
   }
+  // The diagram starts on the line under the caption, at the panel's left edge, as wide as the panel. RowLabel
+  // left the cursor on the caption's own line, so the diagram's first line is one row height below it.
   const float em = gui::GetFontSize();
-  const ImVec2 origin = gui::GetCursorScreenPos();
-  const float width = std::max(1.f, gui::GetContentRegionAvail().x);
+  const float caption_bottom = ImGui::GetCursorScreenPos().y;
+  const ImVec2 origin(diagram_origin.x, caption_bottom + ImGui::GetTextLineHeightWithSpacing());
+  const float width = diagram_width;
   const bool folded = width < em * 52.f;
   const int columns = folded ? 3 : 6;
   const float margin = std::min(0.55f * em, width * 0.025f);

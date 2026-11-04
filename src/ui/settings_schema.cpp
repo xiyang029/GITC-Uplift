@@ -16,12 +16,15 @@ constexpr std::array<std::string_view, 3> NR_NETWORKS = {"Runtime default", "A: 
 constexpr std::array<std::string_view, 3> PASS_NETWORKS = {"Same as pass 1", "A: Legacy", "B: Small FP8"};
 constexpr std::array<std::string_view, 3> SOURCES = {"Auto", "After DLSS", "Present"};
 constexpr std::array<std::string_view, 5> MOTION_VECTORS = {"Auto", "DLSS", "Launchpad", "None", "Lumenite"};  // stored-index order (Setup shows Lumenite after Launchpad)
-constexpr std::array<std::string_view, 4> HALF_RATE = {"Off", "Every 2nd frame", "Every 3rd frame", "Every 4th frame"};
 constexpr std::array<std::string_view, 5> PRESETS = {"Game", "J", "K", "L", "M"};
 constexpr std::array<std::string_view, 4> FG_PRESETS = {"Game", "A", "B", "C"};
 constexpr std::array<std::string_view, 6> FG_MULTIPLIERS = {"Game", "2x", "3x", "4x", "5x", "6x"};
 constexpr std::array<std::string_view, 4> REFLEX_MODES = {"Game", "On", "Boost", "Off"};
 constexpr std::array<std::string_view, 4> RR_PRESETS = {"Game", "D", "E", "F"};
+// The two create-time DLSS-SR overrides (hidden rows, kept for the ini and for a later page).
+constexpr std::array<std::string_view, 7> QUALITY_MODES = {"Game", "Performance", "Balanced", "Quality",
+                                                          "Ultra Performance", "Ultra Quality", "DLAA"};
+constexpr std::array<std::string_view, 3> AUTO_EXPOSURE = {"Game", "Off", "On"};
 constexpr std::array<std::string_view, 6> ENCODINGS = {"Auto", "Linear BT.709", "sRGB", "BT.2100 PQ", "scRGB", "scRGB-nl"};
 constexpr std::array<std::string_view, 3> DEPTH_DIRECTIONS = {"Game", "Normal", "Inverted"};
 constexpr std::array<std::string_view, 2> STATE_RESTORE_MODES = {"Full", "Minimal"};
@@ -522,17 +525,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.source = FromIndex<PlacementSource>(v); },
     },
     {
-        .key = "HalfRate",
-        .kind = SettingKind::CHOICE,
-        .section = SettingSection::PLACEMENT,
-        .label = "Frame skip",
-        .tooltip = "NR's network runs on the frame the cycle picks, every 2nd, 3rd or 4th, and a skipped frame carries the last change the network made "
-                   "along the motion vectors, so it still shows NR's result. A change applies at once.",
-        .choices = HALF_RATE,
-        .get = [](const Settings& s) { return Index(s.half_rate); },
-        .set = [](Settings& s, double v) { s.half_rate = FromIndex<HalfRate>(v); },
-    },
-    {
         .key = "PreUpscale",
         .kind = SettingKind::BOOL,
         .section = SettingSection::PLACEMENT,
@@ -965,6 +957,39 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[5]); },
         .set = [](Settings& s, double v) { s.dlss_render_scale[5] = static_cast<uint32_t>(v); },
+    },
+    // The two DLSS-SR create-time overrides (spec §10), shown under the render scales they end up as: the
+    // quality mode selects which scale DLSS uses, so the two belong on one line of the same story. Uplift
+    // patches the game's own NGX create (ngx_hooks/dlss_overrides.cpp), so a change lands the next time the
+    // game creates its DLSS feature -- switching DLSS off and on, changing its quality, or changing resolution
+    // in the game all do it, and no restart is needed. It cannot reach a feature that already exists: DLSS
+    // reads both keys once, at CreateFeature.
+    {
+        .key = "DLSSQualityMode",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::DLSS_REFLEX,
+        .label = "DLSS quality mode",
+        .tooltip = "The quality mode Uplift asks the game's next DLSS-SR feature to be created with, which is the render "
+                   "resolution everything else works from. Lands when the game creates its DLSS again: toggle DLSS in the "
+                   "game, or change its quality there, or change the resolution. It cannot change a DLSS feature that "
+                   "already exists. Game keeps the game's choice.",
+        .choices = QUALITY_MODES,
+        .flags = setting_flags::NEXT_DLSS_CREATE,
+        .get = [](const Settings& s) { return Index(s.dlss_quality_mode); },
+        .set = [](Settings& s, double v) { s.dlss_quality_mode = FromIndex<DlssQualityOverride>(v); },
+    },
+    {
+        .key = "DLSSAutoExposure",
+        .kind = SettingKind::CHOICE,
+        .section = SettingSection::DLSS_REFLEX,
+        .label = "DLSS auto-exposure",
+        .tooltip = "Forces DLSS-SR's auto-exposure on or off when the game creates its DLSS feature again (toggle DLSS in "
+                   "the game, or change its quality). It cannot change a DLSS feature that already exists. Game keeps the "
+                   "game's own flag.",
+        .choices = AUTO_EXPOSURE,
+        .flags = setting_flags::NEXT_DLSS_CREATE,
+        .get = [](const Settings& s) { return Index(s.dlss_auto_exposure); },
+        .set = [](Settings& s, double v) { s.dlss_auto_exposure = FromIndex<AutoExposureOverride>(v); },
     },
     // The DLSS-FG model preset (2026-10-25, addon/fg_preset.hpp): one choice, applied by rewriting the
     // game's driver-settings read for the FG preset id after the driver answered -- so it also beats a

@@ -59,9 +59,7 @@ constexpr ImVec4 kStroke = Hex(0x252930);
 constexpr ImVec4 kTextPrimary = Hex(0xE8EAED);
 constexpr ImVec4 kTextSecondary = Hex(0x9AA0A8);
 constexpr ImVec4 kWarn = Hex(0xF5A623);          // ReShade's unsaved-changes marker
-constexpr ImVec4 kBad = Hex(0xEB5757);           // a destructive action ("Restore all")
-constexpr ImVec4 kBadHover = Hex(0xF26B6B);
-constexpr ImVec4 kBadActive = Hex(0xD14B4B);
+constexpr ImVec4 kBad = Hex(0xEB5757);           // a latched safety lock's words, the one red on the panel
 constexpr ImVec4 kAccent = Hex(0x4CA6A0);        // the one saturated colour in the panel
 constexpr ImVec4 kAccentHover = Hex(0x5BB8B2);
 constexpr ImVec4 kAccentActive = Hex(0x3E8C87);
@@ -84,7 +82,6 @@ constexpr float kRadiusCard = 10.f;
 constexpr float kRadiusControl = 8.f;
 constexpr float kRadiusSmall = 5.f;
 constexpr float kRowGap = 8.f;
-constexpr float kSectionGap = 18.f;
 constexpr float kCardPadding = 12.f;
 constexpr float kTooltipPadX = 8.f;
 constexpr float kTooltipPadY = 6.f;
@@ -95,9 +92,15 @@ constexpr float kTooltipPadY = 6.f;
 // narrower than kStackEm has no room for a label column beside a usable control (ReShade docks it at
 // ~450 px), so there each label goes on its own line over a control as wide as the panel. A slider's value
 // sits just right of its rail, its right edge on the control column's, instead of under the knob.
-constexpr float kLabelEm = 12.f;
-constexpr float kLabelShare = 0.42f;
-constexpr float kStackEm = 24.f;
+//
+// kStackEm is measured against the width the row actually has, which inside a two-column group is that
+// column. At 24 em no row on the panel ever cleared it -- not even a single-column one at the width the panel
+// opens at -- so every row stacked, and a row ending in a switch put that switch alone at the right of the
+// line under its label. Nine em is the narrowest column that still holds a label and its control: below that
+// the label goes over the control, which is the only thing stacking is for.
+constexpr float kLabelEm = 8.5f;
+constexpr float kLabelShare = 0.38f;
+constexpr float kStackEm = 9.f;
 constexpr float kTooltipEm = 35.f;
 
 }  // namespace tokens
@@ -108,19 +111,27 @@ namespace icons {
 constexpr const char* kUndo = "\xef\x83\xa2";       // U+F0E2 undo
 }  // namespace icons
 
-// The one text size the panel names: a note under a row, one step (12/13) below the size the player chose for
-// ReShade. The panel itself draws at that size, so the wheel takes it along. FontSizeBase, not GetFontSize():
-// PushFont takes the unscaled size and the global factors would apply twice.
-inline float SmallFontSize() {
-  const float base = ImGui::GetStyle().FontSizeBase;
-  return (base > 0.f ? base : 16.f) * (12.f / 13.f);
-}
+
+// The panel's spacing rhythm, resolved from the live font size, so every gap, inset and control follows
+// ReShade's font-size setting instead of a fixed pixel grid. Each step is one of the same rhythm the rows use.
+inline float Units(float count) { return gui::GetFontSize() * (4.f / 13.f) * count; }
+inline float LabelGap() { return Units(0.75f); }
+inline float RowGap() { return Units(1.25f); }
+inline float BlockGap() { return Units(3); }
+inline float SectionGap() { return Units(4.5f); }
+
+// Whether the panel is wide enough for two groups side by side (PairedGroups). Below it the groups stack, one
+// under the other, which is how the panel opens: it is set to Units(112) at its first frame, and the two
+// columns are a thing the player asks for by dragging the panel wider, not the default reading. Upstream's
+// number (Units(144)) is wider than any panel it ever set, so its halves only met on a hand-widened one; this
+// keeps that meaning without making the default panel a two-column one.
+inline bool FitPairedGroups() { return gui::GetContentRegionAvail().x >= Units(130); }
 
 inline ImU32 ToU32(const ImVec4& color) { return ImGui::GetColorU32(color); }
 
-// Pushes and pops in one object, so a return from the middle of a panel cannot leave a colour, a variable
-// or a font on ReShade's stacks. The named pairs are the three control roles the panel draws: its primary
-// action, a quiet icon button, and the destructive confirmation.
+// Pushes and pops in one object, so a return from the middle of a panel cannot leave a colour or a variable
+// on ReShade's stacks. The named pairs are the two control roles the panel draws: its primary action, and a
+// quiet icon button.
 class StyleScope {
  public:
   StyleScope() = default;
@@ -129,7 +140,6 @@ class StyleScope {
   ~StyleScope() {
     if (vars_ != 0) ImGui::PopStyleVar(vars_);
     if (colors_ != 0) ImGui::PopStyleColor(colors_);
-    for (int i = 0; i < fonts_; ++i) ImGui::PopFont();
   }
   StyleScope& Color(ImGuiCol index, const ImVec4& color) {
     ImGui::PushStyleColor(index, color);
@@ -146,12 +156,6 @@ class StyleScope {
     ++vars_;
     return *this;
   }
-  StyleScope& FontSize(float size) {
-    ImGui::PushFont(nullptr, size);
-    ++fonts_;
-    return *this;
-  }
-  StyleScope& Secondary() { return Color(ImGuiCol_Text, tokens::kTextSecondary); }
   // The accent as a control's fill and the window's colour as its words: the panel's primary action.
   StyleScope& AccentButton() {
     return Color(ImGuiCol_Button, tokens::kAccent)
@@ -166,17 +170,9 @@ class StyleScope {
         .Color(ImGuiCol_ButtonActive, tokens::kAccentHalo)
         .Color(ImGuiCol_Text, tokens::kTextSecondary);
   }
-  StyleScope& DangerButton() {
-    return Color(ImGuiCol_Button, tokens::kBad)
-        .Color(ImGuiCol_ButtonHovered, tokens::kBadHover)
-        .Color(ImGuiCol_ButtonActive, tokens::kBadActive)
-        .Color(ImGuiCol_Text, tokens::kOnAccent);
-  }
-
  private:
   int colors_ = 0;
   int vars_ = 0;
-  int fonts_ = 0;
 };
 
 // The style half's own implementation, in one place and inline: the add-on links no ImGui source, so there is
@@ -197,15 +193,20 @@ constexpr SlotColor kPalette[] = {
     {ImGuiCol_TextLink, tokens::kAccent},
     {ImGuiCol_WindowBg, tokens::kBgWindow},
     {ImGuiCol_ChildBg, tokens::kBgCard},
-    {ImGuiCol_PopupBg, tokens::kBgCard},
-    {ImGuiCol_Border, tokens::kStroke},
+    // A popup (a combo's list, a tooltip) opens over a card, so it takes the control tone: at the card's own
+    // tone it would sit flush against what it covers and only its hairline would say it is there.
+    {ImGuiCol_PopupBg, tokens::kBgControl},
+    // A frame's edge is a hairline, not a line: on the panel's dark ramp a full-strength stroke reads as a
+    // chrome outline around every combo and slider. Cards keep kHairline of their own.
+    {ImGuiCol_Border, tokens::Fade(tokens::kTextPrimary, 0.10f)},
     {ImGuiCol_BorderShadow, tokens::kTransparent},
 
-    // Inputs, sliders, drags, combos, checkboxes and plots all sit in the card well; only the hover and the
-    // press move them, so the panel stays quiet until touched.
-    {ImGuiCol_FrameBg, tokens::kBgCard},
+    // Inputs, drags, combos, checkboxes and plots stand on a card, so they take the control tone: the card
+    // is what they sit in, and at the well's own fill a text box or a combo read as a hole in the panel.
+    {ImGuiCol_FrameBg, tokens::kBgControl},
     {ImGuiCol_FrameBgHovered, tokens::kBgControlHover},
-    {ImGuiCol_FrameBgActive, tokens::Mix(tokens::kBgCard, tokens::kAccent, 0.14f)},
+    // Pressed inputs take one step up, not a tint: the accent belongs to the controls that mean "on".
+    {ImGuiCol_FrameBgActive, tokens::kBgControlHover},
 
     {ImGuiCol_Button, tokens::kBgControl},
     {ImGuiCol_ButtonHovered, tokens::kBgControlHover},
@@ -292,8 +293,9 @@ inline void ApplyBorders(float scale) {
   ImGuiStyle& style = ImGui::GetStyle();
   style.WindowBorderSize = 0.f;
   style.ChildBorderSize = 0.f;
-  // A hairline that holds at 1 device px on high-DPI too: round instead of multiply, and never 0.
-  style.FrameBorderSize = (std::max)(1.f, scale);
+  // No border on a control: the panel separates layers by fill, and a line around every combo, slider and
+  // button is the one thing that made the panel read as chrome. Popups keep one so they lift off the panel.
+  style.FrameBorderSize = 0.f;
   style.PopupBorderSize = (std::max)(1.f, scale);
   style.TabBorderSize = 0.f;
   style.TabBarBorderSize = 0.f;

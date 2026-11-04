@@ -2,19 +2,46 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
+#include <span>
+#include <vector>
 
 #include "nr/ngx.hpp"
 #include <nvsdk_ngx_defs_dlssd.h>  // the Ray Reconstruction preset keys (RR_PRESET_KEYS below)
 
 namespace uplift::ngx_hooks {
 
-// The preset-swap overrides (addon/dlss_swap.hpp): a render preset per quality-mode slot. The key
-// mapping follows the NGX SDK header.
-struct SrOverrides {
-  std::array<unsigned int, 6> presets = {};  // per PRESET_KEYS entry: a render preset to force; 0 keeps the game's
-
-  [[nodiscard]] bool Any() const { return std::ranges::any_of(presets, [](unsigned int preset) { return preset != 0u; }); }
+// One value a create hook changed on the game's parameter block, with the game's own value to put back (0
+// when the game never set it: NGX's default for every key Uplift overrides).
+struct SavedParameter {
+  enum class Type : uint8_t {
+    INT,
+    UINT,
+  };
+  const char* key = nullptr;
+  Type type = Type::INT;
+  int64_t value = 0;
 };
+
+// Writes the saved values back, last change first, with the type each was read with.
+void RestoreParameters(NVSDK_NGX_Parameter* parameters, std::span<const SavedParameter> saved);
+
+// The DLSS-SR create overrides (spec §10, the hidden DLSSQualityMode / DLSSAutoExposure rows) and the
+// preset swap's render presets (addon/dlss_swap.hpp). The key mapping follows the NGX SDK header.
+struct SrOverrides {
+  int perf_quality = -1;                     // an NVSDK_NGX_PerfQuality_Value to force; -1 keeps the game's
+  std::array<unsigned int, 6> presets = {};  // per PRESET_KEYS entry: a render preset to force; 0 keeps the game's
+  std::optional<bool> auto_exposure;         // force NVSDK_NGX_DLSS_Feature_Flags_AutoExposure on or off
+
+  [[nodiscard]] bool Any() const {
+    return perf_quality >= 0 || auto_exposure.has_value()
+           || std::ranges::any_of(presets, [](unsigned int preset) { return preset != 0u; });
+  }
+};
+
+// Applies `overrides` to a SuperSampling create's parameter block. The game's value of every key it changes
+// goes into `saved` first, so the create detour can put it back on every path.
+void ApplySrOverrides(NVSDK_NGX_Parameter* parameters, const SrOverrides& overrides, std::vector<SavedParameter>* saved);
 
 // DLSS.Hint.Render.Preset.<Mode>, in SrOverrides::presets and ui::DlssPresetMode order.
 inline constexpr std::array<const char*, 6> PRESET_KEYS = {

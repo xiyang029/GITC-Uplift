@@ -160,7 +160,7 @@ class Session {
   void NoteFacesWanted(bool wanted);
   void NoteFacesWanted(uint8_t stage, bool wanted);
   [[nodiscard]] SessionStatus Status() const;
-  // Frame skip: the passes this session runs. A carried frame stands in for the network's own, which is the same thing only on a single pass.
+  // The passes this session runs.
   [[nodiscard]] uint32_t PassCount() const { return pass_count_; }
 
  private:

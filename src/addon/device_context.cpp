@@ -172,10 +172,6 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
     logged_after_dlss_ = false;
   }
   NotePlacementChange();
-  // Frame skip (MFG-Unlocker's Boost, ported): the setting's cycle decides which presents run NR's network and which carry the last change it made. One flag
-  // for the whole present, so every stage of a split chain agrees. The cycle starts on the network, so every carry has a frame behind it to carry from.
-  const uint32_t half_rate_period = ui::HalfRatePeriod(config_.half_rate);
-  half_rate_phase_ = (half_rate_period > 1u ? (half_rate_phase_ + 1u) % half_rate_period : 0u);
   // The panel's own frame rate, once a minute, on the same clock as the pipeline's GPU timings: a saving the GPU timings show
   // only counts if the frames really leave faster, and the two numbers are only comparable side by side.
   if (now - last_rate_report_ >= std::chrono::seconds(60)) {
@@ -342,8 +338,7 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   ApplyLookConfig(last_present_.value_or(std::chrono::steady_clock::now()), group);
   host->TargetBarrier(entry_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
   // Turning the motion-vector source off nulls the resource on this very frame, so the rect has to go
-  // with it: a rect and no resource is not "no vectors", it is a rectangle pointing at nothing, and a
-  // frame skip carry that reads it takes the device down (observed switching DLSS -> off with skip on).
+  // with it: a rect and no resource is not "no vectors", it is a rectangle pointing at nothing.
   const bool dlss_motion_available = (motion_is_dlss && config_.motion_vectors && motion != nullptr);
   frame_target_.dlss_motion = {.resource = (dlss_motion_available ? motion : nullptr),
                                .rect = (dlss_motion_available ? dlss_motion_region : nr::Rect{})};
@@ -637,43 +632,6 @@ void DeviceContext::ApplyLookConfig(std::chrono::steady_clock::time_point now, u
   if (group > 0u && group < chain_.group_count) {
     look.keep_faces.enabled = (look.keep_faces.enabled && LaterStageKeepsFaces(chain_.groups[group].stage));
   }
-  // Frame skip: the setting says whether it is on, this present's place in the cycle says whether the network
-  // runs on it. It also needs vectors to carry with: turning the motion-vector source off leaves half_rate
-  // set, and a carry then runs on a plan with no boost_motion. Gate on the source, not only the period.
-  // Counted per recording, not per present: ApplyLookConfig runs once for each group of the chain, so a chain of
-  // several groups spends more than one of these on a single present.
-  const bool stand_down = skip_stand_down_ > 0u;
-  if (stand_down) --skip_stand_down_;
-  const bool half_rate_on =
-      (ui::HalfRatePeriod(config_.half_rate) > 1u) && config_.motion_vectors && !stand_down;
-  // A change in this value retires and rebuilds the set's boost surfaces (NrPipeline::SetLookConfig). Clicking
-  // the row back and forth queues one full set per click, and a retired set cannot go until the GPU passes
-  // its mark -- ten clicks in a row is ten sets still on the queue, and the device runs out of memory (which
-  // arrives as a device removal, not as an allocation failure). Waiting once per actual change keeps one
-  // switch's retirement finished before the next queues another.
-  if (half_rate_on != half_rate_applied_) {
-    half_rate_applied_ = half_rate_on;
-    if (timeline_ != nullptr) {
-      const std::string_view late = timeline_->WaitIdle(std::chrono::milliseconds(250));
-      if (!late.empty()) {
-        nr::Logf(nr::LogLevel::WARN,
-                 "NR: the GPU did not go idle within 250 ms of a frame-skip switch ({}); its surfaces are left to their marks",
-                 late);
-      }
-    }
-  }
-  look.half_rate = half_rate_on;
-  look.half_rate_skip = (look.half_rate && half_rate_phase_ != 0u);
-  look.half_rate_period = ui::HalfRatePeriod(config_.half_rate);
-  // Frame skip (2026-10-31): a skipped frame's carry does not follow the foveation warp, so SettleLayout stands the grid down to
-  // uniform while it is on. These two only shape a foveated grid (a uniform one's ceiling is a gain), so they go with it -- here,
-  // after the router has picked one, and not in LookConfigFrom, which the Vulkan route shares and where frame skip never runs.
-  if (look.half_rate) {
-    look.fixes.density_on_base = false;
-    look.fixes.edge_density_attenuation = 1.f;
-  }
-  // Frame skip: the timings are taken against the present queue's clock, which only the device context knows.
-  present_source_->Pipeline().NotePresentQueue(PresentQueue());
   present_source_->Pipeline().SetLookConfig(look);
 }
 
@@ -839,10 +797,6 @@ void DeviceContext::NotePlacementChange() {
     }
     present_source_->Pipeline().RetireSetsFrom(0u);
   }
-  // And no frame skip until the new stage has run the network itself for a couple of recordings: a skipped
-  // frame carries the previous present's result, which was built against the old stage's canvas.
-  skip_stand_down_ = 2u;
-  half_rate_phase_ = 0u;
 }
 
 sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, std::chrono::steady_clock::time_point now) {
@@ -903,10 +857,7 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
       nr::foveation::FromPercent(config_.foveation_width, config_.foveation_height, config_.foveation_falloff_x, config_.foveation_falloff_y,
                                  config_.foveation_edge, output.width, output.height),
       output.width, output.height, uniform.width, uniform.height);
-  // Frame skip (2026-10-31): a skipped frame carries the network's change by walking the accumulated vectors, and
-  // that walk does not follow the warp -- with the edges compressed the two disagree by more the faster the view
-  // moves, which is where NR's detail was lost. The two never run together.
-  const bool foveation_on = (config_.foveation && config_.half_rate == ui::HalfRate::OFF);
+  const bool foveation_on = config_.foveation;
   const nr::foveation::Plan plan = nr::foveation::MakePlan(foveation_on, foveation_params, uniform.width, uniform.height);
   const nr::Size image = {plan.width, plan.height};
   const nr::Size canvas = ((before_upscaling && !nr::MeetsNrFloor(image)) ? sources::CanvasSize(image) : image);

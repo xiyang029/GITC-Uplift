@@ -91,8 +91,6 @@ struct FrameConfig {
   uint32_t foveation_falloff_y = 15;  // fall-off on the top/bottom sides: short enough that the vertical ramp reaches the edge density
   uint32_t foveation_edge = 50;       // the density the fall-off reaches at the edge, in percent (25 to 100, where 100 is off)
   bool pre_upscale = false;  // v2 design §3.9: NR before DLSS-SR upscales
-  // Frame skip (MFG-Unlocker's Boost, ported): the network runs on one frame of the setting's cycle, and the frames it skips carry the last change it made.
-  ui::HalfRate half_rate = ui::HalfRate::OFF;
   sources::LookConfig look;  // Plan 5: the look stage, the colour fixes, Mask, UI correction, passes 2..10
   bool launchpad_motion = true;       // Plan 6: MotionVectors Auto, Launchpad or (2026-10-08) Lumenite: the Present path may bind UPLIFT_MV
   bool uplift_mv_lumenite = false;    // 2026-10-08: UPLIFT_MV holds Lumenite's vectors (Uplift.fx compiled with UPLIFT_USE_LUMENITE): the readouts name it
@@ -499,17 +497,6 @@ class DeviceContext {
   std::string output_message_;  // device removal, unsupported format or colour space
   std::string_view skip_reason_;
   bool skip_from_session_ = false;  // M1 fix round 1: skip_reason_ is Session::Evaluate's own
-  uint32_t half_rate_phase_ = 0u;  // Frame skip: where this present sits in the setting's cycle; the network runs on phase 0
-  // Frame skip: recordings left to run the network on, after the placement changed. A skipped frame carries the
-  // previous frame's result, so the state it carries was built for the old stage's canvas; switching stages
-  // while one is in flight is what the panel's placement rows do several times a second, and it takes the
-  // device with it. Running the network for these recordings lets every stage's carry state fall away on its
-  // own before a skip is asked for again. Counted per recording: a chain of several groups calls ApplyLookConfig
-  // -- and so spends one of these -- once for each group.
-  uint32_t skip_stand_down_ = 0u;
-  // Frame skip: the value the last recording ran with, so a switch (not a frame) is what waits for the GPU and
-  // retires the set's surfaces.
-  bool half_rate_applied_ = false;
 
   std::chrono::steady_clock::time_point last_rate_report_{};  // the panel's frame rate, logged beside the pipeline's own GPU timings
   sources::PresentTarget frame_target_;
