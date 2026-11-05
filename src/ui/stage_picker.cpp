@@ -62,7 +62,11 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
   const float caption_bottom = ImGui::GetCursorScreenPos().y;
   const ImVec2 origin(diagram_origin.x, caption_bottom + ImGui::GetTextLineHeightWithSpacing());
   const float width = diagram_width;
-  const bool folded = width < em * 52.f;
+  const bool folded = !style::FitsStageColumns(width);
+  // The panel's one column rule: the six nodes sit on one line only while the diagram is FitsStageColumns wide,
+  // and the sections under it take their two columns from this same answer rather than from a width of their own,
+  // so a folded diagram is never followed by a two-column reading.
+  widgets::stage_columns = !folded;
   const int columns = folded ? 3 : 6;
   const float margin = std::min(0.55f * em, width * 0.025f);
   const float gap = std::min(1.05f * em, width * 0.04f);
@@ -110,8 +114,8 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     if (ImGui::CalcTextSize(label.c_str()).x > cell - em * (i == 4 ? 1.5f : 0.35f)) label = gui::Display(compact[i]);
     CenterText(draw, c, (i == 1 && !view.setup.before_upscaling_on_rr) || (i == 4 && !view.frame_generation_active) ? wire : ink, label);
     if (gui::IsWindowHovered() && gui::IsMouseHoveringRect(lo, hi)) {
-      if (i == 1) gui::SetTooltip("Ray Reconstruction denoises and upscales together when used in place of DLSS Super Resolution.");
-      else gui::SetTooltip("%s", nodes[i]);
+      if (i == 1) widgets::ItemTooltip("Ray Reconstruction denoises and upscales together when used in place of DLSS Super Resolution.");
+      else widgets::ItemTooltip("%s", nodes[i]);
     }
   }
 
@@ -154,7 +158,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     const bool clicked = ImGui::Button(label.c_str(), {button_w, button_h});
     gui::EndDisabled();
     if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || (gui::GetIO().NavVisible && gui::IsItemFocused())) {
-      gui::SetTooltip("%s", why.empty() ? (i == 0 && view.setup.before_upscaling_on_rr ? "NR works on Ray Reconstruction's input." : TIPS[i]) : why.data());
+      widgets::ItemTooltip("%s", why.empty() ? (i == 0 && view.setup.before_upscaling_on_rr ? "NR works on Ray Reconstruction's input." : TIPS[i]) : why.data());
     }
     gui::PopStyleColor(run.count ? 2 : 1);
     gui::PopStyleVar(3);

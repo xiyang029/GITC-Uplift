@@ -126,12 +126,13 @@ inline float RowGap() { return Units(1.25f); }
 inline float BlockGap() { return Units(3); }
 inline float SectionGap() { return Units(4.5f); }
 
-// Whether the panel is wide enough for two groups side by side (PairedGroups). Below it the groups stack, one
-// under the other, which is how the panel opens: it is set to Units(112) at its first frame, and the two
-// columns are a thing the player asks for by dragging the panel wider, not the default reading. Upstream's
-// number (Units(144)) is wider than any panel it ever set, so its halves only met on a hand-widened one; this
-// keeps that meaning without making the default panel a two-column one.
-inline bool FitPairedGroups() { return gui::GetContentRegionAvail().x >= Units(130); }
+// The panel's two-column reading is one number, and it is the stage diagram's: a section shows its two groups
+// side by side only where the diagram above draws its six nodes on one line. Below that the diagram folds onto
+// two rows of three, and the groups stack one under the other, because a column that narrow leaves a row
+// neither room for its label beside its control nor a diagram above it that explains what the columns are.
+// The panel opens at Units(112), so both states are reachable by dragging it.
+constexpr float kStageColumnsEm = 52.f;
+inline bool FitsStageColumns(float width) { return width >= gui::GetFontSize() * kStageColumnsEm; }
 
 inline ImU32 ToU32(const ImVec4& color) { return ImGui::GetColorU32(color); }
 

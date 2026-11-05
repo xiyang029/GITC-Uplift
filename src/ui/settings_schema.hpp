@@ -54,6 +54,17 @@ inline constexpr uint32_t NETWORK_PRESET = 1u << 9u;  // creation configuration,
 // 2026-10-17: how far past its slider's end a FLOAT accepts a typed value (Ctrl+click), as a multiple of that end.
 inline constexpr double TYPED_PAST_SLIDER = 10.0;
 
+// The rows that are a share of the output: the four custom scales (25-100) and the render scales and foveation
+// percentages (33-100). A row, its label and its reported value all say them as a whole percentage, % after the
+// number -- one rule, so the panel, the reset arrows and the saved-value notes cannot drift apart again.
+[[nodiscard]] inline bool FloatPercentSetting(std::string_view key) {
+  return key == "ResolutionScale" || key == "ResolutionScaleY" || key == "ResolutionScaleAfterDlss" ||
+         key == "ResolutionScalePresent";
+}
+[[nodiscard]] inline bool IntPercentSetting(std::string_view key) {
+  return key.starts_with("DLSSRenderScale") || key.starts_with("Foveation");
+}
+
 // One persisted setting (v2 design §3.16): the single description load, save, sanitising, resets
 // and the overlay rows all read.
 struct SettingDescriptor {
@@ -96,7 +107,7 @@ void ResetSection(Settings* settings, SettingSection section);
 [[nodiscard]] Settings DefaultsView(Settings mine);
 // G2: every row back to its default, the hotkey and the hidden DLSS-SR overrides included, except Enable and BOOKKEEPING rows.
 void RestoreAllDefaults(Settings* settings);
-// The value as the overlay shows it: "1.00", "on", "Model A", "automatic", "none", "empty".
+// The value as the overlay shows it: "1.00", "50 %", "on", "Model A", "automatic", "none", "empty".
 [[nodiscard]] std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settings& settings);
 // The largest valid value: `max`, the last choice index for a CHOICE, or for a FLOAT what Ctrl+click may type past its slider (TYPED_PAST_SLIDER).
 [[nodiscard]] double DescriptorMax(const SettingDescriptor& descriptor);

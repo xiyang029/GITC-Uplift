@@ -17,6 +17,7 @@
 #include <format>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "ui/overlay_style.hpp"
 
@@ -32,8 +33,42 @@ inline void SecondaryText(const char* text) {
   gui::TextUnformatted(text);
 }
 
+// One line in any of the panel's own colours for exactly as long as the call: the accent of a working
+// status card, the amber of one that stopped, the red of a latched lock. Each of those used to push and pop
+// its colour at the call site.
+inline void ColoredText(const ImVec4& color, const char* text) {
+  StyleScope scope;
+  scope.Color(ImGuiCol_Text, color);
+  gui::TextUnformatted(text);
+}
+
+// The secondary colour, wrapped to the panel: a reason that runs past one line.
+inline void SecondaryWrapped(const char* text) {
+  StyleScope scope;
+  scope.Color(ImGuiCol_Text, tokens::kTextSecondary);
+  gui::TextWrapped("%s", text);
+}
+// A note wrapped to the panel's width, formatted like the tooltips are: reasons and status lines run past
+// one line, and every one of them used to call ImGui::TextWrapped itself.
+inline void Wrapped(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  const std::string text = gui::Formatted(fmt, args);
+  va_end(args);
+  gui::TextWrapped("%s", text.c_str());
+}
+
+// The frame a control last drew a tooltip in. A row asks for its own bubble once the whole row is drawn
+// (overlay.cpp's row end), so without this a segment group inside that row opened a second one beside the
+// control's: ImGui opens one window per BeginTooltip call, and both were the same text twice.
+inline int tooltip_frame = -1;  // ImGui's frame count is an int, and starts above -1
+
+// True once anything has drawn a tooltip this frame.
+inline bool TooltipDrawnThisFrame() { return tooltip_frame == ImGui::GetFrameCount(); }
+
 // The contents of a tooltip: wrapped after kTooltipEm font sizes, as the panel's own tooltips do.
 inline void TooltipBody(const std::string& text) {
+  tooltip_frame = ImGui::GetFrameCount();
   StyleScope pad;
   pad.Var(ImGuiStyleVar_WindowPadding, ImVec2(Px(tokens::kTooltipPadX), Px(tokens::kTooltipPadY)));
   ImGui::PushTextWrapPos(ImGui::GetFontSize() * tokens::kTooltipEm);
@@ -98,6 +133,10 @@ inline float row_slot_x = 0.f;
 // already moved by the time the control is drawn.
 inline bool row_stacked = false;
 inline float row_label_y = 0.f;
+// Whether the stage diagram is drawing its six nodes on one line. DrawStagePicker sets it every frame, and the
+// sections under the diagram take their two columns from it (PairedGroups): one rule for the whole panel, so the
+// columns can never appear under a diagram that has folded onto two rows of three.
+inline bool stage_columns = false;
 
 // A settings row: the label in the secondary colour in a fixed-width left column, then the control, then
 // the reset slot one frame high at the end. The slot is reserved whether or not the row shows its reset
@@ -309,15 +348,16 @@ inline bool Slider(const char* id, float* value, float min, float max, const cha
 // The integer slider, drawn as Slider: the same rail, knob and value column over ImGui's SliderInt, so a row
 // of whole numbers (a percentage, a mode, the pass count) sits in the same visual system as the rest. Call
 // after RowLabel. Ctrl+click typing works as on Slider: while the value is typed, ImGui's own slider draws.
-// *dragging, when asked for, is ImGui's held state for this frame.
-inline bool SliderInt(const char* id, int* value, int min, int max, bool* dragging = nullptr) {
+// *dragging, when asked for, is ImGui's held state for this frame. `suffix` follows the number (" %" for a share),
+// as Slider's own format does; it is drawn with the value, the field under it still takes a bare number.
+inline bool SliderInt(const char* id, int* value, int min, int max, bool* dragging = nullptr, const char* suffix = "") {
   static ImGuiID typing = 0;
   const ImGuiID item = ImGui::GetID(id);
   const bool was_typing = (typing == item);
   const float height = ImGui::GetFrameHeight();
   const float knob = height * 0.30f;
   char text[32];
-  std::snprintf(text, sizeof(text), "%d", *value);
+  std::snprintf(text, sizeof(text), "%d%s", *value, suffix);
   const float text_width = ImGui::CalcTextSize(text).x;
   // The number sits a small gap after its rail, not in a panel-wide column: a column wide enough for the widest
   // value ("500 ms") leaves a short one ("50") most of an em of empty rail. Its right edge still lands on the
@@ -364,6 +404,39 @@ inline bool SliderInt(const char* id, int* value, int min, int max, bool* draggi
   ImGui::GetWindowDrawList()->AddText(ImVec2(hi.x + value_width - text_width, (lo.y + hi.y - gui::GetTextLineHeight()) * 0.5f),
                                       ImGui::GetColorU32(ImGuiCol_Text), text);
   return changed;
+}
+
+// A typed whole number: the row's control, for a setting whose range is past a slider's (Pass count). ImGui
+// draws and edits the field; this says what the caller needs to know about its last frame -- whether the value
+// changed, and whether the field is held, which an APPLY_ON_RELEASE row waits for (a typed value applies once on
+// release, exactly as a dragged one does). Call after RowLabel.
+inline bool NumberField(const char* id, int* value, int step = 1, int fast = 100, bool* active = nullptr) {
+  const bool edited = gui::InputInt(id, value, step, fast);
+  if (active != nullptr) {
+    *active = ImGui::IsItemActive();
+  }
+  return edited;
+}
+
+// A typed text setting: the row's control. The caller's string is copied into a buffer ImGui can edit and written
+// back only when it changed; `capacity` is the number of characters the field accepts. Returns true on the frame
+// the text changed.
+inline bool TextField(const char* id, std::string* text, size_t capacity = 1024) {
+  // One buffer for the frame's edit, not one per call: a text row redraws every frame, and this is its only use
+  // of <vector>. Grown once, then reused; the copy below always writes the bytes ImGui reads.
+  static std::vector<char> buffer;
+  if (buffer.size() < capacity) {
+    buffer.assign(capacity, '\0');
+  } else {
+    buffer[0] = '\0';
+  }
+  text->copy(buffer.data(), capacity - 1u);
+  buffer[std::min(text->size(), capacity - 1u)] = '\0';
+  if (!gui::InputText(id, buffer.data(), capacity)) {
+    return false;
+  }
+  *text = buffer.data();
+  return true;
 }
 
 // A link at the right end of the current line (screen x `right`). The caller keeps the line's baseline; the
@@ -430,6 +503,19 @@ inline void GroupHeading(const char* title, const char* note = nullptr) {
   }
 }
 
+// A table with the panel's cell padding for exactly as long as it is drawn, and the caller's setup and rows in
+// between: the two tables the panel builds (the runtime facts and the executed passes) each pushed and popped
+// that padding around their own BeginTable, and each had to check whether ImGui refused the table.
+template <typename Body>
+void Table(const char* id, int columns, ImGuiTableFlags flags, const ImVec2& padding, Body body) {
+  StyleScope cell;
+  cell.Var(ImGuiStyleVar_CellPadding, padding);
+  if (ImGui::BeginTable(id, columns, flags)) {
+    body();
+    ImGui::EndTable();
+  }
+}
+
 // A surface sunk into the panel holding `contents`: the panel's card tone, its radius, a hairline edge and the
 // panel's own padding. `min_height` keeps a group of one row level with the taller group beside it.
 template <typename Contents>
@@ -453,12 +539,18 @@ void Panel(const char* id, Contents contents, float min_height = 0.f) {
   gui::SetCursorScreenPos(ImVec2(gui::GetCursorScreenPos().x, card_bottom + gui::GetStyle().ItemSpacing.y));
 }
 
-// Two halves of a section side by side while the panel is wide enough for both, and stacked when it is not:
-// ReShade docks the panel narrow, and two columns there leave neither side room for a label beside its control.
-// `id` keeps the two halves' ImGui ids apart.
+// The coloured bar down the left edge of a callout, from `top` to `bottom`: the safety lock's red rule, drawn
+// after its panel closed so the bar spans the height the panel turned out to have.
+inline void SideAccent(const ImVec2& top, float bottom, const ImVec4& color) {
+  ImGui::GetWindowDrawList()->AddRectFilled(top, ImVec2(top.x + 0.75f * LabelGap(), bottom), ToU32(color));
+}
+
+// Two halves of a section side by side while the stage diagram above draws its six nodes on one line, and
+// stacked when it folds onto two rows of three: the panel has one width rule for this (stage_columns), so two
+// columns never appear under a diagram that has folded. `id` keeps the two halves' ImGui ids apart.
 template <typename Left, typename Right>
 void PairedGroups(const char* id, Left left, Right right) {
-  if (!FitPairedGroups()) {
+  if (!stage_columns) {
     gui::PushID(id);
     left();
     NextGap(BlockGap());
@@ -601,6 +693,46 @@ inline void SegmentTip(const std::string_view& why, const std::string_view& tip)
   }
 }
 
+// A dropdown of long or many choices, where a segment row would clip its words: the Resolution modes, a later
+// pass's Runs at. The preview is the choice that runs, which is the caller's to pick and need not be the
+// stored one. Each choice carries its own reason it cannot be picked (greyed, unclickable, the reason on
+// hover after "Unavailable here: ", below its own text). The width is the row's control column, which
+// RowLabel sets. Returns the index picked this frame, or -1. A row of at most three choices that fit draws as
+// Segmented instead (this is the same fallback Segmented itself takes, one way round).
+inline int Combo(const char* id, const char* const* english, int count, int preview,
+                 const std::string_view* why = nullptr) {
+  constexpr int kMaxItems = 8;  // the longest choice set today (QUALITY_MODES) is seven
+  count = (std::min)(count, kMaxItems);
+  std::string shown[kMaxItems];
+  const char* labels[kMaxItems] = {};
+  for (int i = 0; i < count; ++i) {
+    shown[i] = gui::Display(english[i]);
+    labels[i] = shown[i].c_str();
+  }
+  // ImGui draws a combo's label to the right of the box, so a caller passing a visible id leaks that text
+  // beside the frame; pass only the part ImGui does not draw. Same rule as Segmented's fallback.
+  const std::string combo_id = (id[0] == '#' && id[1] == '#') ? std::string(id) : std::string("##") + id;
+  const auto reason = [why](int i) -> const std::string_view& {
+    static const std::string_view none;
+    return (why != nullptr) ? why[i] : none;
+  };
+  int picked = -1;
+  if (gui::BeginCombo(combo_id.c_str(), preview >= 0 && preview < count ? labels[preview] : nullptr)) {
+    for (int i = 0; i < count; ++i) {
+      gui::BeginDisabled(!reason(i).empty());
+      if (gui::Selectable(labels[i], i == preview)) {
+        picked = i;
+      }
+      gui::EndDisabled();
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        SegmentTip(reason(i), {});
+      }
+    }
+    gui::EndCombo();
+  }
+  return picked;
+}
+
 // Equal-width buttons in one row, the selected one in the accent colour as a wash, its words in the accent
 // and a hairline of the accent around it: the group still says which option is live without a saturated
 // block per row. `current` is -1 when no segment matches the setting; `tips` is per segment and shows on
@@ -712,6 +844,72 @@ inline int Segmented(const char* id, const char* const* english, int count, int 
   }
   gui::PopID();
   return clicked;
+}
+
+// A field that captures the next key pressed: the Enable hotkey's button, in both its states. `capturing` draws
+// the button that asks for a key, `0` the one that names the key already set (`label` is the caller's, since it
+// is a key name and not a sentence to translate). The button goes onto a line of its own when its words do not
+// fit the rest of the row, which it measures itself. Returns what the pointer did to it this frame; the caller
+// keeps the capture's own state (when it started, whether the overlay closed under it) and decides what a
+// right-click means.
+struct KeyCaptureHit {
+  bool clicked = false;
+  bool right_clicked = false;
+  bool hovered = false;
+};
+inline KeyCaptureHit KeyCaptureButton(const char* label, bool capturing) {
+  const char* text = capturing ? "Press a key (right-click clears)" : label;
+  const float frame = ImGui::GetStyle().FramePadding.x * 2.f;
+  if (gui::CalcTextSize(text).x + frame > gui::GetContentRegionAvail().x) {  // never half a button: a line of its own
+    gui::NewLine();
+  }
+  const bool pressed = gui::Button(text);
+  KeyCaptureHit hit;
+  hit.clicked = pressed;
+  hit.right_clicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
+  hit.hovered = ImGui::IsItemHovered();
+  return hit;
+}
+
+// A dialog that asks before a setting takes effect: the words, then a line of buttons that cancel and confirm.
+// `open` is the caller's flag, cleared on either answer and on Escape; `confirm_label` is the button that says
+// yes. Returns true on the frame it was confirmed -- the caller applies the change then, never before. The
+// caller opens it by name: OpenDialog(id). `width` is the dialog's width in ems, 0 for the text's own.
+inline bool ConfirmDialog(const char* id, const char* body, const char* cancel_label, const char* confirm_label, bool* open,
+                          float width = 0.f) {
+  if (open == nullptr || !*open) {
+    return false;
+  }
+  // The caller's flag is the request, and it stays set while the dialog is up: opening it only once it is not
+  // already open, so a frame that redraws it does not push it back onto the stack.
+  if (!gui::IsPopupOpen(id)) {
+    if (width > 0.f) {
+      gui::SetNextWindowSize(ImVec2(width * gui::GetFontSize(), 0.f), ImGuiCond_Appearing);
+    }
+    gui::OpenPopup(id);
+  }
+  bool shown = true;
+  bool confirmed = false;
+  if (!gui::BeginPopupModal(id, &shown, ImGuiWindowFlags_AlwaysAutoResize)) {
+    *open = false;  // dismissed from outside (Escape, a click away) or never shown: the question is over
+    return false;
+  }
+  gui::TextWrapped("%s", body);
+  gui::Separator();
+  const bool cancel = gui::Button(cancel_label);
+  gui::SetItemDefaultFocus();
+  gui::SameLine();
+  const bool accept = gui::Button(confirm_label);
+  if (cancel || accept || gui::IsKeyPressed(ImGuiKey_Escape)) {
+    *open = false;
+    gui::CloseCurrentPopup();  // answered: the dialog goes away on this frame, not the next
+  }
+  confirmed = accept;
+  gui::EndPopup();
+  if (!shown) {
+    *open = false;
+  }
+  return confirmed;
 }
 
 // The one action a callout offers -- a safety lock's Clear latch, the status card's Retry: the accent as its

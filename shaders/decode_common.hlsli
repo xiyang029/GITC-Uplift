@@ -133,37 +133,33 @@ void AccumulateTap(float4 change, float2 position, float2 tap, float2 radius, fl
 // The centre 2x2 comes first because it is both the Classic answer and the guide. The tent's half-width is
 // SPATIAL_RADIUS, so along each axis only the three offsets the cell's own centre falls between can carry
 // weight: -1..1 while the fraction is below 0.5, 0..2 above -- nine cells, four of them the 2x2. The five
-// that remain are the outer row, the outer column and the far corner, and all five sit inside the support:
-// the corner holds 1/9 of its weight at fraction 0 and falls to zero exactly at 0.5, and leaving it out pulled
-// the kernel's centroid 0.042 px diagonally -- worst at fraction 0, which is the plateau, where the field is
-// 1:1. The row and the column on the opposite side sit at exactly zero at every tap (four loads and four exp2
-// per pixel for nothing); only the hull below reads them, for its range.
+// that remain are the outer row, the outer column and the far corner, and all five sit inside the support now
+// that the floor is SPATIAL_RADIUS: the near ring sits between one and 1.5 texels away, so it carries real
+// weight (19 % of the total at a square grid), and the corner trails off from 1/9 at fraction 0 to zero at 0.5,
+// whose omission pulled the kernel's centroid 0.042 px diagonally. The row and the column on the opposite side
+// sit at exactly zero at every tap (four loads and four exp2 per pixel for nothing); only the hull below reads
+// them, for its range.
 //
 // `want_range` is ChangeBands' clamp flag. It only needs the hull when a base gain under CLAMP_SLACK can
 // pull the mix below it; the default cannot, so that path skips the hull's min/max entirely. The value is
 // uniform, so the branch costs nothing. The hull is over every tap, the zero-weight ones included, so the
 // clamp sees the range it always has: that is what the second loop loads them for.
 float3 ChangeEdgeAware(float2 position, uint2 size, float density, float2 axis_density, bool want_range,
-                       out float guide, out float3 tap_min, out float3 tap_max, out float3 classic, out float reach) {
+                       out float guide, out float3 tap_min, out float3 tap_max, out float3 classic) {
   const int2 base = int2(floor(position));
   const float2 fraction = position - float2(base);
   const float range_k = RANGE_K / density;
   // The tent's half-width per axis, in work texels: output-space round, so an axis the grid resolves less often
   // gets a proportionally narrower one.
   //
-  // The floor is one texel, and the band is scaled down to match rather than the tent widened to hide it. A tent
-  // narrower than 1 + fraction reaches no outer tap at all, and the nine-tap sum then collapses to its centre
-  // 2x2 -- which is the bilinear sample, so `edge` equals `classic`, the detail band is exactly zero and
-  // edge-aware quietly turns into Classic. Widening the tent past its output-space width instead would average
-  // taps the grid cannot resolve, which is a false sharpness. So the tent stops at one texel and the caller
-  // multiplies the band by how much of the intended support survived: a kernel that only reaches 60 % of 1.5
-  // pixels has seen 60 % of the neighbourhood it was going to describe, and gets 60 % of the say.
+  // The floor is SPATIAL_RADIUS itself (2026-11-05). A floor of one texel looked like it kept the nine taps alive,
+  // but a tent exactly one texel wide puts all of its weight on the centre 2x2 -- and there the tent's weights are
+  // the bilinear weights, tap for tap. So `edge` came out equal to `classic`, the detail band was exactly zero,
+  // and edge-aware quietly became Classic everywhere the grid was coarser than 67 %: Quality, Balanced,
+  // Performance, 33 % and 25 % all measured 0 % outer-tap weight. Flooring at the kernel's own half-width keeps the
+  // support the kernel was designed around at every scale, which is what upstream's fixed 1.5 does.
   const float2 ideal = SPATIAL_RADIUS / max(axis_density, float2(1.f, 1.f));
-  const float2 radius = max(ideal, float2(1.f, 1.f));
-  // Reach is measured on the ideal width, not on the floored one: the floor exists to keep nine taps alive, and
-  // reading the band's scaling off it would flatten that scaling for every grid coarser than 67 % -- 50 %, 33 %
-  // and 25 % would all report the same 0.67 and lose the distinction the scale is for. This is 1 / max axis.
-  reach = saturate(min(ideal.x, ideal.y) / SPATIAL_RADIUS);
+  const float2 radius = max(ideal, float2(SPATIAL_RADIUS, SPATIAL_RADIUS));
 
   const float4 c00 = ChangeTap(base, size);
   const float4 c10 = ChangeTap(base + int2(1, 0), size);
@@ -235,13 +231,6 @@ float EditDarkness(float guide) {
 // smooth, so the correction is zero and the result is `classic * low_gain` -- exactly what DecodePixel's one-load
 // path returns -- and by density 1 / KERNEL_FADE_IN it is the full kernel.
 //
-// `reach` (2026-10-29) is the third gate, and the one an anisotropic Custom scale needs: the tent stops at one
-// work texel per axis, so an axis coarser than SPATIAL_RADIUS output pixels per texel cannot span the support
-// the kernel was designed around. Rather than widen the tent -- which would average taps the grid cannot resolve
-// and read as false sharpness -- ChangeEdgeAware reports how much of that support survived and the band scales
-// by it. At a square grid reach is 1 and nothing changes; at X 60 % it is about 0.6, so the detail band keeps
-// 60 % of its say instead of the kernel pretending to see a neighbourhood it never sampled.
-//
 // Clamp: with a base gain at most 1 both bands are convex combinations of the same taps, so the band cannot
 // leave the hull upward; the base band alone can sit below it, which is what a base gain under 1 asks for, so
 // the floor is the lower of the hull and the base band, less CLAMP_SLACK. A dip rolls off over that slack
@@ -251,12 +240,9 @@ float EditDarkness(float guide) {
 // With the default (1) the excursion is zero, so the caller does not hand the hull over at all; the flag is
 // uniform, and only a base gain under 0.85 turns it on.
 float3 ChangeBands(float3 classic, float3 edge, float3 tap_min, float3 tap_max, float low_gain, float density,
-                   float guide, bool clamp_bands, float reach) {
+                   float guide, bool clamp_bands) {
   const float dark = EditDarkness(guide);
-  const float fade = saturate((density - 1.f) * KERNEL_FADE_IN);
-  // Reach multiplies the detail band: it is how much of the neighbourhood the kernel actually saw, at or below 1
-  // wherever the grid is coarser than the output (0.67 at Quality).
-  const float detail = fade * reach;
+  const float detail = saturate((density - 1.f) * KERNEL_FADE_IN);
   const float3 bands = classic * low_gain + (edge - classic) * detail;
   if (!clamp_bands) return dark * bands;
   const float3 base = classic * low_gain + (edge - classic) * min(detail, low_gain);
@@ -361,10 +347,8 @@ float4 DecodePixel(uint2 pixel) {
         float guide;
         float3 tap_min, tap_max;
         float3 classic;
-        float reach;
-        const float3 edge =
-            ChangeEdgeAware(position, size, density, axis, hull, guide, tap_min, tap_max, classic, reach);
-        change = ChangeBands(classic, edge, tap_min, tap_max, guided_low_gain, density, guide, hull, reach);
+        const float3 edge = ChangeEdgeAware(position, size, density, axis, hull, guide, tap_min, tap_max, classic);
+        change = ChangeBands(classic, edge, tap_min, tap_max, guided_low_gain, density, guide, hull);
       }
     } else {
       change = ChangeBilinear(FovFullToWorkPos(pixel, uint2(width, height), size, uint2(foveation_x, foveation_y),

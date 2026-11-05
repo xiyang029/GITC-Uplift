@@ -31,6 +31,16 @@ git clone --depth 1 --filter=blob:none --sparse https://github.com/mavismmg/MFGA
 git -C /tmp/ref sparse-checkout set --no-cone "/src/addons/mfgunlock/xemfg/vendor/" "/src/addons/mfgunlock/xmx_generator.hpp"
 ```
 
+Compare against **`develop`**, never `main`: the code is on `develop`, and `main` has only ever taken
+`README.md` edits. Measured 2026-11-05: `develop` == `3b8889f` (identical), `main` 5 `README.md` commits ahead of it.
+
+```
+curl -s "https://api.github.com/repos/mavismmg/MFGAdaUnlock-RenoDx/compare/3b8889f...develop" | grep -E '"status"|"filename"'
+```
+
+`identical` means there is nothing to port. When it moves, the filenames triage it: `src/addons/mfgunlock/xemfg/vendor/`
+and `xmx_generator.hpp` are ABI code and need the sparse clone above; `README.md` and docs are not a port. Date every check.
+
 Expected differences, nothing else: `#include` lines in `port/model_port.h`, `port/shader_port.h`;
 `port/port_support.h`'s `../xess_mod.h` becoming `xmx/host.hpp`; `cuda/cuda_route.cpp`'s two include paths and its
 dropped empty `native_trace.hpp`. `generator.hpp` came from `xmx_generator.hpp` there; its struct block and five

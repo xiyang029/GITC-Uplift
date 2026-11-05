@@ -538,7 +538,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "ResolutionScale",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::PLACEMENT,
-        .label = "Custom scale (%)",
+        .label = "Custom scale",
         .tooltip = "The work size for Resolution = Custom, in percent of the output's width. Applies when the slider is released.",
         .min = 25.0,
         .max = 100.0,
@@ -562,7 +562,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "ResolutionScaleY",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::PLACEMENT,
-        .label = "Custom scale Y (%)",
+        .label = "Custom scale Y",
         .tooltip = "The height's share of the output for Resolution = Custom while the scales are separate. At 100 the height stays native. "
                    "Applies when the slider is released.",
         .min = 25.0,
@@ -612,7 +612,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "ResolutionScaleAfterDlss",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::PLACEMENT,
-        .label = "Custom scale at After DLSS (%)",
+        .label = "Custom scale at After DLSS",
         .tooltip = "The work size for Resolution at After DLSS = Custom, in percent of the output. Applies when the slider is released.",
         .min = 25.0,
         .max = 100.0,
@@ -636,7 +636,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "ResolutionScalePresent",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::PLACEMENT,
-        .label = "Custom scale at Present (%)",
+        .label = "Custom scale at Present",
         .tooltip = "The work size for Resolution at Present = Custom, in percent of the output. Applies when the slider is released.",
         .min = 25.0,
         .max = 100.0,
@@ -663,7 +663,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "FoveationWidth",
         .kind = SettingKind::UINT,
         .section = SettingSection::PLACEMENT,
-        .label = "Full-density centre width (%)",
+        .label = "Full-density centre width",
         .tooltip = "The centre's width as a share of the screen's width: this part of the image keeps NR's full density at any resolution. A centre wider than the "
                    "grid is clamped to it, which switches the scaling off. Only after upscaling.",
         .min = 5.0,
@@ -676,7 +676,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "FoveationHeight",
         .kind = SettingKind::UINT,
         .section = SettingSection::PLACEMENT,
-        .label = "Full-density centre height (%)",
+        .label = "Full-density centre height",
         .tooltip = "The centre's height as a share of the screen's height, as the width above. On a wide screen the height is usually what the centre can still "
                    "span. Only after upscaling.",
         .min = 5.0,
@@ -689,7 +689,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "FoveationFalloffX",
         .kind = SettingKind::UINT,
         .section = SettingSection::PLACEMENT,
-        .label = "Fall-off length X (%)",
+        .label = "Fall-off length X",
         .tooltip = "How far the density takes to fall from the centre to the edge value along the screen's width, as a share of the screen's height. Longer is "
                    "gentler and leaves the edges sharper; shorter saves more. A fall-off longer than the distance to the edge simply reaches the edge later. "
                    "Only after upscaling.",
@@ -703,7 +703,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "FoveationFalloffY",
         .kind = SettingKind::UINT,
         .section = SettingSection::PLACEMENT,
-        .label = "Fall-off length Y (%)",
+        .label = "Fall-off length Y",
         .tooltip = "The same fall-off along the screen's height, as a share of the screen's height. Shortening it alone is the usual win: a widescreen's aspect "
                    "gives the vertical ramp less room, so a long shared length never reaches the edge there. Only after upscaling.",
         .min = 0.0,
@@ -716,7 +716,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "FoveationEdge",
         .kind = SettingKind::UINT,
         .section = SettingSection::PLACEMENT,
-        .label = "Edge density (%)",
+        .label = "Edge density",
         .tooltip = "The NR density the fall-off reaches at the outermost edge (and Edge x Edge in the corners). 100 % is off. 4K and ultrawide screens are "
                    "happiest well below it. Only after upscaling.",
         .min = 25.0,
@@ -2026,7 +2026,9 @@ std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settin
   const double value = descriptor.get(settings);
   switch (descriptor.kind) {
     case SettingKind::BOOL:   return (value != 0.0 ? "on" : "off");
-    case SettingKind::UINT:   return std::format("{}", static_cast<uint32_t>(value));
+    case SettingKind::UINT:
+      return (IntPercentSetting(descriptor.key) ? std::format("{} %", static_cast<uint32_t>(value))
+                                                : std::format("{}", static_cast<uint32_t>(value)));
     case SettingKind::KEY:    return (value == 0.0 ? std::string("none") : std::format("key {:#04x}", static_cast<uint32_t>(value)));
     case SettingKind::CHOICE: {
       const auto index = static_cast<size_t>(value);
@@ -2036,6 +2038,7 @@ std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settin
       if (descriptor.special.has_value() && value == *descriptor.special) {
         return (value < 0.0 ? std::string("same as Structure") : std::string("automatic"));
       }
+      if (FloatPercentSetting(descriptor.key)) return std::format("{:.0f} %", value);
       if (descriptor.key == "AutoExposureBlend") return std::format("{:.0f} %", value * 100.0);  // 2026-10-09: stored 0..1
       return std::format("{:.2f}", value);
     case SettingKind::TEXT: break;

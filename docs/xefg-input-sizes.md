@@ -45,7 +45,8 @@ XeFG the area both inputs share (`policy::InputArea` reads the game's own `DLSSG
 `DLSSG.MVecs*Subrect*` declaration when there is one, `policy::SharedArea` takes the smaller width and
 height and keeps each input's own origin). XeFG compares these `Input` fields rather than the textures,
 so no copy is ever trimmed. Taken from upstream 1.8.2 (`3b8889f`, "XMX in Dying Light 2, Alan Wake 2
-and Phantom Blade Zero"), which fixed the same refusal for Dying Light 2 and Phantom Blade Zero.
+and Phantom Blade Zero"), which fixed the same refusal for Dying Light 2 and Phantom Blade Zero. That commit was
+still upstream `develop`'s tip on 2026-11-05.
 
 Only a pair within a percent of each other is shared this way. A depth of a genuinely different
 resolution is left alone on purpose. At 0.67 the game also hands over a 1368x1024 depth for a few
@@ -75,3 +76,9 @@ generating, and if not why":
 
 The log reaches tens of megabytes in a session, so read its tail in node rather than through a content
 search: grep against it fails past the 20 MB cap.
+
+## Against upstream
+
+Every rule here came from upstream `MFGAdaUnlock-RenoDx` @ `3b8889f`, so "what does upstream do" is that commit,
+not this repository. Compare against `develop`, never `main` (which only ever takes `README.md` edits).
+Last checked 2026-11-05: identical, so all of the above is current. `AGENTS.md` has the one-line check.
