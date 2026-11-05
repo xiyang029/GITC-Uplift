@@ -44,6 +44,9 @@ GameFrame ReadGameFrame(const ngx_hooks::DlssFrame& frame, ID3D12Resource* resou
   if (config.motion_vectors && frame.motion_vectors != nullptr) {
     game.inputs.motion = {.resource = frame.motion_vectors, .rect = frame.motion_region};
   }
+  if (frame.depth != nullptr) {
+    game.inputs.depth = {.resource = frame.depth, .rect = frame.depth_region};
+  }
   return game;
 }
 

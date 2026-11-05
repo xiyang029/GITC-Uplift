@@ -235,6 +235,10 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameCon
   if (!present_group || !config.launchpad_motion) {
     present_source_->Pipeline().ReleaseLaunchpadMotion();
   }
+  // 2026-11-05 (Depth input): the depth copies go the same way once a later group at Present cannot bind them.
+  if (!present_group) {
+    present_source_->Pipeline().ReleaseDepthCopies();
+  }
 
   std::string message;
   encoding_.reset();
@@ -446,6 +450,9 @@ bool DeviceContext::NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chr
     if (!present_group || !config_.launchpad_motion) {
       present_source_->Pipeline().ReleaseLaunchpadMotion();
     }
+    if (!present_group) {
+      present_source_->Pipeline().ReleaseDepthCopies();
+    }
     UpdateSession(now);
   }
   return true;
@@ -493,14 +500,31 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
     }
     return copied;
   };
+  // 2026-11-05 (Depth input): the game's depth for the present that closes this frame, copied here -- at the evaluate that has it -- rather than at the
+  // present, so the present side never has to reach back into DLSS's frame (which is what the motion ring solves for the vectors). Same ring, same slot.
+  const auto copy_depth = [&]() {
+    ID3D12GraphicsCommandList* const list = host.NativeList();
+    if (frame.depth == nullptr || session_->State() != nr::SessionState::ACTIVE || list == nullptr || !host.StateKnown()
+        || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+      return;
+    }
+    const sources::PipelineResult copied = sources::RecordOnGameList(host, *timeline_, config_.restore, [&] {
+      return sources::PipelineResult{
+          .recorded = present_source_->Pipeline().RecordDepthCopy(list, {.resource = frame.depth, .rect = frame.depth_region}),
+      };
+    });
+    if (copied.recorded) last_game_list_recording_ = now;
+  };
   if (placement_.placement == Placement::PRESENT) {
     if (config_.source != ui::PlacementSource::PRESENT) return {.reason = "not placed after DLSS"};
+    copy_depth();  // its own recording: the present binds it, not this evaluate's result
     return copy_motion();
   }
   // Pass 1 runs inside the game's frame here, so a Present group can only be a later one.
   sources::PipelineResult motion_copy = {.reason = "not placed after DLSS"};
   if (const std::optional<uint32_t> present = GroupAt(Stage::PRESENT); present && session_->SliceRuns(slices_[*present])) {
-    motion_copy = copy_motion();  // only for a Present group that runs (fix round 1, M4)
+    copy_depth();  // only for a Present group that runs, as the motion copy (fix round 1, M4)
+    motion_copy = copy_motion();
   }
   const std::optional<uint32_t> group = GroupAt(Stage::AFTER_DLSS);
   if (!group || dlss_idle_) {

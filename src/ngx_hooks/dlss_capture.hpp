@@ -32,6 +32,7 @@ struct DlssFrame {
   nr::Size render;         // DLSS.Render.Subrect.Dimensions, else the create-time render size
   nr::Rect color_region;   // the Input.Color subrect base, render-sized
   nr::Rect motion_region;  // the Input.MV subrect base; render-sized for low-resolution MVs, else output-sized
+  nr::Rect depth_region;   // the Input.Depth subrect base, render-sized (DLSS reads depth at the render size)
   nr::Rect output_region;  // the Output subrect base, sized by the create-time output size (empty when unknown)
 };
 

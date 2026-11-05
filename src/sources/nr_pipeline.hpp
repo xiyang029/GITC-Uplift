@@ -137,6 +137,10 @@ class NrPipeline final : private nr::PassResolver {
   // 1.1.6: `flip_y` when DLSS's images are upside down against the back buffer (ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN).
   bool RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& motion, float scale_x, float scale_y, bool flip_y = false,
                         float offset_x = 0.f, float offset_y = 0.f);
+  // 2026-11-05 (Depth input): at an evaluate of the game's DLSS, copies its depth -- the very texture DLSS reads as Input.Depth, at that subrect -- on the
+  // game's list into the slot of the present that closes the current frame, exactly as RecordMotionCopy does for the vectors. MakeDepthCopies keeps the
+  // source's own format (a depth resource cannot be written by the motion copy's shader), so this is a plain region copy. False when nothing was recorded.
+  bool RecordDepthCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& depth);
   // Frees the intermediates now when the GPU has passed the newest recording that used them (a drain to OFF
   // normally has); otherwise hands them to the timeline, which frees them once it does. Also the look set,
   // the mask copy and the exposure state too.
@@ -153,6 +157,8 @@ class NrPipeline final : private nr::PassResolver {
   // Launchpad. Separate from ReleaseMotionCopies, which also runs every frame of Source = Present with MotionVectors = Launchpad (no DLSS copies
   // wanted), where the converted motion is in use.
   void ReleaseLaunchpadMotion() { RetireLaunchpadMotion(); }
+  // Depth input: the depth copies alone, the same way -- for a caller whose Present group went away without waiting for a drain to OFF.
+  void ReleaseDepthCopies() { RetireDepthCopies(); }
   [[nodiscard]] uint64_t HeldBytes() const;
   // A DLSS Output format RecordUav can write: DescribeUavFormat knows it and the device stores to it.
   [[nodiscard]] bool SupportsUavTarget(DXGI_FORMAT format) const;
@@ -346,6 +352,19 @@ class NrPipeline final : private nr::PassResolver {
     nr::Size size;
   };
 
+  // 2026-11-05 (Depth input): the game's depth, copied at the DLSS evaluate for the present that closes the frame, in the same ring scheme as the motion
+  // copies above (indexed by the frame the present closes, PRESENT_MOTION_MIN_SLOTS, grown once to MOTION_COPY_SLOTS). Each copy keeps the source's own
+  // format (a depth texture has no shader write path here), so it is a plain region copy, not a compute pass.
+  struct DepthCopies {
+    std::array<Texture, MOTION_COPY_SLOTS> textures;
+    std::array<uint64_t, MOTION_COPY_SLOTS> frames = {};  // the frame each copy was made for; 0 = none
+    size_t slots = PRESENT_MOTION_MIN_SLOTS;
+    std::array<nr::Mark, MOTION_COPY_SLOTS> last_use = {};
+    nr::Size size;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // the format the copies are in (the source's, or its plain twin)
+    bool warned_format = false;
+  };
+
   // 1.0.1 (the Launchpad investigation, F1): Launchpad's UPLIFT_MV as NR gets it on the Present path, made by the motion copy (motion_cs.hlsl) in the
   // recording that binds it: resampled to the work image in its pixels, non-finite vectors dropped and the rest clamped. One texture, rewritten every
   // recording on the same queue, as the canvas motion is.
@@ -374,6 +393,8 @@ class NrPipeline final : private nr::PassResolver {
   void RetireExposure(StageSet* set);
   void RetireExposureCheck(StageSet* set);
   void RetireMotionCopies();   // likewise for the motion copies
+  void RetireDepthCopies();    // and for the depth copies (Depth input)
+  bool MakeDepthCopies(size_t first, size_t end, nr::Size size, DXGI_FORMAT format);
   void RetireLaunchpadMotion();  // likewise for Launchpad's converted motion
   void RetireDlssPresentMotion();  // Plan 18 (fix round 1, M-1): likewise for Direct3D 11's converted ring vectors
   bool MakeMotionCopies(size_t first, size_t end, nr::Size size);  // motion_copies_.textures[first, end); none kept on a failure
@@ -410,6 +431,7 @@ class NrPipeline final : private nr::PassResolver {
   bool dlss_present_motion_warned_ = false;
   bool launchpad_motion_warned_ = false;
   MotionCopies motion_copies_;
+  DepthCopies depth_copies_;
   PresentMotionCounters present_motion_counters_;
   LaunchpadMotion launchpad_motion_;
   DlssPresentMotion dlss_present_motion_;  // Plan 18 (fix round 1, M-1)

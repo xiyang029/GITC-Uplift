@@ -72,6 +72,7 @@ struct FaceTwin {
 // Optional per-frame inputs forwarded to every pass.
 struct FrameInputs {
   BoundResource motion;
+  BoundResource depth;  // optional: DLSSNR.Depth, empty when nothing reached NR with a depth this frame
   float motion_scale_x = 1.f;
   float motion_scale_y = 1.f;
   BoundResource control_mask;
@@ -255,6 +256,8 @@ class Session {
   std::chrono::steady_clock::duration grace_elapsed_{0};
   std::optional<std::chrono::steady_clock::time_point> last_tick_;
   std::optional<std::chrono::steady_clock::time_point> last_sample_;
+  // Depth input (2026-11-05): the last answer the depth report gave, so the change itself is what reaches the log (see Session::Evaluate).
+  std::optional<bool> depth_reported_;
   // Split chain (design 3.2): indexed by pass, global; a pass whose stage has not run yet leaves a hole. Each live feature's capacity is its stage's size.
   std::array<std::unique_ptr<FeatureInterface>, MAX_PASSES> features_;
   std::array<StageState, SESSION_STAGES> stages_;

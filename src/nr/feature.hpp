@@ -17,6 +17,7 @@ struct EvaluateInputs {
   ID3D12Resource* color = nullptr;   // model domain, NON_PIXEL_SHADER_RESOURCE, same size as output
   ID3D12Resource* output = nullptr;  // RGBA16F, UNORDERED_ACCESS
   BoundResource motion;              // optional: no motion vectors = no temporal history
+  BoundResource depth;               // optional: DLSSNR.Depth, the game's own depth as DLSS read it
   float motion_scale_x = 1.f;
   float motion_scale_y = 1.f;
   BoundResource control_mask;

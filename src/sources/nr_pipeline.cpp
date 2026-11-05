@@ -55,6 +55,51 @@ WorkLayout Resolve(const WorkLayout& layout, nr::Size output) {
           .foveation = layout.foveation};
 }
 
+// Depth input: the bytes one pixel of a copied depth texture takes (HeldBytes' accounting). The scale is 1:1, size and format included
+// (a copy may change neither), and the copies are only ever made of what ReadDepthFormat accepted -- so these are exactly its answers,
+// with anything else counting as four.
+uint64_t DepthBytesPerPixel(DXGI_FORMAT format) {
+  switch (format) {
+    case DXGI_FORMAT_R16_UNORM:
+      return 2u;
+    case DXGI_FORMAT_R32_FLOAT:
+    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+    case DXGI_FORMAT_R16G16_FLOAT:
+      return 4u;
+    case DXGI_FORMAT_R32G32_FLOAT:
+      return 8u;
+    default:
+      return 4u;
+  }
+}
+
+// Depth input: the format a depth copy can be made in -- the source's own, since a copy cannot change it -- or nullopt when NR could not read it back as
+// DLSSNR.Depth. A typeless resource is copied as its plain twin, which is what a committed copy must be.
+std::optional<DXGI_FORMAT> ReadDepthFormat(DXGI_FORMAT format) {
+  switch (format) {
+    case DXGI_FORMAT_D16_UNORM:
+    case DXGI_FORMAT_R16_UNORM:
+      return DXGI_FORMAT_R16_UNORM;
+    case DXGI_FORMAT_R16_TYPELESS:
+      return DXGI_FORMAT_R16_UNORM;
+    case DXGI_FORMAT_D32_FLOAT:
+    case DXGI_FORMAT_R32_FLOAT:
+      return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R32_TYPELESS:
+      return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+      return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;  // the depth channel alone, which is all NR reads; the same 32 bits, so the copy is legal
+    // D32_FLOAT_S8X24_UINT is refused on purpose: it is 64 bits a pixel, so R32_FLOAT is not its copy twin (a copy may not change the format or the
+    // stride), and Direct3D 12 has no way to copy one plane of a depth-stencil. Copying it as itself would hand NR a 64-bit depth-stencil resource.
+    case DXGI_FORMAT_R16G16_FLOAT:
+    case DXGI_FORMAT_R32G32_FLOAT:
+      return format;  // an already-float depth (Vulkan's bridge), copied as it is
+    default:
+      return std::nullopt;
+  }
+}
+
 // A float SRV format for the game's motion-vector texture, or nullopt when Uplift cannot read it.
 std::optional<DXGI_FORMAT> MotionViewFormat(DXGI_FORMAT format) {
   switch (format) {
@@ -111,12 +156,14 @@ uint64_t NrPipeline::HeldBytes() const {
            : 0u);
   const uint64_t launchpad = (launchpad_motion_.texture ? launchpad_motion_.size.Pixels() * MOTION_BYTES_PER_PIXEL : 0u);
   const uint64_t ring = (dlss_present_motion_.texture ? dlss_present_motion_.size.Pixels() * MOTION_BYTES_PER_PIXEL : 0u);  // Plan 18 (fix round 1)
+  // Depth input: the copies keep the game's format, so their bytes follow the source rather than a constant.
+  const uint64_t depth = (depth_copies_.textures[0] ? static_cast<uint64_t>(depth_copies_.slots) * depth_copies_.size.Pixels() * DepthBytesPerPixel(depth_copies_.format) : 0u);
   // Split chain: every stage set's surfaces count (design 3.5).
   uint64_t sets = 0u;
   for (const StageSet& set : sets_) {
     sets += (set.intermediates.model_a ? set.intermediates.bytes : 0u) + set.look.bytes + (set.exposure.state ? STATE_BYTES : 0u) + set.faces.bytes;
   }
-  return sets + copies + launchpad + ring + mask_.bytes;
+  return sets + copies + depth + launchpad + ring + mask_.bytes;
 }
 
 bool NrPipeline::SupportsUavTarget(DXGI_FORMAT format) const {
@@ -127,6 +174,7 @@ bool NrPipeline::SupportsUavTarget(DXGI_FORMAT format) const {
 void NrPipeline::ReleaseIntermediates() {
   RetireSetsFrom(0u);
   RetireMotionCopies();
+  RetireDepthCopies();
   RetireLaunchpadMotion();
   RetireDlssPresentMotion();
   RetireMask();
@@ -174,6 +222,29 @@ void NrPipeline::RetireMotionCopies() {
     }
   }
   motion_copies_ = {};
+}
+
+bool NrPipeline::MakeDepthCopies(size_t first, size_t end, nr::Size size, DXGI_FORMAT format) {
+  bool made = true;
+  for (size_t index = first; index < end; ++index) {
+    depth_copies_.textures[index] = CreateTexture(size, format, D3D12_RESOURCE_FLAG_NONE, COMPUTE_READ, L"Uplift DLSS depth copy");
+    made = made && static_cast<bool>(depth_copies_.textures[index]);
+  }
+  if (!made) {
+    for (size_t index = first; index < end; ++index) {
+      depth_copies_.textures[index].Reset();
+    }
+  }
+  return made;
+}
+
+void NrPipeline::RetireDepthCopies() {
+  for (size_t index = 0u; index < depth_copies_.textures.size(); ++index) {
+    if (depth_copies_.textures[index] && !timeline_.IsComplete(depth_copies_.last_use[index])) {
+      timeline_.ReleaseAfter(depth_copies_.last_use[index], [retired = depth_copies_.textures[index]] {});
+    }
+  }
+  depth_copies_ = {};
 }
 
 void NrPipeline::RetireLaunchpadMotion() {
@@ -862,6 +933,19 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   const bool reduced = (work.image != size);
   const bool look_ready = EnsureLook(LookPlanFor(work.image));  // before the fit, like the set
   CommitSlot(slot);
+  // 2026-11-05 (Depth input): this frame's depth copy, made at the evaluate that closed it (RecordDepthCopy). No fallback to an older copy: a depth from a
+  // frame ago is another view, and DLSSNR.Depth is optional -- NR runs on its own estimate instead (the same reason the motion ring caps its age).
+  if (depth_copies_.textures[0]) {
+    std::array<uint64_t, MOTION_COPY_SLOTS> depth_frames = {};
+    for (size_t index = 0u; index < MOTION_COPY_SLOTS; ++index) {
+      depth_frames[index] = (depth_copies_.textures[index] ? depth_copies_.frames[index] : 0u);
+    }
+    if (const PresentMotionPick depth_pick = PickPresentMotion(depth_frames, frame, 0u); depth_pick.slot) {
+      const size_t copy = *depth_pick.slot;
+      inputs.depth = {.resource = depth_copies_.textures[copy].Get()};  // full subrect: the copy is the depth's own region
+      depth_copies_.last_use[copy] = slot_marks_[slot];
+    }
+  }
   const float input_scale = color::InputScale(target.encoding, target.diffuse_white_nits, config_.fixes.linear_unit_nits);
   NoteEncoding(target.encoding, input_scale);
   const uint32_t options = ShaderOptions();
@@ -1316,6 +1400,68 @@ bool NrPipeline::RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::Bou
   ++counters.copies;
   motion_copies_.frames[index] = frame;
   motion_copies_.last_use[index] = slot_marks_[slot];
+  return true;
+}
+
+bool NrPipeline::RecordDepthCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& depth) {
+  if (session_.State() != nr::SessionState::ACTIVE || list == nullptr || depth.resource == nullptr) return false;
+  const D3D12_RESOURCE_DESC description = depth.resource->GetDesc();
+  const std::optional<DXGI_FORMAT> format = ReadDepthFormat(description.Format);
+  nr::Rect region = depth.rect;
+  if (region.width == 0u || region.height == 0u) {
+    region = {.x = 0u, .y = 0u, .width = static_cast<uint32_t>(description.Width), .height = description.Height};
+  }
+  if (!format || uint64_t{region.x} + region.width > description.Width || uint64_t{region.y} + region.height > description.Height) {
+    WarnOnce(&depth_copies_.warned_format,
+             "Direct3D 12: the game's depth (DXGI_FORMAT {}) cannot be copied for DLSSNR.Depth; NR runs without it", static_cast<uint32_t>(description.Format));
+    return false;
+  }
+  // The present that closes the current frame binds the copy made for it, as the motion copies do (RecordPresent).
+  const uint64_t frame = timeline_.CurrentFrame() + 1u;
+  const uint32_t slot = next_slot_;
+  if (!timeline_.IsComplete(slot_marks_[slot])) return false;
+  const nr::Size size = {region.width, region.height};
+  if (depth_copies_.size != size || depth_copies_.format != *format || !depth_copies_.textures[0]) {
+    RetireDepthCopies();
+    if (!MakeDepthCopies(0u, PRESENT_MOTION_MIN_SLOTS, size, *format)) {
+      depth_copies_ = {};
+      return false;
+    }
+    depth_copies_.size = size;
+    depth_copies_.format = *format;
+  }
+  const size_t index = PresentMotionSlotOf(frame, depth_copies_.slots);
+  if (!timeline_.IsComplete(depth_copies_.last_use[index])) {
+    // The ring's growth rule is the motion copies' (four slots, then eight): the same lag that starves one starves the other.
+    if (PresentMotionGrows(depth_copies_.slots, PresentMotionWrite::SLOT_BUSY) && MakeDepthCopies(depth_copies_.slots, MOTION_COPY_SLOTS, size, *format)) {
+      nr::Logf(nr::LogLevel::INFO, "Direct3D 12: the GPU runs too far behind for four slots: the depth copies for Present grow from {} to {} slots",
+               depth_copies_.slots, MOTION_COPY_SLOTS);
+      depth_copies_.slots = MOTION_COPY_SLOTS;
+    }
+    return false;
+  }
+  CommitSlot(slot);
+  ID3D12Resource* const target = depth_copies_.textures[index].Get();
+  // A copy cannot change the format, and the source is the game's own depth: it is COMMON (or in a read state Uplift cannot know), so it is brought to
+  // COPY_SOURCE and put back to COMMON, which is what every other game-list recording of a game resource does (src/bridge/record_nr.cpp).
+  Transition(list, depth.resource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  const D3D12_TEXTURE_COPY_LOCATION source_location = {
+      .pResource = depth.resource,
+      .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+      .SubresourceIndex = 0u,
+  };
+  const D3D12_TEXTURE_COPY_LOCATION target_location = {
+      .pResource = target,
+      .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+      .SubresourceIndex = 0u,
+  };
+  const D3D12_BOX box = {.left = region.x, .top = region.y, .front = 0u, .right = region.x + region.width, .bottom = region.y + region.height, .back = 1u};
+  Transition(list, target, COMPUTE_READ, D3D12_RESOURCE_STATE_COPY_DEST);
+  list->CopyTextureRegion(&target_location, 0u, 0u, 0u, &source_location, &box);
+  Transition(list, target, D3D12_RESOURCE_STATE_COPY_DEST, COMPUTE_READ);
+  Transition(list, depth.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+  depth_copies_.frames[index] = frame;
+  depth_copies_.last_use[index] = slot_marks_[slot];
   return true;
 }
 

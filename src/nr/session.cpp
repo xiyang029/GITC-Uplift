@@ -755,6 +755,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
         .color = color,
         .output = output,
         .motion = inputs.motion,
+        .depth = inputs.depth,
         .motion_scale_x = inputs.motion_scale_x,
         .motion_scale_y = inputs.motion_scale_y,
         .control_mask = inputs.control_mask,
@@ -811,6 +812,20 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   std::fill(stage_reset_owed_.begin() + slice.first, stage_reset_owed_.begin() + run_end, false);
   stage.faces_evaluated = faces_ran;
   const uint32_t run = run_end - slice.first;
+  // Depth input (2026-11-05): NR asks with a depth whenever one reached it -- the game's own, as DLSS read it, or a copy
+  // made for a Present group -- and a game that hands DLSS none leaves NR without it. This line is a state report: it goes
+  // out the moment the answer changes (the first answer included), never once per frame.
+  const bool depth_bound = (inputs.depth.resource != nullptr);
+  if (run > 0u && depth_reported_ != depth_bound) {
+    depth_reported_ = depth_bound;
+    if (depth_bound) {
+      const D3D12_RESOURCE_DESC depth_desc = inputs.depth.resource->GetDesc();
+      Logf(LogLevel::INFO, "Depth input: NR is using the depth as DLSSNR.Depth (DXGI_FORMAT {}, {}x{})",
+           static_cast<uint32_t>(depth_desc.Format), static_cast<uint32_t>(depth_desc.Width), depth_desc.Height);
+    } else {
+      Log(LogLevel::INFO, "Depth input: NR is running without DLSSNR.Depth (no depth reached it)");
+    }
+  }
   uint32_t wanted_end = std::min(slice_end, pass_count_);
   if (pass_view_limit_ != 0u) {
     wanted_end = std::min(wanted_end, pass_view_limit_);

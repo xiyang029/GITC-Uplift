@@ -24,6 +24,9 @@ inline constexpr char PERF_QUALITY_VALUE[] = "PerfQualityValue";
 
 inline constexpr Resource COLOR = {"DLSSNR.Color", {"DLSSNR.ColorSubrectBaseX", "DLSSNR.ColorSubrectBaseY", "DLSSNR.ColorSubrectWidth", "DLSSNR.ColorSubrectHeight"}};
 inline constexpr Resource OUTPUT = {"DLSSNR.Output", {"DLSSNR.OutputSubrectBaseX", "DLSSNR.OutputSubrectBaseY", "DLSSNR.OutputSubrectWidth", "DLSSNR.OutputSubrectHeight"}};
+// 2026-11-05: the depth input sl.dlss_nr.dll binds at evaluation (option block +0x28, subrect +0x70..+0x8C). Uplift left it unbound until now;
+// "Depth" alone is what the runtime looks the resource up by, the four Subrect keys follow it as for every other input.
+inline constexpr Resource DEPTH = {"DLSSNR.Depth", {"DLSSNR.DepthSubrectBaseX", "DLSSNR.DepthSubrectBaseY", "DLSSNR.DepthSubrectWidth", "DLSSNR.DepthSubrectHeight"}};
 inline constexpr Resource MVEC = {"DLSSNR.MVec", {"DLSSNR.MVecSubrectBaseX", "DLSSNR.MVecSubrectBaseY", "DLSSNR.MVecSubrectWidth", "DLSSNR.MVecSubrectHeight"}};
 inline constexpr Resource CONTROL_MASK = {"DLSSNR.ControlMask", {"DLSSNR.ControlMaskSubrectBaseX", "DLSSNR.ControlMaskSubrectBaseY", "DLSSNR.ControlMaskSubrectWidth", "DLSSNR.ControlMaskSubrectHeight"}};
 inline constexpr Resource BACKBUFFER = {"DLSSNR.Backbuffer", {"DLSSNR.BackbufferSubrectBaseX", "DLSSNR.BackbufferSubrectBaseY", "DLSSNR.BackbufferSubrectWidth", "DLSSNR.BackbufferSubrectHeight"}};

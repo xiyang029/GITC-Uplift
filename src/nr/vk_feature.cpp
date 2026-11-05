@@ -74,6 +74,7 @@ NVSDK_NGX_Result VkFeature::Evaluate(ID3D12GraphicsCommandList* list, const Eval
   SetResource(parameters_, keys::COLOR, {inputs.color, {}});
   SetResource(parameters_, keys::OUTPUT, {inputs.output, {}});
   SetResource(parameters_, keys::MVEC, inputs.motion);
+  SetResource(parameters_, keys::DEPTH, inputs.depth);
   SetResource(parameters_, keys::CONTROL_MASK, inputs.control_mask);
   SetResource(parameters_, keys::BACKBUFFER, inputs.backbuffer);
   SetResource(parameters_, keys::UI, inputs.ui);

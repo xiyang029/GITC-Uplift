@@ -45,6 +45,8 @@ DlssFrame CaptureWith(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Han
                        base(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y), render.width, render.height},
       .motion_region = {base(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X),
                         base(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y), motion.width, motion.height},
+      .depth_region = {base(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X),
+                       base(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y), render.width, render.height},
       .output_region = {base(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X),
                         base(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y), output.width, output.height},
   };
