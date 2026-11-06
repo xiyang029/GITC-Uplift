@@ -42,6 +42,11 @@ constexpr auto kBackbufferState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
 constexpr auto kInputState = D3D12_RESOURCE_STATE_COPY_DEST;
 constexpr auto kOutputState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 constexpr auto kXefgInputState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+// 1.8.3 (upstream 9f0a24e): the states a compute list cannot name. A resource that arrives in one
+// of them has to be copied from the non-pixel state instead, or the barrier is a device removal.
+constexpr auto kGraphicsOnlyStates = static_cast<D3D12_RESOURCE_STATES>(
+    D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_DEPTH_READ |
+    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
 #pragma pack(push, 8)
 struct InitParams {
@@ -112,6 +117,11 @@ struct State {
   D3D12_RESOURCE_DESC outputDesc{};
   bool published{};
   bool failed{};
+  // 1.8.3 (upstream 6de60fc): the last ContextShape XeFG's Init refused. Retrying it every frame
+  // spends one of the sixteen contexts per frame and gives up on the mode; another shape (a
+  // resolution, format or HDR change) is tried again.
+  bool refused{};
+  policy::ContextShape refusedShape{};
   uint32_t logs{};
 };
 inline State& Get() {
@@ -132,6 +142,12 @@ inline void Fail(const std::string& reason) {
   // line a later reader needs -- a start that was refused, a crash inside Execute, a game that resized
   // past the model's contexts.
   xess_mod::WriteLog("failed", reason);
+}
+// The refusal above is no longer the reason once a shape works: the panel reads g_failure, and a
+// stale line there says the mode is broken while it generates (upstream 6de60fc's ClearFailure).
+inline void ClearFailure() {
+  std::lock_guard guard(g_failure_lock);
+  g_failure.clear();
 }
 inline std::atomic_bool g_preflight_passed{false};
 // What the mode actually delivered, per interval. A frame rate alone cannot tell "XeFG generates every
@@ -292,6 +308,14 @@ inline int Guarded(void* function, void* context, void* a, void* b) noexcept {
 
 // The file beside this add-on, or nothing: the RVAs this port carries belong to that exact build,
 // and a game that ships its own libxess_fg.dll must not be served instead.
+// The file a runtime was actually loaded from (upstream f9ced61): a copy the game already loaded
+// wins over ours for libxell.dll, so the log has to name what ran, not what was asked for.
+inline std::string RuntimePath(HMODULE module) {
+  wchar_t text[MAX_PATH]{};
+  return module != nullptr && GetModuleFileNameW(module, text, MAX_PATH) != 0
+             ? std::filesystem::path(text).string()
+             : std::string("not loaded");
+}
 inline HMODULE OpenRuntime(const wchar_t* name) {
   const auto local = AddonDirectory() / name;
   std::error_code error;
@@ -319,6 +343,9 @@ inline bool LoadContext(ID3D12Device* device) {
     const HMODULE fg = state.fg;
     if (ll != nullptr && model::Publish(fg, ll, error)) state.maxFrames = kMaxFrames;
     else Log("multi-frame model refused, 2x only: " + (ll == nullptr ? std::string("libxell.dll not found") : error));
+    // 1.8.3 (upstream f9ced61): name the files that actually ran -- a libxell the unlock cannot read
+    // is what leaves 2x only, and the paths are the only way to tell which copy was loaded.
+    Log("runtime " + RuntimePath(fg) + " and " + RuntimePath(ll));
     // The tensor-core route (src/xmx/vendor/cuda/): each recognized int8 conv layer program becomes
     // an NvAPI_D3D12_LaunchCubinShader launch in the provider's own command list, with no CUDA
     // context and no second queue. Must be in before the provider creates its pipeline states, i.e.
@@ -375,6 +402,15 @@ inline void Barrier(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D
   barrier.Transition.StateAfter = to;
   list->ResourceBarrier(1, &barrier);
 }
+// 1.8.3 (upstream 9f0a24e, the compute-list half): a compute list cannot name a graphics state, so a
+// source in one is copied from the non-pixel state instead. Upstream also reads the state the game
+// tagged the resource with for direct lists; Uplift does not hook slSetTag and has no such table, so
+// a direct list keeps the state its caller declared.
+inline D3D12_RESOURCE_STATES EffectiveSourceState(ID3D12GraphicsCommandList* list, D3D12_RESOURCE_STATES declared) {
+  if (list->GetType() != D3D12_COMMAND_LIST_TYPE_COMPUTE) return declared;
+  if ((declared & kGraphicsOnlyStates) == 0) return declared;
+  return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+}
 // Copies between resources left in their original states. A mismatch would be undefined on the GPU:
 // the target keeps what it had, and the log says why.
 inline void Copy(ID3D12GraphicsCommandList* list, ID3D12Resource* target, D3D12_RESOURCE_STATES targetState,
@@ -401,6 +437,8 @@ class CopyBatch {
   CopyBatch(const CopyBatch&) = delete;
   CopyBatch& operator=(const CopyBatch&) = delete;
   ~CopyBatch() { Flush(); }
+
+  ID3D12GraphicsCommandList* List() const { return list_; }
 
   void Add(ID3D12Resource* target, D3D12_RESOURCE_STATES targetState, ID3D12Resource* source,
            D3D12_RESOURCE_STATES sourceState) {
@@ -504,7 +542,7 @@ inline bool Capture(ID3D12Device* device, CopyBatch& batch, ComPtr<ID3D12Resourc
   }
   if (!copy) copy = Texture(device, shape, kXefgInputState, D3D12_RESOURCE_FLAG_NONE);
   if (!copy) return false;
-  batch.Add(copy.Get(), kXefgInputState, source, sourceState);
+  batch.Add(copy.Get(), kXefgInputState, source, EffectiveSourceState(batch.List(), sourceState));
   return true;
 }
 inline Input Describe(ID3D12Resource* copy) {
@@ -643,10 +681,13 @@ inline bool Prepare(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* 
       wanted == policy::ContextShape{state.device.Get(), state.width, state.height, static_cast<uint32_t>(state.format),
                                      state.flags})
     return true;
+  // A shape XeFG already refused is not retried every frame; one whose shape changed is.
+  if (state.refused && wanted == state.refusedShape) return false;
   // XeFG's contexts are not destroyed (the function's contract is unverified), so a game that keeps
   // resizing stops generating instead of filling the VRAM.
   if (state.contexts >= policy::kMaxContexts) {
     Fail("the game changed its output size too many times; restart the game");
+    state.failed = true;
     return false;
   }
   if (state.context != nullptr) {
@@ -667,7 +708,10 @@ inline bool Prepare(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* 
   }
   state.device = device;
   ++state.contexts;
-  if (!LoadContext(state.device.Get())) return false;
+  if (!LoadContext(state.device.Get())) {
+    state.failed = true;
+    return false;
+  }
   InitParams init{};
   init.width = width;
   init.height = output.Height;
@@ -685,7 +729,16 @@ inline bool Prepare(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* 
     Fail(output.Format == DXGI_FORMAT_R16G16B16A16_FLOAT
              ? "XMX cannot use this game's scRGB HDR output (result " + std::to_string(result) + "); turn HDR off or use XeMFG"
              : "XeFG initialization returned " + std::to_string(result));
+    state.maxFrames = 1;
+    if (!state.refused || !(wanted == state.refusedShape)) {
+      state.refusedShape = wanted;
+      state.refused = true;
+    }
     return false;
+  }
+  if (state.refused) {
+    state.refused = false;
+    ClearFailure();
   }
   state.outputDesc = output;
   state.width = width;
@@ -710,10 +763,8 @@ inline bool Generate(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter*
   }
   const auto requested = (std::max)(Value<unsigned int>(params, "DLSSG.MultiFrameCount", 1), 1u);
   const auto requestedIndex = std::clamp(Value<unsigned int>(params, "DLSSG.MultiFrameIndex", 1), 1u, requested);
-  if (!Prepare(list, params, interpolated->GetDesc())) {
-    state.failed = true;
-    return false;
-  }
+  // Prepare sets `failed` itself when retrying cannot help.
+  if (!Prepare(list, params, interpolated->GetDesc())) return false;
   // Frames past the model's limit repeat the last one it produced rather than failing the mode: the
   // multiplier is the game's setting, and refusing it left the picture on NVIDIA's frames mid-game.
   const auto plan = policy::PlanFrames(requested, requestedIndex, state.maxFrames);

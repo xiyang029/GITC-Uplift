@@ -432,6 +432,11 @@ struct AddonState {
   std::filesystem::path game_directory;
   std::filesystem::path ngx_data_directory;
   std::filesystem::path latch_marker_path;   // fix round 1, Important 1: computed once, at AddonInit
+  // 1.8.3 (upstream 7dbb337): the crash counter behind safe mode. Written at AddonInit with this
+  // session's pid and streak, deleted only on a clean exit; three unclean exits in a row pass
+  // safe_mode and XMX stays off for that start.
+  std::filesystem::path xmx_crash_marker;
+  bool safe_mode = false;
   bool snippet_hashed = false;               // the ~166 MB runtime is hashed at most once per process
   bool warned_no_immediate_list = false;     // ReShade gave no immediate list for a presenting queue
   bool warned_invalid_snippet_path = false;  // SnippetPath was not valid UTF-8 (I1): logged once
@@ -501,7 +506,13 @@ bool PinReshade(HMODULE reshade_module) {
 
 // Settings that act outside the per-frame FrameConfig.
 void ApplyProcessSettings(const ui::Settings& settings) {
-  uplift::xmx::SetEnabled(settings.xmx_generator);
+  // Safe mode (1.8.3, upstream 7dbb337) is an override, not a setting: the ini keeps what the user
+  // chose, and the panel's switch keeps working -- it just cannot turn XMX back on this session.
+  const bool safe_mode = g_state != nullptr && g_state->safe_mode;
+  uplift::xmx::SetEnabled(settings.xmx_generator && !safe_mode);
+  if (safe_mode && settings.xmx_generator) {
+    nr::Logf(nr::LogLevel::WARN, "safe mode: XMX stayed off after three unclean exits; it is back on the next start");
+  }
   addon::InstallLogBridge(settings.log_level);
   // Spec §12: the NGX runtime reads it when the snippet next loads.
   SetEnvironmentVariableW(L"__NGX_SHOW_INDICATOR", (settings.show_nv_indicator ? L"1024" : nullptr));
@@ -4099,6 +4110,23 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     g_state->settings.dlss_placement_blocked = true;
   }
 
+  // 1.8.3 (upstream 7dbb337): three starts in a row that ended without reaching DllMain's clean-exit
+  // branch turn XMX off for this one. Its own file, not the placement latch above (that one is a
+  // verdict, this is a crash streak), and reaching three consumes it so the count starts over.
+  g_state->xmx_crash_marker = addon::XmxCrashMarkerPath(state_directory, g_state->game_exe_path);
+  {
+    const uint32_t streak = addon::ReadXmxCrashStreak(g_state->xmx_crash_marker) + 1u;
+    if (streak >= 3u) {
+      g_state->safe_mode = true;
+      addon::DeleteXmxCrashMarker(g_state->xmx_crash_marker);
+      nr::Logf(nr::LogLevel::WARN, "safe mode: {} starts in a row ended without a clean exit; XMX is off for this one",
+               streak);
+      ApplyProcessSettings(g_state->settings);  // the XMX switch was pushed before this point in AddonInit
+    } else {
+      addon::WriteXmxCrashMarker(g_state->xmx_crash_marker, streak);
+    }
+  }
+
   // Plan 10 (design §2.1, §2.2): Direct3D 9 devices run NR in gitc-uplift-helper64.exe, which lies next to this add-on; the front is the one
   // gitc-uplift.addon32 uses. The 9Ex pending marker is checked here, before the settings text the helper reads is made.
   g_state->front.emplace("gitc-uplift.addon64", g_state->addon_directory, g_state->game_directory, state_directory, g_state->game_exe_path);
@@ -4269,6 +4297,11 @@ BOOL APIENTRY DllMain(HMODULE /*module*/, DWORD reason, LPVOID reserved) {
     // Plan 19 T6 (I-4): a clean exit is no crash: the native marker goes (no lock, no allocation; the path was made at AddonInit and is never freed).
     if (g_state != nullptr && g_state->vk_native_marker_pending.load(std::memory_order_acquire)) {
       DeleteFileW(g_state->vk_native_marker.c_str());
+    }
+    // 1.8.3 (upstream 7dbb337): and the XMX crash streak ends here -- this path is only reached when
+    // the process itself is ending, not when ReShade unloads a launcher's copy (reserved == nullptr).
+    if (g_state != nullptr && !g_state->xmx_crash_marker.empty()) {
+      DeleteFileW(g_state->xmx_crash_marker.c_str());
     }
   }
   return TRUE;

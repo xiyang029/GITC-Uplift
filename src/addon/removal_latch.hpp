@@ -30,4 +30,16 @@ void WriteLatchMarker(const std::filesystem::path& marker_path, std::string_view
 // "Clear latch": removes the marker so the next game start tries the DLSS placements again.
 void DeleteLatchMarker(const std::filesystem::path& marker_path);
 
+// 1.8.3 (upstream 7dbb337): three unclean exits in a row turn XMX off for one start. Same directory,
+// its own file: `state_directory`\latch\<exe-stem>-<hash>.xmx-crash, holding "<pid> <streak>".
+[[nodiscard]] std::filesystem::path XmxCrashMarkerPath(const std::filesystem::path& state_directory,
+                                                       const std::filesystem::path& game_exe_path);
+// Reads the streak the previous start left. Zero when there is no marker or it cannot be read.
+[[nodiscard]] uint32_t ReadXmxCrashStreak(const std::filesystem::path& marker_path);
+// Writes "<pid> <streak>": the streak the next start adds to, and the pid that owns it.
+void WriteXmxCrashMarker(const std::filesystem::path& marker_path, uint32_t streak);
+// Called when this start does not use the crash marker: the game exited cleanly, or the streak was
+// consumed into safe mode (so the counter starts over).
+void DeleteXmxCrashMarker(const std::filesystem::path& marker_path);
+
 }  // namespace uplift::addon
