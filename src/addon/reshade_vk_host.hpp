@@ -40,7 +40,7 @@ template <class VulkanHandle>
 // False, with `error` set, when the device is not NVIDIA's or its adapter is unknown.
 [[nodiscard]] bool VulkanAdapterLuid(reshade::api::device* device, LUID* luid, std::string* error);
 
-// Plan 11 (Vulkan design §3.1): vk::GameHost on ReShade's API. The queue is the effect runtime's (its immediate command list is what the technique
+// vk::GameHost on ReShade's API. The queue is the effect runtime's (its immediate command list is what the technique
 // and finish-effects events hand out), and every command goes through command_list::barrier / copy_texture_region and command_queue::signal /
 // wait / flush_immediate_command_list, never a raw vkCmd* on ReShade's command buffer. FlushWithFence is the one own submission: an empty batch
 // with a VkFence, through `submit` (the game's vkQueueSubmit chain), after the immediate list's flush. The present thread already holds that

@@ -23,6 +23,32 @@
 namespace uplift::ngx_hooks {
 namespace {
 
+constexpr size_t INITIAL_MODULE_CAPACITY = 256u;
+constexpr size_t MODULE_PATH_CHARS = 32768u;
+constexpr size_t ENTRY_POINT_COUNT = 17u;
+constexpr size_t FIRST_D3D11 = 5u;  // The D3D11 entries precede Vulkan's entries.
+constexpr size_t FIRST_VULKAN = 11u;
+
+struct ModuleExports {
+  void* create = nullptr;
+  void* evaluate = nullptr;
+  void* evaluate_c = nullptr;
+  void* release = nullptr;
+  void* shutdown1 = nullptr;
+  void* d3d11_create = nullptr;
+  void* d3d11_evaluate = nullptr;
+  void* d3d11_evaluate_c = nullptr;
+  void* d3d11_release = nullptr;
+  void* d3d11_shutdown1 = nullptr;
+  void* d3d11_shutdown = nullptr;
+  void* vk_create = nullptr;
+  void* vk_create1 = nullptr;
+  void* vk_evaluate = nullptr;
+  void* vk_evaluate_c = nullptr;
+  void* vk_release = nullptr;
+  void* vk_shutdown1 = nullptr;
+};
+
 using CreateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D12GraphicsCommandList*, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*,
                                                NVSDK_NGX_Handle**);
 using EvaluateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D12GraphicsCommandList*, const NVSDK_NGX_Handle*,
@@ -30,35 +56,35 @@ using EvaluateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D12GraphicsCommandList*, con
 using EvaluateCFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D12GraphicsCommandList*, const NVSDK_NGX_Handle*,
                                                   const NVSDK_NGX_Parameter*, PFN_NVSDK_NGX_ProgressCallback_C);
 using ReleaseFn = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Handle*);
-// Plan 13 (design §1.3, §5): the core's Vulkan entry points (nvsdk_ngx_vk.h). ReleaseFeature has the Direct3D 12 signature.
+// The core's Vulkan entry points (nvsdk_ngx_vk.h). ReleaseFeature has the Direct3D 12 signature.
 using VkCreateFn = NVSDK_NGX_Result(NVSDK_CONV*)(VkCommandBuffer, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
 using VkCreate1Fn = NVSDK_NGX_Result(NVSDK_CONV*)(VkDevice, VkCommandBuffer, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
 using VkEvaluateFn = NVSDK_NGX_Result(NVSDK_CONV*)(VkCommandBuffer, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
                                                    PFN_NVSDK_NGX_ProgressCallback);
 using VkEvaluateCFn = NVSDK_NGX_Result(NVSDK_CONV*)(VkCommandBuffer, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
                                                     PFN_NVSDK_NGX_ProgressCallback_C);
-// Batch 3 review I-1: the core's NVSDK_NGX_VULKAN_Shutdown1 is NOT the SDK header's one-argument function. Read from the driver's own code
+// The core's NVSDK_NGX_VULKAN_Shutdown1 is NOT the SDK header's one-argument function. Read from the driver's own code
 // (_nvngx.dll 32.0.16.1714, the export at RVA 0xCFD0): it keeps RCX (the VkDevice) and RDX, and tail-jumps to the shared shutdown routine
 // (RVA 0x44DC0) with RDX as that routine's fourth argument, a pointer it writes a 32-bit count through (`mov dword ptr [r13], eax` at
 // +0x44E54, the crash of a one-argument call). It reads neither R8, R9 nor any stack argument. Streamline 2.12's NGX library (sl.common.dll)
 // calls it so: `mov rcx, device; lea rdx, [remaining]; call`, then checks the count. The detour takes four pointer-sized parameters (x64: RCX,
 // RDX, R8, R9) and forwards them unchanged, so whatever the caller passed reaches the original as it was.
 using VkShutdown1Fn = NVSDK_NGX_Result(NVSDK_CONV*)(void*, void*, void*, void*);
-// Plan 15: NVSDK_NGX_D3D12_Shutdown1 has the same shape (the same core, the export at RVA 0x682B0): it keeps RCX (the ID3D12Device) and RDX, calls the
+// NVSDK_NGX_D3D12_Shutdown1 has the same shape (the same core, the export at RVA 0x682B0): it keeps RCX (the ID3D12Device) and RDX, calls the
 // device's GetAdapterLuid (vtable +0x158) for its LUID, and calls the shared shutdown routine (RVA 0x44DC0) with the device, the LUID and RDX as the count
 // pointer; it reads neither R8, R9 nor any stack argument. Detoured with the same four pointer-sized parameters, forwarded unchanged.
 using D3D12Shutdown1Fn = VkShutdown1Fn;
-// Plan 18 (design §2): the core's Direct3D 11 entry points (nvsdk_ngx.h, the non-snippet declarations). ReleaseFeature has the Direct3D 12 signature.
+// The core's Direct3D 11 entry points (nvsdk_ngx.h, the non-snippet declarations). ReleaseFeature has the Direct3D 12 signature.
 using D3D11CreateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D11DeviceContext*, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*, NVSDK_NGX_Handle**);
 using D3D11EvaluateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D11DeviceContext*, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
                                                       PFN_NVSDK_NGX_ProgressCallback);
 using D3D11EvaluateCFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D11DeviceContext*, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
                                                        PFN_NVSDK_NGX_ProgressCallback_C);
-// Plan 18: NVSDK_NGX_D3D11_Shutdown1 has the Direct3D 12 one's shape (the same core, the export at RVA 0x659E0): it keeps RCX (the ID3D11Device) and RDX,
+// NVSDK_NGX_D3D11_Shutdown1 has the Direct3D 12 one's shape (the same core, the export at RVA 0x659E0): it keeps RCX (the ID3D11Device) and RDX,
 // reads the device's LUID (a call at RVA 0x64F30), and tail-jumps to the shared shutdown routine (RVA 0x44DC0) with RDX as the count pointer; it reads neither
 // R8, R9 nor any stack argument. Detoured with the same four pointer-sized parameters, forwarded unchanged.
 using D3D11Shutdown1Fn = VkShutdown1Fn;
-// Plan 18: the device-less NVSDK_NGX_D3D11_Shutdown (RVA 0x65970) takes no argument: it calls the shared routine with a null device and a count of its own.
+// The device-less NVSDK_NGX_D3D11_Shutdown (RVA 0x65970) takes no argument: it calls the shared routine with a null device and a count of its own.
 // Games on an SDK older than Shutdown1 (Final Fantasy XV's DLSS 1) call it.
 // The process-wide DLSS capability block (device-less, cached by the core): the render scale override
 // (addon/dlss_ratio.hpp) plants its OptimalSettings callback into it.
@@ -177,7 +203,7 @@ void LogObserverFailure(ObserverCall kind, const char* what) noexcept {
   }
 }
 
-// Every create detour's body (Plan 13: shared by the Direct3D 12 and Vulkan entry points). `call` is the call as the observer sees it;
+// Every create detour's body (shared by the supported APIs). `call` is the call as the observer sees it;
 // `original()` runs the hooked copy's own entry point with the game's arguments.
 template <class Original>
 NVSDK_NGX_Result RunCreate(size_t slot, CreateCall call, NVSDK_NGX_Handle** out_handle, Original&& original) {
@@ -293,10 +319,10 @@ void NotifyEvaluate(NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX
   }
 }
 
-// v2 design §3.9 step 7: pre-SR's Color swap for one evaluate. The observer decides before the original
+// Before-upscaling Color swap for one evaluate. The observer decides before the original
 // runs; the destructor puts the game's own Color back on every path, so the game's block never keeps a
-// texture of Uplift's past this call. It writes back with the type the game used. Plan 13: a Vulkan block
-// holds its resources as void* (NGX_VULKAN_EVALUATE_DLSS_EXT), so only that type is read and written there. Plan 18: a Direct3D 11 block holds
+// texture of Uplift's past this call. It writes back with the type the game used. A Vulkan block
+// holds its resources as void* (NGX_VULKAN_EVALUATE_DLSS_EXT), so only that type is read and written there. A Direct3D 11 block holds
 // them as ID3D11Resource* (NGX_D3D11_EVALUATE_DLSS_EXT), read and written with that overload (a void* one, as an engine may set, takes the pointer branch).
 class ColorSwap {
  public:
@@ -329,7 +355,7 @@ class ColorSwap {
         kind_ = Kind::POINTER;
         block->Set(NVSDK_NGX_Parameter_Color, static_cast<void*>(call->color));
       } else {
-        // Minor 9: pre-SR already applied NR into call.color, on the assumption the swap below would
+        // Before-upscaling already applied NR into call.color, on the assumption the swap below would
         // put it where DLSS reads it. It cannot: the game set no Color for this evaluate at all, so
         // there is nothing to swap into, and the caller's status must not say NR applied.
         observer->OnColorSwapRejected(call->api, call->list, game_handle);
@@ -351,7 +377,7 @@ class ColorSwap {
       }
     }
     if (swapped11_ != nullptr) {
-      swapped11_->Release();  // Plan 18 (fix round 1, M-3): after the game's own Color is back
+      swapped11_->Release();  // after the game's own Color is back
     }
   }
   ColorSwap(const ColorSwap&) = delete;
@@ -362,8 +388,8 @@ class ColorSwap {
   NVSDK_NGX_Parameter* block_ = nullptr;
   Kind kind_ = Kind::D3D12;
   ID3D12Resource* game_color_ = nullptr;
-  ID3D11Resource* game_color11_ = nullptr;  // Plan 18
-  ID3D11Resource* swapped11_ = nullptr;     // Plan 18 (fix round 1, M-3): the bridge's texture DLSS reads, referenced until the swap ends (either branch)
+  ID3D11Resource* game_color11_ = nullptr;
+  ID3D11Resource* swapped11_ = nullptr;     // the bridge's texture DLSS reads, referenced until the swap ends (either branch)
   void* game_pointer_ = nullptr;
 };
 
@@ -471,9 +497,9 @@ NVSDK_NGX_Result NVSDK_CONV VkReleaseDetour(NVSDK_NGX_Handle* handle) {
   return RunRelease(SLOT, handle, g_originals[SLOT].vk_release.load(std::memory_order_acquire));
 }
 
-// Batch 3 review I-1: BeforeCoreShutdown on an outermost call, then the core's own Shutdown1 with the caller's four registers (VkShutdown1Fn).
+// BeforeCoreShutdown on an outermost call, then the core's own Shutdown1 with the caller's four registers (VkShutdown1Fn).
 // Nested calls (one copy forwarding to another, or the NR runtime's teardown reaching the core inside BeforeCoreShutdown) go straight through.
-// Plan 15: both APIs' Shutdown1 (D3D12Shutdown1Fn is the same shape); `caller` is the detour's own return address.
+// The APIs' Shutdown1 variants (D3D12Shutdown1Fn is the same shape); `caller` is the detour's own return address.
 NVSDK_NGX_Result RunShutdown1(NgxApi api, VkShutdown1Fn original, const void* caller, void* device, void* second, void* third, void* fourth) {
   const DepthGuard depth;
   NgxObserver* const observer = g_observer.load(std::memory_order_acquire);
@@ -520,7 +546,7 @@ NVSDK_NGX_Result NVSDK_CONV D3D11Shutdown1Detour(void* device, void* second, voi
   return RunShutdown1(NgxApi::D3D11, g_originals[SLOT].d3d11_shutdown1.load(std::memory_order_acquire), _ReturnAddress(), device, second, third, fourth);
 }
 
-// Plan 18: the device-less NVSDK_NGX_D3D11_Shutdown: BeforeCoreShutdown with a null device on an outermost call, then the core's own.
+// The device-less NVSDK_NGX_D3D11_Shutdown: BeforeCoreShutdown with a null device on an outermost call, then the core's own.
 NVSDK_NGX_Result RunShutdownAll(D3D11ShutdownFn original, const void* caller) {
   const DepthGuard depth;
   NgxObserver* const observer = g_observer.load(std::memory_order_acquire);
@@ -656,6 +682,87 @@ FARPROC NtdllExport(const char* name) {
   return (ntdll == nullptr ? nullptr : GetProcAddress(ntdll, name));
 }
 
+std::vector<std::pair<HMODULE, std::wstring>> FindCores() {
+  std::vector<HMODULE> loaded_modules(INITIAL_MODULE_CAPACITY);
+  while (true) {
+    DWORD needed_bytes = 0u;
+    if (K32EnumProcessModules(GetCurrentProcess(), loaded_modules.data(),
+                              static_cast<DWORD>(loaded_modules.size() * sizeof(HMODULE)), &needed_bytes)
+        == FALSE) {
+      loaded_modules.clear();
+      break;
+    }
+    const size_t count = needed_bytes / sizeof(HMODULE);
+    const bool complete = (count <= loaded_modules.size());
+    loaded_modules.resize(count);
+    if (complete) break;
+  }
+  std::vector<std::pair<HMODULE, std::wstring>> cores;
+  std::wstring path(MODULE_PATH_CHARS, L'\0');
+  for (const HMODULE module : loaded_modules) {
+    const DWORD length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0u || length >= path.size()) continue;
+    const std::wstring_view full_path(path.data(), length);
+    const size_t separator = full_path.find_last_of(L"\\/");
+    const std::wstring_view file_name =
+        (separator == std::wstring_view::npos ? full_path : full_path.substr(separator + 1u));
+    if (IsNgxCoreFileName(file_name)) {
+      cores.emplace_back(module, std::wstring(file_name));
+    }
+  }
+
+  return cores;
+}
+
+ModuleExports ResolveExports(HMODULE module) {
+  const auto export_address = [module](const char* export_name) {
+    return reinterpret_cast<void*>(GetProcAddress(module, export_name));
+  };
+  return {
+      .create = export_address("NVSDK_NGX_D3D12_CreateFeature"),
+      .evaluate = export_address("NVSDK_NGX_D3D12_EvaluateFeature"),
+      .evaluate_c = export_address("NVSDK_NGX_D3D12_EvaluateFeature_C"),
+      .release = export_address("NVSDK_NGX_D3D12_ReleaseFeature"),
+      .shutdown1 = export_address("NVSDK_NGX_D3D12_Shutdown1"),
+      .d3d11_create = export_address("NVSDK_NGX_D3D11_CreateFeature"),
+      .d3d11_evaluate = export_address("NVSDK_NGX_D3D11_EvaluateFeature"),
+      .d3d11_evaluate_c = export_address("NVSDK_NGX_D3D11_EvaluateFeature_C"),
+      .d3d11_release = export_address("NVSDK_NGX_D3D11_ReleaseFeature"),
+      .d3d11_shutdown1 = export_address("NVSDK_NGX_D3D11_Shutdown1"),
+      .d3d11_shutdown = export_address("NVSDK_NGX_D3D11_Shutdown"),
+      .vk_create = export_address("NVSDK_NGX_VULKAN_CreateFeature"),
+      .vk_create1 = export_address("NVSDK_NGX_VULKAN_CreateFeature1"),
+      .vk_evaluate = export_address("NVSDK_NGX_VULKAN_EvaluateFeature"),
+      .vk_evaluate_c = export_address("NVSDK_NGX_VULKAN_EvaluateFeature_C"),
+      .vk_release = export_address("NVSDK_NGX_VULKAN_ReleaseFeature"),
+      .vk_shutdown1 = export_address("NVSDK_NGX_VULKAN_Shutdown1"),
+  };
+}
+
+void Rollback(size_t slot, std::span<void* const> created, std::string_view name) {
+  bool poisoned = false;
+  for (void* const target : created) {
+    if (const MH_STATUS status = MH_DisableHook(target); status != MH_OK) {
+      nr::Logf(nr::LogLevel::WARN, "MinHook could not disable a hook rolling back {}: {}", name,
+               MH_StatusToString(status));
+      poisoned = true;
+    }
+    if (const MH_STATUS status = MH_RemoveHook(target); status != MH_OK) {
+      nr::Logf(nr::LogLevel::WARN, "MinHook could not remove a hook rolling back {}: {}", name,
+               MH_StatusToString(status));
+      poisoned = true;
+    }
+  }
+  if (poisoned) {
+    // The hook may still be live: never null its originals, and never hand this slot to another
+    // module.
+    g_originals[slot].poisoned.store(true, std::memory_order_release);
+  } else {
+    g_originals[slot].Clear();
+  }
+  nr::Logf(nr::LogLevel::WARN, "NGX hooks on {} failed; the DLSS placements cannot use it", name);
+}
+
 }  // namespace
 
 bool InsideVulkanEvaluate() {
@@ -764,13 +871,13 @@ bool HookInstaller::Start(NgxObserver* observer, std::string* error) {
     *error = "another NGX hook installer is already running";
     return false;
   }
-  // Plan 11: one MH_Initialize per process, shared with the Vulkan device hook (which may have started it already).
+  // One MH_Initialize per process, shared with the Vulkan device hook (which may have started it already).
   if (const MH_STATUS status = hooks::EnsureMinHook(); status != MH_OK) {
     g_installer_running.store(false);
     *error = std::format("MinHook failed to start: {}", MH_StatusToString(status));
     return false;
   }
-  // The detours and the DLL-load notification live in this module: it must outlive them (spec §10).
+  // The detours and the DLL-load notification live in this module: it must outlive them.
   HMODULE self = nullptr;
   if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                          reinterpret_cast<LPCWSTR>(&OnDllNotification), &self)
@@ -884,24 +991,7 @@ std::vector<HMODULE> LoadedModules() {
 
 size_t HookInstaller::ScanLocked() {
   if (!started_) return 0u;
-
-  // Every loaded module named like an NGX core.
-  const std::vector<HMODULE> loaded_modules = LoadedModules();
-  std::vector<std::pair<HMODULE, std::wstring>> cores;
-  std::wstring path(32768u, L'\0');
-  for (const HMODULE module : loaded_modules) {
-    const DWORD length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
-    if (length == 0u || length >= path.size()) continue;
-    const std::wstring_view full_path(path.data(), length);
-    const size_t separator = full_path.find_last_of(L"\\/");
-    const std::wstring_view file_name =
-        (separator == std::wstring_view::npos ? full_path : full_path.substr(separator + 1u));
-    // By name only: matching on exports also catches the driver's own NGX binaries (160_E658700.bin,
-    // nvngx_deepdvc.dll), whose separate bookkeeping keeps the FG feature's LiveCount above zero forever,
-    // so NotifyFgQuiescent never resets the provider's cached configuration.
-    if (IsNgxCoreFileName(file_name)) cores.emplace_back(module, std::wstring(file_name));
-  }
-
+  const auto cores = FindCores();
   size_t hooked = 0u;
   for (const auto& [module, file_name] : cores) {
     const bool known =
@@ -1229,7 +1319,7 @@ void HookInstaller::Shutdown() {
   }
   installed_.clear();
   rejected_.clear();
-  // Plan 11: MinHook stays initialised while the Vulkan device hook (which lives for the process) holds it.
+  // MinHook stays initialised while the Vulkan device hook (which lives for the process) holds it.
   if (const MH_STATUS status = hooks::ReleaseMinHook(); status != MH_OK) {
     nr::Logf(nr::LogLevel::WARN, "MinHook failed to uninitialize: {}", MH_StatusToString(status));
   }

@@ -7,14 +7,14 @@
 
 namespace uplift::sources {
 
-// Present-motion flicker fix (owner, NMS, 2026-10-08): DLSS's vectors are copied at the game's evaluate into the slot of the present that closes the frame
+// DLSS's vectors are copied at the game's evaluate into the slot of the present that closes the frame
 // (PresentMotionSlotOf), and a slot is written only once the CPU sees its last reader complete. A present stamps the copy it binds, its own or an older
-// one, with its own mark, so an older read moves that slot's last use forward too. Fix round 1 (M3), in the per-second line's terms: present P's mark
+// one, with its own mark, so an older read moves that slot's last use forward too. In the per-second line's terms, present P's mark
 // completes when the GPU passes frame value P, which is signalled at the start of present P+1. The evaluate for frame F runs with CurrentFrame F-1 and
 // lag L = CurrentFrame - CompletedFrame (at least 1: value F-1 is only signalled at present F), so the GPU has passed F-1-L, and the reader of slot
 // F % N, present F-N, is complete when L <= N-1: four slots keep every copy up to a lag of 3, eight up to 7.
-// Fix round 1 (M6): each ring starts at PRESENT_MOTION_MIN_SLOTS and grows once to PRESENT_MOTION_SLOTS, the first time a copy is skipped because its slot
-// was still read (PresentMotionGrows); it shrinks back only when the copies are released. A game whose GPU keeps up pays for four.
+// Each ring starts at PRESENT_MOTION_MIN_SLOTS and grows once to PRESENT_MOTION_SLOTS, the first time a copy is skipped because its slot
+// was still read (PresentMotionGrows); it shrinks back only when the copies are released. A game whose GPU keeps up pays for PRESENT_MOTION_MIN_SLOTS.
 // Shared by the Vulkan copies (VkNrPipeline), Direct3D 12's (NrPipeline) and Direct3D 11's bridge ring.
 inline constexpr size_t PRESENT_MOTION_MIN_SLOTS = 4u;
 inline constexpr size_t PRESENT_MOTION_SLOTS = 8u;  // the most a ring grows to (its arrays' size)
@@ -63,7 +63,7 @@ enum class PresentMotionWrite : uint8_t {
   SLOT_BUSY,  // the copy slot's last reader is not complete yet
 };
 
-// Fix round 1 (M6): a ring of `slots` grows to PRESENT_MOTION_SLOTS after a copy skipped because its slot was still read. Pure.
+// A ring of `slots` grows to PRESENT_MOTION_SLOTS after a copy skipped because its slot was still read. Pure.
 [[nodiscard]] constexpr bool PresentMotionGrows(size_t slots, PresentMotionWrite write) {
   return write == PresentMotionWrite::SLOT_BUSY && slots < PRESENT_MOTION_SLOTS;
 }

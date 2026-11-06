@@ -23,8 +23,8 @@ cbuffer DecodeConstants : register(b0) {
   uint upsampling;     // change-field reads: 0 direct, 1 Classic, 2 Edge-aware
   uint source_x;       // the region's top-left corner in the source
   uint source_y;
-  uint options;        // Plan 5: OPTION_* (the primaries, Consistent transfer, the mask)
-  float chroma_clamp;  // Plan 5 (F14): stops; 0 = off
+  uint options;        // OPTION_* (the primaries, Consistent transfer, the mask)
+  float chroma_clamp;  // stops; 0 = off
   uint foveation_x;    // foveated grid: the packed per-axis warp (0 = identity) and its realized density
   uint foveation_y;
   float foveation_gmax_x;
@@ -32,7 +32,7 @@ cbuffer DecodeConstants : register(b0) {
   float guided_low_gain;   // Edge-aware: the base band's gain (1 = the field's low frequencies unchanged)
 };
 
-// Plan 13: on Vulkan's After DLSS the decode works in place: the target (DLSS's output, u0) is also where the original pixel is read.
+// On Vulkan's After DLSS the decode works in place: the target (DLSS's output, u0) is also where the original pixel is read.
 #if UPLIFT_VK_SOURCE_STORAGE
 UPLIFT_IMAGE_FORMAT(UPLIFT_VK_TARGET_FORMAT) RWTexture2D<float4> target_texture : register(u0);
 #define UPLIFT_LOAD_SOURCE(pixel) target_texture[uint2(pixel)]
@@ -42,7 +42,7 @@ Texture2D<float4> source_texture : register(t0);
 #endif
 Texture2D<float4> change_texture : register(t1);
 Texture2D<float> exposure_texture : register(t2);
-Texture2D<float4> mask_texture : register(t3);  // Plan 5 (§3.13): Uplift's copy of UPLIFT_MASK, read with OPTION_MASK
+Texture2D<float4> mask_texture : register(t3);  // Uplift's copy of UPLIFT_MASK, read with OPTION_MASK
 
 static const float SPATIAL_RADIUS = 1.5f;  // the tent's half-width, in output pixels (v2 design §3.8; per axis since 2026-10-29)
 static const float MIN_WEIGHT = 1e-4f;     // below this total the edge-aware sample falls back to bilinear
