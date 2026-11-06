@@ -123,6 +123,15 @@ struct MotionPass {
   nr::foveation::Grid foveation;
 };
 
+// Depth input (2026-11-06): the game's depth when Direct3D 12 cannot copy it as it is -- a 64-bit depth-stencil, whose depth plane only a shader can
+// take out -- into the R32_FLOAT texture DLSSNR.Depth reads (shaders/depth_cs.hlsl).
+struct DepthPass {
+  ID3D12Resource* source = nullptr;                      // the game's depth, NON_PIXEL_SHADER_RESOURCE
+  DXGI_FORMAT source_view_format = DXGI_FORMAT_UNKNOWN;  // R32_FLOAT_X8X24_TYPELESS for a typeless source, the source's own otherwise
+  nr::Rect region;                                       // their region in `source`, written at `target`'s origin (`target` is the region's size)
+  ID3D12Resource* target = nullptr;                      // R32_FLOAT at the source's size, UNORDERED_ACCESS
+};
+
 // Plan 5 (v2 design §3.14): the exposure meter and governor, one thread group, before the encode.
 struct MeterPass {
   ID3D12Resource* source = nullptr;  // read as the encode reads it
@@ -229,7 +238,7 @@ class ColorPipeline {
  public:
   // Fix round 2, Important 1: sized for Timeline's own AGED_SUBMISSION_TIME (250 ms) at up to 240 fps
   // on a submit-only thread (a common engine shape, e.g. Unreal Engine 5's D3D12 RHI), so the ring
-  // never starves NR into "descriptors busy" there: 128 slots of 21 tables of 7 descriptors (Keep faces' ten included), about 600 KB.
+  // never starves NR into "descriptors busy" there: 128 slots of 22 tables of 7 descriptors (Keep faces' ten included, the depth conversion one), about 630 KB.
   static constexpr uint32_t RING_SLOTS = 128u;
 
   ColorPipeline() = default;
@@ -246,6 +255,8 @@ class ColorPipeline {
   // False (logged, nothing recorded) when slot is out of range. Also used for the change field.
   bool RecordChange(ID3D12GraphicsCommandList* list, uint32_t slot, const ChangePass& pass);
   bool RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const MotionPass& pass);
+  // Depth input: `pass.region` of `pass.source`'s depth plane into `pass.target` (DepthPass). False (logged, nothing recorded) when slot is out of range.
+  bool RecordDepth(ID3D12GraphicsCommandList* list, uint32_t slot, const DepthPass& pass);
   // Plan 5. Each: false (logged, nothing recorded) when slot is out of range.
   bool RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, const MeterPass& pass);
   // One dispatch per level, with UAV barriers on both atlases between them.
@@ -295,6 +306,7 @@ class ColorPipeline {
   Microsoft::WRL::ComPtr<ID3D12PipelineState> encode_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> compute_decode_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> depth_pipeline_;  // Depth input: the 64-bit depth-stencil conversion
   // Plan 5: the look, meter and resolve pipelines.
   Microsoft::WRL::ComPtr<ID3D12PipelineState> meter_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> pyramid_pipeline_;

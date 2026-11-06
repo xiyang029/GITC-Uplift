@@ -542,20 +542,8 @@ void DrawWorkingSize(const OverlayView& view, const Settings& settings) {
     size = input;
   }
   const bool pending = !size.Empty() && !view.first_stage_canvas.Empty() && size != view.first_stage_canvas;
-  gui::Separator();
+  // 2026-11-06: the size itself is not shown here any more -- the top card's Display output and the stage rows' NR size say what runs.
   gui::TextUnformatted(pending ? "Target NR size" : "NR working size");
-  const std::string dimensions = size.Empty() ? gui::Display("Unknown") : std::format("{} × {}", size.width, size.height);
-  const float remaining = gui::GetContentRegionAvail().x - gui::CalcTextSize(dimensions.c_str()).x;
-  const float x = gui::GetCursorPosX() + remaining;
-  if (remaining >= gui::CalcTextSize(pending ? "Target NR size" : "NR working size").x + gui::GetStyle().ItemSpacing.x) {
-    gui::SameLine(); gui::SetCursorPosX(x);
-  }
-  gui::TextUnformatted(dimensions.c_str());
-  if (!view.output_size.Empty()) {
-    const std::string output = std::format("{}  {} × {}", gui::Display("Output"), view.output_size.width, view.output_size.height);
-    widgets::NextGap(style::LabelGap());
-    widgets::SecondaryText(output.c_str());
-  }
 }
 
 // The DLSS / Reflex card's sub-captions: the first row of each group names the group. The rows are drawn in
@@ -611,37 +599,41 @@ bool DrawDlssReflexSection(const OverlayView& view, Settings* settings, OverlayS
 
 bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
   bool changed = false;
-  // Frame inputs and Passes in the left half, NR processing in the right: upstream's own split, so the two
-  // halves of Setup can be read side by side instead of as one long column.
-  widgets::PairedGroups("##setup_groups", [&] {
-    widgets::GroupHeading("Frame inputs");
-    changed |= DrawMotionRow(view, settings, state);
-    changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state, true);
-    widgets::NextGap(style::BlockGap());
-    widgets::GroupHeading("Passes");
-    changed |= DrawRow(*FindSetting("PassCount"), view, settings, state, true);
-  }, [&] {
-    widgets::GroupHeading("NR processing", "Pass 1 defaults");
-    changed |= DrawRow(*FindSetting("Preset"), view, settings, state, true);
-    changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state, true);
-    changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state, true);
-    // Anamorphic (2026-10-29): Custom's two axes apart, under the mode they belong to.
-    if (settings->resolution_mode == ResolutionMode::CUSTOM) {
-      changed |= DrawRow(*FindSetting("ResolutionAsymmetric"), view, settings, state, true);
-      if (settings->resolution_asymmetric) changed |= DrawRow(*FindSetting("ResolutionScaleY"), view, settings, state, true);
-    }
-    DrawWorkingSize(view, *settings);
-    changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
-    // Edge-aware's base band gain, right below the choice it depends on.
-    changed |= DrawRow(*FindSetting("GuidedBaseGain"), view, settings, state, true);
-    changed |= DrawRow(*FindSetting("Foveation"), view, settings, state, true);
-    if (settings->foveation) {
-      changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state, true);
-      changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state, true);
-      changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state, true);
-      changed |= DrawRow(*FindSetting("FoveationFalloffY"), view, settings, state, true);
-      changed |= DrawRow(*FindSetting("FoveationEdge"), view, settings, state, true);
-    }
+  // Setup's rows sit in a card of their own, as Look's do (2026-11-06): straight on the panel background they
+  // read as part of whatever was above them, while Look's card edge said where its own rows began.
+  widgets::Panel("##setup_body", [&] {
+    // Frame inputs and Passes in the left half, NR processing in the right: upstream's own split, so the two
+    // halves of Setup can be read side by side instead of as one long column.
+    widgets::PairedGroups("##setup_groups", [&] {
+      widgets::GroupHeading("Frame inputs");
+      changed |= DrawMotionRow(view, settings, state);
+      changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state, true);
+      widgets::NextGap(style::BlockGap());
+      widgets::GroupHeading("Passes");
+      changed |= DrawRow(*FindSetting("PassCount"), view, settings, state, true);
+    }, [&] {
+      widgets::GroupHeading("NR processing", "Pass 1 defaults");
+      changed |= DrawRow(*FindSetting("Preset"), view, settings, state, true);
+      changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state, true);
+      changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state, true);
+      // Anamorphic (2026-10-29): Custom's two axes apart, under the mode they belong to.
+      if (settings->resolution_mode == ResolutionMode::CUSTOM) {
+        changed |= DrawRow(*FindSetting("ResolutionAsymmetric"), view, settings, state, true);
+        if (settings->resolution_asymmetric) changed |= DrawRow(*FindSetting("ResolutionScaleY"), view, settings, state, true);
+      }
+      DrawWorkingSize(view, *settings);
+      changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
+      // Edge-aware's base band gain, right below the choice it depends on.
+      changed |= DrawRow(*FindSetting("GuidedBaseGain"), view, settings, state, true);
+      changed |= DrawRow(*FindSetting("Foveation"), view, settings, state, true);
+      if (settings->foveation) {
+        changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state, true);
+        changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state, true);
+        changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state, true);
+        changed |= DrawRow(*FindSetting("FoveationFalloffY"), view, settings, state, true);
+        changed |= DrawRow(*FindSetting("FoveationEdge"), view, settings, state, true);
+      }
+    });
   });
   return changed;
 }
@@ -649,24 +641,28 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
 bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
   static constexpr std::array<const char*, 2> options{"Mine", "Built-in"};
   static constexpr std::array<std::string_view, 2> why{}, tips{"", "The built-in look, read-only; your own settings are kept."};
-  // Compare draws through the same row layout as everything else: its two segments take the control column and
-  // the reset slot stays empty (there is no reset for a view switch).
-  widgets::RowLabel("Compare");
-  {
-    gui::PushID("Compare");
-    if (const int pick = widgets::Segmented("##Compare", options.data(), 2, state->defaults_view ? 1 : 0, why.data(), tips.data());
-        pick >= 0) {
-      state->defaults_view = pick == 1;
-    }
-    gui::PopID();
-  }
-
   bool changed = false;
   const auto row = [&](const char* key, bool grouped = true) { changed |= DrawRow(*FindSetting(key), view, settings, state, grouped); };
-  widgets::NextGap(style::BlockGap());
-  // The Look rows live in a card of their own, as every other section's do: a section that ends on a bare row
-  // leaves the next collapsible header at a different offset than one that ends on a card.
+  // The Look rows live in a card of their own, title included (2026-11-06): a bare caption on the panel background
+  // read as naming the card above, and a section that ends on a bare row leaves the next collapsible header at a
+  // different offset than one that ends on a card. Compare joined them inside it: the section's one row left outside.
   widgets::Panel("##look_body", [&] {
+    if (widgets::SectionCaption("Look", "Reset", SectionChanged(*settings, SettingSection::LOOK) && !state->defaults_view)) {
+      ResetSection(settings, SettingSection::LOOK);
+      changed = true;
+    }
+    // Compare draws through the same row layout as everything else: its two segments take the control column and
+    // the reset slot stays empty (there is no reset for a view switch).
+    widgets::RowLabel("Compare");
+    {
+      gui::PushID("Compare");
+      if (const int pick = widgets::Segmented("##Compare", options.data(), 2, state->defaults_view ? 1 : 0, why.data(), tips.data());
+          pick >= 0) {
+        state->defaults_view = pick == 1;
+      }
+      gui::PopID();
+    }
+    widgets::NextGap(style::BlockGap());
     // Image in the left half, Characters in the right, as upstream draws them: the two are read against each
     // other, and one long column of nine rows hides that they are two groups.
     widgets::PairedGroups("##look_groups", [&] {
@@ -1019,14 +1015,9 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   widgets::NextGap(style::BlockGap());
   changed |= DrawSetupGroups(view, settings, state);
 
-  // ui-review.md §2 finding 7: Compare (Mine/Built-in) moves here, the first row of Look.
+  // ui-review.md §2 finding 7: Compare (Mine/Built-in) moves here, the first row of Look. The section's own
+  // title lives in its card now (2026-11-06), drawn inside DrawLookGroups, so nothing sits bare on the panel.
   widgets::NextGap(style::SectionGap());
-  const bool look_changed = SectionChanged(*settings, SettingSection::LOOK);
-  if (widgets::SectionCaption("Look", "Reset", look_changed && !state->defaults_view)) {
-    ResetSection(settings, SettingSection::LOOK);
-    changed = true;
-  }
-  widgets::NextGap(style::BlockGap());
   changed |= DrawLookGroups(view, settings, state);
   DrawDlssReflexSection(view, settings, state, changed);
 

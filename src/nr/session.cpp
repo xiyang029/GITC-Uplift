@@ -813,18 +813,14 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   stage.faces_evaluated = faces_ran;
   const uint32_t run = run_end - slice.first;
   // Depth input (2026-11-05): NR asks with a depth whenever one reached it -- the game's own, as DLSS read it, or a copy
-  // made for a Present group -- and a game that hands DLSS none leaves NR without it. This line is a state report: it goes
-  // out the moment the answer changes (the first answer included), never once per frame.
-  const bool depth_bound = (inputs.depth.resource != nullptr);
-  if (run > 0u && depth_reported_ != depth_bound) {
-    depth_reported_ = depth_bound;
-    if (depth_bound) {
-      const D3D12_RESOURCE_DESC depth_desc = inputs.depth.resource->GetDesc();
-      Logf(LogLevel::INFO, "Depth input: NR is using the depth as DLSSNR.Depth (DXGI_FORMAT {}, {}x{})",
-           static_cast<uint32_t>(depth_desc.Format), static_cast<uint32_t>(depth_desc.Width), depth_desc.Height);
-    } else {
-      Log(LogLevel::INFO, "Depth input: NR is running without DLSSNR.Depth (no depth reached it)");
-    }
+  // made for a Present group -- and a game that hands DLSS none leaves NR without it. Only the failure logs (2026-11-06):
+  // the copy falls back a frame, and "using" said nothing a fix could act on. One line when the depth goes missing; quiet
+  // until it comes back.
+  if (run > 0u && inputs.depth.resource == nullptr && !depth_without_logged_) {
+    depth_without_logged_ = true;
+    Log(LogLevel::INFO, "Depth input: NR is running without DLSSNR.Depth (no depth reached it)");
+  } else if (inputs.depth.resource != nullptr) {
+    depth_without_logged_ = false;  // back, silently; the next loss reports again
   }
   uint32_t wanted_end = std::min(slice_end, pass_count_);
   if (pass_view_limit_ != 0u) {

@@ -874,7 +874,7 @@ inline KeyCaptureHit KeyCaptureButton(const char* label, bool capturing) {
 // A dialog that asks before a setting takes effect: the words, then a line of buttons that cancel and confirm.
 // `open` is the caller's flag, cleared on either answer and on Escape; `confirm_label` is the button that says
 // yes. Returns true on the frame it was confirmed -- the caller applies the change then, never before. The
-// caller opens it by name: OpenDialog(id). `width` is the dialog's width in ems, 0 for the text's own.
+// caller opens it by name: OpenDialog(id). `width` is the dialog's width in panel units, 0 for the text's own.
 inline bool ConfirmDialog(const char* id, const char* body, const char* cancel_label, const char* confirm_label, bool* open,
                           float width = 0.f) {
   if (open == nullptr || !*open) {
@@ -884,8 +884,13 @@ inline bool ConfirmDialog(const char* id, const char* body, const char* cancel_l
   // already open, so a frame that redraws it does not push it back onto the stack.
   if (!gui::IsPopupOpen(id)) {
     if (width > 0.f) {
-      gui::SetNextWindowSize(ImVec2(width * gui::GetFontSize(), 0.f), ImGuiCond_Appearing);
+      gui::SetNextWindowSize(ImVec2(Units(width), 0.f), ImGuiCond_Appearing);
     }
+    // Centered in the game's window, not in the panel (2026-11-06): a question about a setting reads as belonging to
+    // the game, and a panel that sits at a screen edge put the dialog half off it. The overlay draws the game's own
+    // presented image, so the IO's DisplaySize is that window, its origin (0, 0).
+    const ImVec2 center(0.5f * gui::GetIO().DisplaySize.x, 0.5f * gui::GetIO().DisplaySize.y);
+    gui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     gui::OpenPopup(id);
   }
   bool shown = true;
@@ -896,10 +901,20 @@ inline bool ConfirmDialog(const char* id, const char* body, const char* cancel_l
   }
   gui::TextWrapped("%s", body);
   gui::Separator();
-  const bool cancel = gui::Button(cancel_label);
+  bool cancel = false;
+  {
+    StyleScope quiet;
+    quiet.FlatButton();
+    cancel = gui::Button(cancel_label);
+  }
   gui::SetItemDefaultFocus();
   gui::SameLine();
-  const bool accept = gui::Button(confirm_label);
+  bool accept = false;
+  {
+    StyleScope accent;
+    accent.AccentButton();
+    accept = gui::Button(confirm_label);
+  }
   if (cancel || accept || gui::IsKeyPressed(ImGuiKey_Escape)) {
     *open = false;
     gui::CloseCurrentPopup();  // answered: the dialog goes away on this frame, not the next
