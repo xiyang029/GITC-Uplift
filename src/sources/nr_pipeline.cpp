@@ -70,9 +70,8 @@ uint64_t DepthBytesPerPixel(DXGI_FORMAT format) {
   }
 }
 
-// Depth input: the format the depth copy is made in -- the source's own, since a copy cannot change it, or R32_FLOAT for the 64-bit depth-stencils
-// DepthViewFormat converts -- or nullopt when NR could not read it back as DLSSNR.Depth. A typeless resource a copy can carry is copied as its plain twin,
-// which is what a committed copy must be.
+// Depth input: the format a depth copy can be made in -- the source's own, since a copy cannot change it -- or nullopt when NR could not read it back as
+// DLSSNR.Depth. A typeless resource is copied as its plain twin, which is what a committed copy must be.
 std::optional<DXGI_FORMAT> ReadDepthFormat(DXGI_FORMAT format) {
   switch (format) {
     case DXGI_FORMAT_D16_UNORM:
@@ -88,26 +87,13 @@ std::optional<DXGI_FORMAT> ReadDepthFormat(DXGI_FORMAT format) {
     case DXGI_FORMAT_D24_UNORM_S8_UINT:
     case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
       return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;  // the depth channel alone, which is all NR reads; the same 32 bits, so the copy is legal
-    // 2026-11-06 (Depth input): a 64-bit depth-stencil, which no copy can carry -- it is 64 bits a pixel, and Direct3D 12 cannot copy one plane of it.
-    // Its depth plane is converted through a view instead (DepthViewFormat and depth_cs.hlsl), one texel for one.
-    case DXGI_FORMAT_R32G8X24_TYPELESS:
-    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
-      return DXGI_FORMAT_R32_FLOAT;
+    // D32_FLOAT_S8X24_UINT is refused on purpose: it is 64 bits a pixel, so R32_FLOAT is not its copy twin (a copy may not change the format or the
+    // stride), and Direct3D 12 has no way to copy one plane of a depth-stencil. Copying it as itself would hand NR a 64-bit depth-stencil resource.
     case DXGI_FORMAT_R16G16_FLOAT:
     case DXGI_FORMAT_R32G32_FLOAT:
       return format;  // an already-float depth (Vulkan's bridge), copied as it is
     default:
       return std::nullopt;
-  }
-}
-
-// Depth input: the view a 64-bit depth-stencil's depth plane is read through when it is converted -- the typeless twin keeps the family
-// (R32_FLOAT belongs to another), the committed one is its own. Nullopt when no conversion is needed: ReadDepthFormat's answer is then a copy twin.
-std::optional<DXGI_FORMAT> DepthViewFormat(DXGI_FORMAT format) {
-  switch (format) {
-    case DXGI_FORMAT_R32G8X24_TYPELESS:     return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
-    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:  return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-    default:                                return std::nullopt;
   }
 }
 
@@ -221,12 +207,10 @@ void NrPipeline::RetireMotionCopies() {
   motion_copies_ = {};
 }
 
-bool NrPipeline::MakeDepthCopies(size_t first, size_t end, nr::Size size, DXGI_FORMAT format, bool unordered_access) {
-  // A copy needs no UAV; a converted depth is written by depth_cs.hlsl, so its texture must carry one.
-  const D3D12_RESOURCE_FLAGS flags = (unordered_access ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE);
+bool NrPipeline::MakeDepthCopies(size_t first, size_t end, nr::Size size, DXGI_FORMAT format) {
   bool made = true;
   for (size_t index = first; index < end; ++index) {
-    depth_copies_.textures[index] = CreateTexture(size, format, flags, COMPUTE_READ, L"Uplift DLSS depth copy");
+    depth_copies_.textures[index] = CreateTexture(size, format, D3D12_RESOURCE_FLAG_NONE, COMPUTE_READ, L"Uplift DLSS depth copy");
     made = made && static_cast<bool>(depth_copies_.textures[index]);
   }
   if (!made) {
@@ -1353,7 +1337,6 @@ bool NrPipeline::RecordDepthCopy(ID3D12GraphicsCommandList* list, const nr::Boun
   if (session_.State() != nr::SessionState::ACTIVE || list == nullptr || depth.resource == nullptr) return false;
   const D3D12_RESOURCE_DESC description = depth.resource->GetDesc();
   const std::optional<DXGI_FORMAT> format = ReadDepthFormat(description.Format);
-  const std::optional<DXGI_FORMAT> view_format = DepthViewFormat(description.Format);
   nr::Rect region = depth.rect;
   if (region.width == 0u || region.height == 0u) {
     region = {.x = 0u, .y = 0u, .width = static_cast<uint32_t>(description.Width), .height = description.Height};
@@ -1368,43 +1351,23 @@ bool NrPipeline::RecordDepthCopy(ID3D12GraphicsCommandList* list, const nr::Boun
   const uint32_t slot = next_slot_;
   if (!timeline_.IsComplete(slot_marks_[slot])) return false;
   const nr::Size size = {region.width, region.height};
-  const bool converted = view_format.has_value();
-  if (depth_copies_.size != size || depth_copies_.format != *format || depth_copies_.converted != converted || !depth_copies_.textures[0]) {
+  if (depth_copies_.size != size || depth_copies_.format != *format || !depth_copies_.textures[0]) {
     RetireDepthCopies();
-    if (!MakeDepthCopies(0u, PRESENT_MOTION_MIN_SLOTS, size, *format, converted)) {
+    if (!MakeDepthCopies(0u, PRESENT_MOTION_MIN_SLOTS, size, *format)) {
       depth_copies_ = {};
       return false;
     }
     depth_copies_.size = size;
     depth_copies_.format = *format;
-    depth_copies_.converted = converted;
   }
   const size_t index = PresentMotionSlotOf(frame, depth_copies_.slots);
   if (!timeline_.IsComplete(depth_copies_.last_use[index])) {
-    // The ring's growth rule is the motion copies' (four slots, then eight): the same lag that starves one starves the other.
-    if (PresentMotionGrows(depth_copies_.slots, PresentMotionWrite::SLOT_BUSY) && MakeDepthCopies(depth_copies_.slots, MOTION_COPY_SLOTS, size, *format, converted)) {
-      nr::Logf(nr::LogLevel::INFO, "Direct3D 12: the GPU runs too far behind for four slots: the depth copies for Present grow from {} to {} slots",
-               depth_copies_.slots, MOTION_COPY_SLOTS);
-      depth_copies_.slots = MOTION_COPY_SLOTS;
-    }
+    // No growth (2026-11-07): the depth is not worth four more full-size textures, and a busy slot loses only this frame's copy -- the present falls
+    // back to the newest copy within its age, and DLSSNR.Depth is optional (NR runs on its own estimate without it).
     return false;
   }
   CommitSlot(slot);
   ID3D12Resource* const target = depth_copies_.textures[index].Get();
-  if (view_format) {
-    // A 64-bit depth-stencil: the plane is converted through the view (depth_cs.hlsl). The source is the game's own depth -- COMMON, or a read state
-    // Uplift cannot know -- brought to a read state and put back to COMMON, as the copy path does (src/bridge/record_nr.cpp).
-    Transition(list, depth.resource, D3D12_RESOURCE_STATE_COMMON, COMPUTE_READ);
-    Transition(list, target, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    const bool recorded = color_.RecordDepth(list, slot, {.source = depth.resource, .source_view_format = *view_format, .region = region, .target = target});
-    Transition(list, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    Transition(list, depth.resource, COMPUTE_READ, D3D12_RESOURCE_STATE_COMMON);
-    // Nothing was written: no copy this frame, so the present binds none and NR runs without DLSSNR.Depth.
-    if (!recorded) return false;
-    depth_copies_.frames[index] = frame;
-    depth_copies_.last_use[index] = slot_marks_[slot];
-    return true;
-  }
   // A copy cannot change the format, and the source is the game's own depth: it is COMMON (or in a read state Uplift cannot know), so it is brought to
   // COPY_SOURCE and put back to COMMON, which is what every other game-list recording of a game resource does (src/bridge/record_nr.cpp).
   Transition(list, depth.resource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);

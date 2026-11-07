@@ -151,8 +151,8 @@ class NrPipeline final : private nr::PassResolver {
   bool RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& motion, float scale_x, float scale_y, bool flip_y = false,
                         float offset_x = 0.f, float offset_y = 0.f);
   // 2026-11-05 (Depth input): at an evaluate of the game's DLSS, copies its depth -- the very texture DLSS reads as Input.Depth, at that subrect -- on the
-  // game's list into the slot of the present that closes the current frame, exactly as RecordMotionCopy does for the vectors. A depth a copy can carry keeps
-  // the source's own format; a 64-bit depth-stencil is converted instead (depth_cs.hlsl). False when nothing was recorded.
+  // game's list into the slot of the present that closes the current frame, exactly as RecordMotionCopy does for the vectors. MakeDepthCopies keeps the
+  // source's own format (a depth resource cannot be written by the motion copy's shader), so this is a plain region copy. False when nothing was recorded.
   bool RecordDepthCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& depth);
   // Frees the intermediates now when the GPU has passed the newest recording that used them (a drain to OFF
   // normally has); otherwise hands them to the timeline, which frees them once it does. Also the look set,
@@ -362,7 +362,8 @@ class NrPipeline final : private nr::PassResolver {
   };
 
   // 2026-11-05 (Depth input): the game's depth, copied at the DLSS evaluate for the present that closes the frame, in the same ring scheme as the motion
-  // copies above. A depth a copy can carry keeps the source's own format; a 64-bit depth-stencil is converted instead (depth_cs.hlsl).
+  // copies above (indexed by the frame the present closes, PRESENT_MOTION_MIN_SLOTS -- no growth, 2026-11-07: the depth is not worth four more full-size
+  // textures). Each copy keeps the source's own format, so it is a plain region copy, not a compute pass.
   struct DepthCopies {
     std::array<Texture, MOTION_COPY_SLOTS> textures;
     std::array<uint64_t, MOTION_COPY_SLOTS> frames = {};  // the frame each copy was made for; 0 = none
@@ -370,7 +371,6 @@ class NrPipeline final : private nr::PassResolver {
     std::array<nr::Mark, MOTION_COPY_SLOTS> last_use = {};
     nr::Size size;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // the format the copies are in (the source's, or its plain twin)
-    bool converted = false;                    // the copies were written by depth_cs.hlsl (a 64-bit depth-stencil), so they carry a UAV
     bool warned_format = false;
   };
 
@@ -403,7 +403,7 @@ class NrPipeline final : private nr::PassResolver {
   void RetireExposureCheck(StageSet* set);
   void RetireMotionCopies();   // likewise for the motion copies
   void RetireDepthCopies();    // and for the depth copies (Depth input)
-  bool MakeDepthCopies(size_t first, size_t end, nr::Size size, DXGI_FORMAT format, bool unordered_access);
+  bool MakeDepthCopies(size_t first, size_t end, nr::Size size, DXGI_FORMAT format);
   void RetireLaunchpadMotion();  // likewise for Launchpad's converted motion
   void RetireDlssPresentMotion();  // likewise for Direct3D 11's converted ring vectors
   bool MakeMotionCopies(size_t first, size_t end, nr::Size size);  // motion_copies_.textures[first, end); none kept on a failure

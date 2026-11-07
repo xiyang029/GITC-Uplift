@@ -9,7 +9,6 @@
 #include "decode_cs.h"
 #include "decode_ps.h"
 #include "decode_vs.h"
-#include "depth_cs.h"
 #include "encode_cs.h"
 #include "faces_cs.h"
 #include "look_pyramid_cs.h"
@@ -53,9 +52,7 @@ constexpr uint32_t FACES_SHOW_TABLE = 17u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_FIRST_TABLE = 18u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_TABLE = 19u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_SWAPPED_TABLE = 20u * TABLE_SIZE;
-// Depth input (2026-11-06): the conversion of a 64-bit depth-stencil's depth plane into the R32_FLOAT copy NR reads.
-constexpr uint32_t DEPTH_TABLE = 21u * TABLE_SIZE;
-constexpr uint32_t DESCRIPTORS_PER_SLOT = 22u * TABLE_SIZE;
+constexpr uint32_t DESCRIPTORS_PER_SLOT = 21u * TABLE_SIZE;
 constexpr uint32_t STABILIZE_CUT = 0u;  // look_stabilize_cs.hlsl's modes and flags
 constexpr uint32_t STABILIZE_LEVELS = 1u;
 constexpr uint32_t STABILIZE_DETAIL = 2u;
@@ -203,8 +200,7 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
     }
     return SUCCEEDED(result);
   };
-  if (!build_compute(g_depth_cs, sizeof(g_depth_cs), &depth_pipeline_, "depth")
-      || !build_compute(g_meter_cs, sizeof(g_meter_cs), &meter_pipeline_, "meter")
+  if (!build_compute(g_meter_cs, sizeof(g_meter_cs), &meter_pipeline_, "meter")
       || !build_compute(g_look_pyramid_cs, sizeof(g_look_pyramid_cs), &pyramid_pipeline_, "look pyramid")
       || !build_compute(g_look_stabilize_cs, sizeof(g_look_stabilize_cs), &stabilize_pipeline_, "look stabiliser")
       || !build_compute(g_look_shape_cs, sizeof(g_look_shape_cs), &shape_pipeline_, "look shape")
@@ -354,15 +350,6 @@ bool ColorPipeline::RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot,
       pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
   };
   DispatchCompute(list, motion_pipeline_.Get(), constants, base, pass.canvas.width, pass.canvas.height);
-  return true;
-}
-
-bool ColorPipeline::RecordDepth(ID3D12GraphicsCommandList* list, uint32_t slot, const DepthPass& pass) {
-  if (!SlotInRange(slot, "RecordDepth")) return false;
-  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + DEPTH_TABLE;
-  WriteTable(base, {{pass.source, pass.source_view_format}}, {{pass.target, DXGI_FORMAT_R32_FLOAT}});
-  const std::array<uint32_t, 4u> constants = {pass.region.x, pass.region.y, pass.region.width, pass.region.height};
-  DispatchCompute(list, depth_pipeline_.Get(), constants, base, pass.region.width, pass.region.height);
   return true;
 }
 

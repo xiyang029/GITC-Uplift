@@ -210,7 +210,6 @@ set(UPLIFT_SHADER_OUTPUT "${CMAKE_BINARY_DIR}/generated/shaders")
 file(MAKE_DIRECTORY "${UPLIFT_SHADER_OUTPUT}")
 set(UPLIFT_SHADER_HEADERS)
 foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0" "decode_cs|cs_6_0" "motion_cs|cs_6_0"
-                        "depth_cs|cs_6_0"
                         "look_pyramid_cs|cs_6_0" "look_stabilize_cs|cs_6_0" "look_shape_cs|cs_6_0" "resolve_cs|cs_6_0"
                         "meter_cs|cs_6_0" "faces_cs|cs_6_0")
   string(REPLACE "|" ";" shader_parts "${shader}")
