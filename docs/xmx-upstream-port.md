@@ -68,6 +68,46 @@ code. The 21 shas, checked one by one on 2026-11-06: `60150c1`, `4e800fb`, `8309
 `79b4429`, `a514f0b`, `1f6da81`, `af9343d`, `678f10f`, `08b49a0`, `2ccafb5`, `daba3d9`, `ce51e74`,
 `c9377fb`, `4b17340`, `f037a50`, `78b6e6c`, `67a890a`, `d5f9415`, `cd4dff5`.
 
+## Sweep 2026-11-07: `efc1fe7` -> `2928eeb` (1.8.6, 9 commits)
+
+`main` and `develop` both moved to `2928eeb`. **The ABI layer did not move**: `xemfg/vendor/` and
+`xmx_generator.hpp`'s struct block are byte-identical again. Two commits carried code; one was ported.
+
+### Taken (1)
+
+- `e4d4aad` (the XMX half) -- the ported multi-frame model refuses the jittered-motion flag
+(`DLSSG.MvecJittered`, bit 4), so Death Stranding 2 and HZD Remastered failed `init` and fell back to
+Intel's 2x model. Upstream now strips the flag before `init` when `maxFrames > 1`: `src/xmx/generator.hpp`'s
+`kFlagMotionJittered`, `JitterFlagStripped()`, and the `Prepare` init block (the log's `init` line now
+reports the flags actually handed over, plus the frame count). The motion vectors still carry the camera
+jitter -- about a render pixel at most; upstream saw no artifact in Death Stranding 2.
+
+  Two deliberate deviations, both checked against this port's init path:
+
+  - Upstream's switch is `[DLSSG] XmxJitter=0`, read with `GetPrivateProfileIntW`. This port has no ini
+of its own, so the switch became `XmxJitter=0` under the existing `[Uplift]` section of `ReShade.ini`,
+read once per process via `reshade::get_config_value` in `PushFgRuntimeChoices` (`src/addon.cpp`) and
+pushed to `src/xmx/host.hpp`'s `SetJitterStrip`/`JitterStrip` (atomic, relaxed -- the same pattern as the
+panel's switch). `0` restores the pre-1.8.6 behaviour: the multi-frame model is asked with the flag it
+refuses and Intel's 2x model runs instead.
+  - Upstream resets `init.flags` to the game's values after a stripped init so its same-frame 2x retry
+re-reads them. This port refuses the shape instead (`refused`/`refusedShape`) and lets a later call
+rebuild, so there is no second reader and the reset would be a dead store -- omitted.
+
+### Not applicable: provider-module code this port does not have (2)
+
+- `dfefd3e` -- DRS ceiling NvAPI hook, driver-only provider diagnostics, RTX 20/30 pre-Ada `slInit`
+admission, panel wording: all of it lives in the mfgunlock addon's DLSS-G/NvAPI layer; this port hooks
+none of it.
+- `e4d4aad`'s remainder -- the `gameXefgModules`/ERSS entries in `profiles.json` and the tests are the
+upstream XeFG-caller judgement (its provider now picks which XeFG module runs per game); this port
+embeds the provider, so there is no foreign caller to route. The native_bridge DXGI factory-hook
+diagnostics hang off a hook path this port does not walk.
+
+### Not code (7)
+
+`2928eeb`, `7654df9`, `ec1ba21` (README updates), `2643da7`, `ed5d8a7` (1.8.6 release notes),
+`22415f1`, `36302f5` (1.8.5 release notes) -- version strings and docs, checked one by one on 2026-11-07.
 ## The next sweep
 
 ```

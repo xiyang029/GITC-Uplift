@@ -667,11 +667,20 @@ inline void NoteRefused(const ExecuteParams& execute) {
                                     std::to_string(execute.firstFrame) + " jitter " + Number(execute.next.jitter[0]) +
                                     "," + Number(execute.next.jitter[1]));
 }
+constexpr uint32_t kFlagDepthInverted = 1u << 0;
+constexpr uint32_t kFlagMotionJittered = 1u << 4;
+// Upstream 1.8.6 (e4d4aad): the ported multi-frame model refuses the jittered-motion flag (HZD
+// Remastered, Death Stranding 2) and the fallback ran Intel's 2x model instead. The model is now
+// started without that flag; the motion vectors still carry the camera jitter (about a render
+// pixel at most), with no visible artifact in Death Stranding 2. XmxJitter=0 under [Uplift] in
+// ReShade.ini restores the 2x fallback (upstream spells it [DLSSG] XmxJitter=0).
+inline bool JitterFlagStripped() { return uplift::xmx::JitterStrip(); }
+
 inline bool Prepare(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* params, const D3D12_RESOURCE_DESC& output) {
   auto& state = Get();
   uint32_t flags = 0;
-  if (Value<int>(params, "DLSSG.DepthInverted", 0) != 0) flags |= 1u << 0;
-  if (Value<int>(params, "DLSSG.MvecJittered", 0) != 0) flags |= 1u << 4;
+  if (Value<int>(params, "DLSSG.DepthInverted", 0) != 0) flags |= kFlagDepthInverted;
+  if (Value<int>(params, "DLSSG.MvecJittered", 0) != 0) flags |= kFlagMotionJittered;
   const auto width = static_cast<uint32_t>(output.Width);
   ComPtr<ID3D12Device> device;
   if (FAILED(list->GetDevice(IID_PPV_ARGS(&device)))) return false;
@@ -716,13 +725,19 @@ inline bool Prepare(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* 
   init.width = width;
   init.height = output.Height;
   init.format = output.Format;
-  init.flags = flags;
+  const bool strip = (flags & kFlagMotionJittered) != 0 && state.maxFrames > 1 && JitterFlagStripped();
+  init.flags = strip ? flags & ~kFlagMotionJittered : flags;
   init.maxFrames = state.maxFrames;
   init.creationMask = 1;
   init.visibleMask = 1;
   const auto result = Guarded(reinterpret_cast<unsigned char*>(state.fg) + kInitRva, state.context, &init, nullptr);
   Log("init " + std::to_string(width) + "x" + std::to_string(output.Height) + " format " +
-      std::to_string(static_cast<int>(output.Format)) + " flags " + std::to_string(flags) + " result " + std::to_string(result));
+      std::to_string(static_cast<int>(output.Format)) + " flags " + std::to_string(init.flags) + " frames " +
+      std::to_string(init.maxFrames) + " result " + std::to_string(result));
+  if (strip && result == 0)
+    Log("the multi-frame model runs without the jittered-motion flag (XmxJitter=0 under [Uplift] restores Intel's 2x model)");
+  // Upstream also resets init.flags to the game's values for its same-frame 2x retry; this add-on
+  // refuses the shape and lets a later call rebuild instead, so there is no second reader here.
   if (result != 0) {
     // Found out only here: the hook into NVIDIA's generation is gone long before this, so a game
     // whose output format XeFG cannot take has to be told what to change.

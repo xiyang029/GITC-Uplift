@@ -26,6 +26,12 @@ namespace uplift::xmx {
 void SetEnabled(bool enabled) noexcept;
 bool Enabled() noexcept;
 
+// Upstream 1.8.6 (e4d4aad): the ported multi-frame model refuses the jittered-motion flag, so it
+// is started without that flag (the game's jitter survives in the motion vectors, about a render
+// pixel at most). Default on; XmxJitter=0 under [Uplift] in ReShade.ini restores the 2x fallback.
+void SetJitterStrip(bool strip) noexcept;
+bool JitterStrip() noexcept;
+
 // The folder the Intel runtime is looked for in: the add-on's own directory (the game folder).
 std::filesystem::path AddonDirectory();
 

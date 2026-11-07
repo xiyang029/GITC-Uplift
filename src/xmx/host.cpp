@@ -43,10 +43,16 @@ namespace {
 // The panel's switch. One relaxed load per evaluate: the path that reads it is on the frame's
 // critical path and the value only ever changes from the add-on's own settings push.
 std::atomic_bool g_enabled{false};
+// The upstream 1.8.6 switch (e4d4aad). Same access pattern as the panel's switch: the init path
+// reads it once per context creation and the add-on's settings push is the only writer.
+std::atomic_bool g_jitter_strip{true};
 }  // namespace
 
 void SetEnabled(bool enabled) noexcept { g_enabled.store(enabled, std::memory_order_relaxed); }
 bool Enabled() noexcept { return g_enabled.load(std::memory_order_relaxed); }
+
+void SetJitterStrip(bool strip) noexcept { g_jitter_strip.store(strip, std::memory_order_relaxed); }
+bool JitterStrip() noexcept { return g_jitter_strip.load(std::memory_order_relaxed); }
 
 std::filesystem::path AddonDirectory() {
   static const std::filesystem::path cached = [] {

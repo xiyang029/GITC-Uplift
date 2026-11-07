@@ -510,6 +510,17 @@ uint32_t FgMultiplierChoice(ui::FgMultiplierOverride choice) {
 void PushFgRuntimeChoices(const ui::Settings& settings) {
   const uint32_t multiplier = FgMultiplierChoice(settings.fg_multiplier);
   addon::slfg::SetXmxMode(settings.xmx_generator);
+  // Upstream 1.8.6 (e4d4aad): XmxJitter=0 under [Uplift] restores the pre-1.8.6 behaviour (the
+  // multi-frame model is asked with the jittered-motion flag it refuses and Intel's 2x model runs
+  // instead). Read once per process: the choice applies at game start, like upstream's
+  // DynamicMaxMultiplier, and the panel has no switch for it on either side.
+  static const bool xmx_jitter_strip = [] {
+    char value[8] = "";
+    size_t size = sizeof(value);
+    if (!reshade::get_config_value(nullptr, ui::CONFIG_SECTION, "XmxJitter", value, &size)) return true;
+    return std::strcmp(value, "0") != 0;
+  }();
+  uplift::xmx::SetJitterStrip(xmx_jitter_strip);
   addon::slfg::SetForceMultiplier(multiplier);
   addon::slfg::SetDynamicMfg(settings.dynamic_mfg && !settings.xmx_generator, settings.dynamic_mfg_target_fps);
   // Advertise the provider's full ceiling (5 generated frames = 6x) once any override is wanted.
