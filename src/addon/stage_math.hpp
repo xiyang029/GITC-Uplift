@@ -156,7 +156,8 @@ struct LayoutTarget {
   double scale = FULL_SCALE;
   // Anamorphic (2026-10-29): the height's own Custom scale, and whether it acts on its own axis at all. One
   // switch for the whole chain: a later group reads pass 1's, so two groups never disagree about the shape.
-  double scale_y = scale;
+  const bool split_axes = (mode == ui::ResolutionMode::CUSTOM && config.resolution_asymmetric);
+  double scale_y = FULL_SCALE;
   switch (mode) {
     case ui::ResolutionMode::FULL:        break;
     case ui::ResolutionMode::QUALITY:     scale = sources::QUALITY_SCALE; break;
@@ -166,7 +167,7 @@ struct LayoutTarget {
       scale = custom_scale / CUSTOM_SCALE_PERCENT;
       // Every preset above is one uniform factor; only Custom may split the axes, and only while the switch
       // is on (both at one value is the uniform case, which WorkSize treats identically).
-      if (config.resolution_asymmetric) scale_y = config.resolution_scale_y / CUSTOM_SCALE_PERCENT;
+      if (split_axes) scale_y = config.resolution_scale_y / CUSTOM_SCALE_PERCENT;
       break;
     case ui::ResolutionMode::MATCH_GAME:
       if (snapshot && !snapshot->render.Empty() && !before_upscaling && !dlss_off) {
@@ -175,6 +176,7 @@ struct LayoutTarget {
       }
       break;
   }
+  if (!split_axes) scale_y = scale;  // read after the switch: a preset sets `scale` only
   return {.width = target_width * scale, .height = target_height * scale_y, .slider_held = slider_held};
 }
 

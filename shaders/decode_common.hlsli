@@ -127,8 +127,8 @@ void AccumulateTap(float4 change, float2 position, float2 tap, float2 radius, fl
 // Edge-aware: v2 design §3.8's joint bilateral upsample over the work pixels around `position`: a tent in
 // space, times how close each pixel's guide ℓ_M is to this output pixel's. The guide is the change field's
 // own ℓ_M, bilinear over the same four centre taps that make `classic`, so the range compares two samples
-// of one field at one resolution instead of re-encoding the model here -- and the caller still gets its
-// guide, its Classic sample and the bilateral answer out of one pass over one neighbourhood.
+// of one field at one resolution instead of re-encoding the model here -- the Classic sample and the
+// bilateral answer come out of one pass over one neighbourhood.
 //
 // The centre 2x2 comes first because it is both the Classic answer and the guide. The tent's half-width is
 // SPATIAL_RADIUS, so along each axis only the three offsets the cell's own centre falls between can carry
@@ -145,7 +145,7 @@ void AccumulateTap(float4 change, float2 position, float2 tap, float2 radius, fl
 // uniform, so the branch costs nothing. The hull is over every tap, the zero-weight ones included, so the
 // clamp sees the range it always has: that is what the second loop loads them for.
 float3 ChangeEdgeAware(float2 position, uint2 size, float density, float2 axis_density, bool want_range,
-                       out float guide, out float3 tap_min, out float3 tap_max, out float3 classic) {
+                       out float3 tap_min, out float3 tap_max, out float3 classic) {
   const int2 base = int2(floor(position));
   const float2 fraction = position - float2(base);
   const float range_k = RANGE_K / density;
@@ -171,7 +171,7 @@ float3 ChangeEdgeAware(float2 position, uint2 size, float density, float2 axis_d
   const float w11 = fraction.x * fraction.y;
   const float4 bilinear = c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11;
   classic = bilinear.xyz;
-  guide = bilinear.w;
+  const float guide = bilinear.w;
 
   float3 sum = float3(0.f, 0.f, 0.f);
   float total = 0.f;
@@ -222,6 +222,16 @@ float EditDarkness(float guide) {
   return DARK_EDIT_FLOOR + (1.f - DARK_EDIT_FLOOR) * smoothstep(DARK_GUIDE_LOW, DARK_GUIDE_HIGH, guide);
 }
 
+// The same guide ChangeField stores in .w -- log2 of the model domain's linear luminance plus the encoding's
+// epsilon -- at the output pixel's own rate: a field coarser than the output has one average per cell, and
+// anything that multiplies the change per output pixel needs this. The source goes through EncodeModel first:
+// the field's .w measures the model domain, not LinearLight's scene light, and on HDR the two place shadows
+// differently. EncodeModel also carries the finiteness guard, so the decode needs no second one.
+float ChangeGuide(uint encoding, uint primaries, float3 source, float scale) {
+  const float3 model = EncodeModel(encoding, primaries, source, scale);
+  return log2(max(Luminance(SrgbDecode(model)), 0.f) + ChangeEpsilon(encoding));
+}
+
 // The upsample's two bands, shaped and combined. `classic` is the change field's low frequencies (the
 // bilinear sample); `edge` is the joint bilateral answer, so edge - classic is the detail the guided kernel
 // holds on the correct side of an edge. Only the base band has a gain (1 by default, from the caller).
@@ -240,17 +250,16 @@ float EditDarkness(float guide) {
 // With the default (1) the excursion is zero, so the caller does not hand the hull over at all; the flag is
 // uniform, and only a base gain under 0.85 turns it on.
 float3 ChangeBands(float3 classic, float3 edge, float3 tap_min, float3 tap_max, float low_gain, float density,
-                   float guide, bool clamp_bands) {
-  const float dark = EditDarkness(guide);
+                   bool clamp_bands) {
   const float detail = saturate((density - 1.f) * KERNEL_FADE_IN);
   const float3 bands = classic * low_gain + (edge - classic) * detail;
-  if (!clamp_bands) return dark * bands;
+  if (!clamp_bands) return bands;
   const float3 base = classic * low_gain + (edge - classic) * min(detail, low_gain);
   const float3 slack = max((tap_max - tap_min) * CLAMP_SLACK, 1e-4f);
   const float3 floor_band = min(tap_min, base) - slack;
   const float3 over = max(floor_band - bands, 0.f);
   // Asymptote floor + slack: the allowance a peak that genuinely extrapolates this far may keep.
-  return dark * (bands + (floor_band + slack - bands) * over / (slack + over));
+  return bands + (floor_band + slack - bands) * over / (slack + over);
 }
 
 // The mask's R channel, bilinear at this output pixel whatever the mask's size, clamped to [0, 1]; 1 when not finite.
@@ -289,6 +298,13 @@ float4 DecodePixel(uint2 pixel) {
     if (mask <= 0.f) return source;
   }
   const uint primaries = options & OPTION_PRIMARIES_MASK;
+  // Taken before the compose's zero-change early return: `scale` feeds ChangeGuide's model encode below. The
+  // load is uniform, so a pass without an exposure texture still reads nothing.
+  float exposure = 1.f;
+  if (has_exposure != 0u) {
+    exposure = exposure_texture.Load(int3(0, 0, 0));
+  }
+  precise float scale = input_scale * GameExposure(has_exposure, exposure, exposure_factor);
   float3 change;
   if (upsampling == 0u) {
     change = change_texture.Load(int3(pixel, 0)).xyz;
@@ -298,8 +314,8 @@ float4 DecodePixel(uint2 pixel) {
     if (upsampling == 2u) {
       // Edge-aware, with the base band's gain. Until 2026-10-29 this branch also served Guided (3), which passed
       // the same gains but was only reachable in that mode; the modes merged and this one now always shapes.
-      // The guide is the change field's own ℓ_M, which ChangeEdgeAware returns from the taps it reads anyway,
-      // so this path no longer re-encodes the model to find it.
+      // The bilateral's range guide is the change field's own ℓ_M, built from the centre taps the kernel reads
+      // anyway. The shadow term is not that guide: see `dark` below.
       //
       // Only a base gain under 1 can push the mix past the floor ChangeBands checks; the default is 1, so the
       // hull is skipped, and the UI's lowest base (0.5) turns it on. A base gain under CLAMP_SLACK lowers the
@@ -327,6 +343,13 @@ float4 DecodePixel(uint2 pixel) {
       // The shaping still needs one number: the geometric mean is the scale whose per-axis shaping matches the
       // tent's area, which is what the kernel's fade describes.
       const float density = sqrt(axis.x * axis.y);
+      // Both bands' shadow attenuation is read at this output pixel, not from the field: EditDarkness's ramp has
+      // a slope only the finest sample resolves, and a guide averaged over a cell of `density` output pixels
+      // sweeps it across the screen as the picture moves -- the foveated edge's shadow-side pulsing. ChangeGuide
+      // reproduces the field's own .w from the source texel the decode has already loaded, so the ramp sees the
+      // quantity the field pass measured, at the rate the change is finally applied. .w stays the bilateral's
+      // guide: that comparison is between samples of one field at one resolution.
+      const float dark = EditDarkness(ChangeGuide(encoding, primaries, source.rgb, scale));
       // 1e-5 covers the few ulp the two sqrt'd products carry; the next real scale up (Custom 99 %) is four
       // orders of magnitude further, so nothing that resamples can slip in.
       if (density <= 1.f + 1e-5f) {
@@ -341,14 +364,13 @@ float4 DecodePixel(uint2 pixel) {
         // density excess, so they too return `classic * low_gain` at the boundary.
         const uint2 texel = min(uint2(max(float2(sx.position, sy.position) + 0.5f, 0.f)), size - 1u);
         const float4 value = change_texture.Load(int3(texel, 0));
-        change = EditDarkness(value.w) * guided_low_gain * value.xyz;
+        change = dark * guided_low_gain * value.xyz;
       } else {
         const float2 position = float2(sx.position, sy.position);
-        float guide;
         float3 tap_min, tap_max;
         float3 classic;
-        const float3 edge = ChangeEdgeAware(position, size, density, axis, hull, guide, tap_min, tap_max, classic);
-        change = ChangeBands(classic, edge, tap_min, tap_max, guided_low_gain, density, guide, hull);
+        const float3 edge = ChangeEdgeAware(position, size, density, axis, hull, tap_min, tap_max, classic);
+        change = dark * ChangeBands(classic, edge, tap_min, tap_max, guided_low_gain, density, hull);
       }
     } else {
       change = ChangeBilinear(FovFullToWorkPos(pixel, uint2(width, height), size, uint2(foveation_x, foveation_y),
@@ -360,16 +382,8 @@ float4 DecodePixel(uint2 pixel) {
     change *= mask;
   }
   // Compose returns the source untouched when the change is zero, which is what NR leaves wherever it did not
-  // edit: skip its argument, the exposure sample above all, rather than read a texture for a value the caller
-  // discards. `change == 0` here is exactly Compose's own test, and the mask multiply cannot disturb it.
+  // edit. `change == 0` here is exactly Compose's own test, and the mask multiply cannot disturb it.
   if (all(change == float3(0.f, 0.f, 0.f))) return source;
-  // A texture read is not free even from a 1x1, and without an exposure texture there is nothing to read: the
-  // branch is uniform, so the load disappears from every pixel of a pass that has none.
-  float exposure = 1.f;
-  if (has_exposure != 0u) {
-    exposure = exposure_texture.Load(int3(0, 0, 0));
-  }
-  precise float scale = input_scale * GameExposure(has_exposure, exposure, exposure_factor);
   return float4(Compose(encoding, primaries, source.rgb, change, scale, transfer_strength, color_strength, options, chroma_clamp),
                 source.a);
 }

@@ -856,12 +856,11 @@ ngx_hooks::NgxApi DlssApiOf(const DeviceEntry& entry) {
   return (entry.vulkan ? ngx_hooks::NgxApi::VULKAN : entry.d3d11 ? ngx_hooks::NgxApi::D3D11 : ngx_hooks::NgxApi::D3D12);
 }
 
-// The Details line naming the main DLSS feature's quality mode and sizes (2026-10-25): the panel's
-// per-mode render-scale and preset rows key off exactly this mode, so the line says which row matters
-// now. The mode is the game's PerfQualityValue at its DLSS create, from the registry's snapshot.
-// `mode_index` is that mode as a ui::DlssPresetMode index (-1 when the game named none) and `mode_name`
-// its bare name, both for the card's live line.
-std::string DlssModeLine(const ngx_hooks::FeatureRecord& record, int& mode_index, std::string& mode_name) {
+// The main DLSS feature's quality mode (2026-10-25): the panel's per-mode render-scale and preset rows
+// key off exactly this mode, and the card's live row names it. The mode is the game's PerfQualityValue at
+// its DLSS create, from the registry's snapshot. `mode_index` is that mode as a ui::DlssPresetMode index
+// (-1 when the game named none) and `mode_name` its bare name.
+void DlssModeNames(const ngx_hooks::FeatureRecord& record, int& mode_index, std::string& mode_name) {
   std::string_view mode;
   switch (record.snapshot.perf_quality) {
     case 0:  mode = "Performance";        break;
@@ -876,12 +875,6 @@ std::string DlssModeLine(const ngx_hooks::FeatureRecord& record, int& mode_index
   const unsigned slot = ngx_hooks::PresetSlotOf(record.snapshot.perf_quality);
   mode_index = (slot < 6u ? static_cast<int>(slot) : -1);
   mode_name = std::string(mode);
-  std::string line = std::format("DLSS mode: {}", mode);
-  const ngx_hooks::CreateSnapshot& snapshot = record.snapshot;
-  if (!snapshot.render.Empty() && !snapshot.output.Empty()) {
-    line += std::format(" ({}x{} of {}x{})", snapshot.render.width, snapshot.render.height, snapshot.output.width, snapshot.output.height);
-  }
-  return line;
 }
 
 // Why the DLSS stages cannot run on this Direct3D 11 device, or empty. With the add-on's lock held.
@@ -3436,6 +3429,7 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
       if (const NVSDK_NGX_Handle* const main_handle = state.bridge.Registry().MainHandle(device, entry.swapchain_size, DlssApiOf(entry))) {
         if (const std::optional<ngx_hooks::FeatureRecord> main_record = state.bridge.Registry().Find(main_handle)) {
           // Which per-mode row (preset, render scale) matters now, and its index for the live row.
+          DlssModeNames(*main_record, view.dlss_preset_mode, view.dlss_mode_name);
           view.dlss_render = main_record->snapshot.render;
           view.dlss_output = main_record->snapshot.output;
         }

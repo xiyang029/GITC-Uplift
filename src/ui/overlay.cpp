@@ -66,15 +66,22 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       ((descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM)
        || (descriptor.key == "ResolutionScaleAfterDlss" && settings->resolution_mode_after_dlss != ResolutionMode::CUSTOM)
        || (descriptor.key == "ResolutionScalePresent" && settings->resolution_mode_present != ResolutionMode::CUSTOM));
-  const auto reduced = [](ResolutionMode mode, float percent) {
-    return mode != ResolutionMode::FULL && (mode != ResolutionMode::CUSTOM || percent < 100.f);
+  // Custom's two axes can be apart (anamorphic): then the height is reduced on its own, and a width-only test called a
+  // 100 % x 50 % frame "not reduced" -- which hid Upsampling (and Edge-aware's rows) while upsampling really runs.
+  // The pipeline decides by size (nr_pipeline.cpp: `reduced = work.image != size`), so both axes belong here.
+  const auto reduced = [](ResolutionMode mode, float percent, float percent_y) {
+    return mode != ResolutionMode::FULL && (mode != ResolutionMode::CUSTOM || percent < 100.f || percent_y < 100.f);
   };
   const auto later_group_scaled = [&](const PassStageRow& row) {
-    return row.starts_group && ((row.runs == SourcePick::AFTER_DLSS && reduced(settings->resolution_mode_after_dlss, settings->resolution_scale_after_dlss))
-                                || (row.runs == SourcePick::PRESENT && reduced(settings->resolution_mode_present, settings->resolution_scale_present)));
+    // A later group's Custom scale is uniform (FrameSettings::StageResolution has one scale), so both axes share it.
+    return row.starts_group
+           && ((row.runs == SourcePick::AFTER_DLSS && reduced(settings->resolution_mode_after_dlss, settings->resolution_scale_after_dlss, settings->resolution_scale_after_dlss))
+               || (row.runs == SourcePick::PRESENT && reduced(settings->resolution_mode_present, settings->resolution_scale_present, settings->resolution_scale_present)));
   };
-  const bool reduced_any = reduced(settings->resolution_mode, settings->resolution_scale)
-                           || std::ranges::any_of(view.setup.pass_stages, later_group_scaled);
+  const bool reduced_any =
+      reduced(settings->resolution_mode, settings->resolution_scale,
+              AsymmetricAxes(*settings) ? settings->resolution_scale_y : settings->resolution_scale)
+      || std::ranges::any_of(view.setup.pass_stages, later_group_scaled);
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && !reduced_any);
   // Edge-aware's own rows matter only while Edge-aware itself does (below Full); Classic has no bands.
   const bool edge_aware_off = (!reduced_any || settings->upsampling != color::Upsampling::EDGE_AWARE);
@@ -558,7 +565,7 @@ void DrawWorkingSize(const OverlayView& view, const Settings& settings) {
     // scales), so it belongs in the first two arguments unscaled; scaling it here too made a 50 % Custom read as the
     // NR floor instead of the size that runs.
     const double scale = settings.resolution_scale / 100.0;
-    const double scale_y = (settings.resolution_asymmetric ? settings.resolution_scale_y / 100.0 : scale);
+    const double scale_y = (AsymmetricAxes(settings) ? settings.resolution_scale_y / 100.0 : scale);
     size = sources::WorkSize(input.width * scale, input.height * scale_y, input);
     size = FovAdjustedSize(size, view, settings);
     if (view.setup.stage == SourcePick::BEFORE_UPSCALING) size = sources::CanvasSize(size);
