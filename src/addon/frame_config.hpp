@@ -73,9 +73,8 @@ struct FrameSettings {
   float resolution_scale_y = 100.f;                          // Resolution = Custom: % of the output's height
   bool resolution_slider_held = false;                       // the Custom slider is being dragged: the work size waits
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
-  // Foveated edge scaling (2026-10-21): NR works a grid that keeps the output's centre at full density and falls off toward the edges, so the edges cost fewer
-  // NR pixels than the centre. The centre's width is a share of the output's width, its height and both fall-offs shares of the output's height (per cent;
-  // FromPercent turns them into output pixels). Applied at every NR stage: MapToWork carries them onto that stage's working grid.
+  // Foveated edge scaling (2026-10-21): NR works a grid that keeps the output's centre at full density and thins toward the edges, so the edges cost fewer
+  // NR pixels. The shares below are per cent of the output; MakePlanFromShares carries them onto every NR stage's working grid where the warp lands.
   bool foveation = false;
   uint32_t foveation_width = 55;      // the full-density centre's width, % of the output's width
   uint32_t foveation_height = 55;     // and its height, % of the output's height

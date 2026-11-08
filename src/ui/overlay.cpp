@@ -277,6 +277,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           state->drag.local_tone = active;
         } else if (descriptor.key == "ResolutionScale") {
           state->drag.resolution_scale = active;
+        } else if (descriptor.key == "ResolutionScaleY") {
+          state->drag.resolution_scale_y = active;
         } else if (descriptor.key == "ResolutionScaleAfterDlss") {
           state->drag.resolution_scale_after_dlss = active;  // split chain: the work size waits for the release, as Setup's
         } else if (descriptor.key == "ResolutionScalePresent") {
@@ -534,19 +536,16 @@ bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* st
   return changed;
 }
 
-// The target row shows the grid that will actually run, so with foveated edge scaling on it is the warped
-// extent, not the uniform one. MakePlan is the same call SettleLayout makes (device_context.cpp's SettleLayout),
-// stand-down included: when the centre already covers the grid or the saving cannot pay for the guide resample,
-// the plan collapses back to the uniform extent and the row reads the unwarped size.
+// The target row shows the grid that will actually run: with edge scaling on, the warped extent. Gated as BuildFrameSettings
+// gates it (frame_config.cpp): separate Custom axes stand edge scaling down.
 nr::Size FovAdjustedSize(nr::Size uniform, const OverlayView& view, const Settings& settings) {
-  if (!settings.foveation || uniform.Empty()) return uniform;
+  if (!settings.foveation || AsymmetricAxes(settings) || uniform.Empty()) return uniform;
   const nr::Size out = view.output_size.Empty() ? view.first_stage_input : view.output_size;
   if (out.Empty()) return uniform;
-  const nr::foveation::Params params = nr::foveation::MapToWork(
-      nr::foveation::FromPercent(settings.foveation_width, settings.foveation_height, settings.foveation_falloff_x,
-                                 settings.foveation_falloff_y, settings.foveation_edge, out.width, out.height),
+  const nr::foveation::Plan plan = nr::foveation::MakePlanFromShares(
+      settings.foveation,
+      {settings.foveation_width, settings.foveation_height, settings.foveation_falloff_x, settings.foveation_falloff_y, settings.foveation_edge},
       out.width, out.height, uniform.width, uniform.height);
-  const nr::foveation::Plan plan = nr::foveation::MakePlan(settings.foveation, params, uniform.width, uniform.height);
   return {plan.width, plan.height};
 }
 
@@ -663,13 +662,16 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
       changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
       // Edge-aware's base band gain, right below the choice it depends on.
       changed |= DrawRow(*FindSetting("GuidedBaseGain"), view, settings, state, true);
-      changed |= DrawRow(*FindSetting("Foveation"), view, settings, state, true);
-      if (settings->foveation) {
-        changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state, true);
-        changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state, true);
-        changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state, true);
-        changed |= DrawRow(*FindSetting("FoveationFalloffY"), view, settings, state, true);
-        changed |= DrawRow(*FindSetting("FoveationEdge"), view, settings, state, true);
+      // Cannot act beside separate axes (frame_config.cpp), so the row leaves rather than greys.
+      if (!AsymmetricAxes(*settings)) {
+        changed |= DrawRow(*FindSetting("Foveation"), view, settings, state, true);
+        if (settings->foveation) {
+          changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state, true);
+          changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state, true);
+          changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state, true);
+          changed |= DrawRow(*FindSetting("FoveationFalloffY"), view, settings, state, true);
+          changed |= DrawRow(*FindSetting("FoveationEdge"), view, settings, state, true);
+        }
       }
     });
   });

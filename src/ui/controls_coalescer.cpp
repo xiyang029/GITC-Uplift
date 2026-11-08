@@ -3,7 +3,7 @@
 namespace uplift::ui {
 namespace {
 
-constexpr auto DRAG_PERIOD = std::chrono::milliseconds(100);
+constexpr auto DRAG_PERIOD = std::chrono::milliseconds(300);  // a drag applies at most this often; the release applies at once
 
 }  // namespace
 

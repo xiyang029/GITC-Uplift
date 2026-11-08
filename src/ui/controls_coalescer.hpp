@@ -19,10 +19,10 @@ struct DragState {
   bool face_protection = false;  // Keep faces
   bool resolution_scale_after_dlss = false;  // split chain: a later stage group's Custom scale, held as Setup's
   bool resolution_scale_present = false;
+  bool resolution_scale_y = false;  // Anamorphic: holds the work size as the width's slider does
 };
 
-// Controls that reset NR history apply live, but a dragged slider
-// (LocalStructure, LocalTone, SkinStructure) applies at DRAG_PERIOD intervals and applies its final
+// Controls that reset NR history apply live, but a dragged slider applies at DRAG_PERIOD intervals and its final
 // value once on release. Discrete ones (Style, AutoMask) and Intensity apply on the frame they change.
 class ControlsCoalescer {
  public:

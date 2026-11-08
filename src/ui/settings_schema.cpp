@@ -554,7 +554,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Separate scales per axis",
         .tooltip = "Resolution = Custom scales width and height on their own axes. A smaller width with a height near 100 % costs "
-                   "as much as one uniform scale between them, but keeps vertical detail -- edges and text -- closer to native.",
+                   "as much as one uniform scale between them, but keeps vertical detail -- edges and text -- closer to native. "
+                   "Foveated edges stands down while this is on, and its rows leave the panel.",
         .get = [](const Settings& s) { return Flag(s.resolution_asymmetric); },
         .set = [](Settings& s, double v) { s.resolution_asymmetric = (v != 0.0); },
     },
@@ -646,7 +647,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     },
     {
         // Foveated edge scaling (2026-10-21): the work grid keeps the output's centre at full density and falls off toward the edges, so the edges cost fewer
-        // NR pixels than the centre (and the guide resample they need). Only after upscaling: Before upscaling works at the game's own render size.
+        // NR pixels than the centre (and the guide resample they need). Every NR stage warps, before upscaling included.
         .key = "Foveation",
         .kind = SettingKind::BOOL,
         .section = SettingSection::PLACEMENT,
@@ -658,14 +659,14 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.foveation = (v != 0.0); },
     },
     {
-        // The four foveation rows apply on release (APPLY_ON_RELEASE): each edit re-plans and rebuilds the guide and the mappings, so a drag would reset NR's
-        // history every frame. As Pass Count's. All four are stored in per cent of the screen: FromPercent turns them into pixels at the two MapToWork calls.
+        // The four foveation rows apply on release (APPLY_ON_RELEASE): each edit re-plans the grid, so a drag would reset NR's history every frame.
+        // Stored in per cent of the screen; MakePlanFromShares turns them into pixels.
         .key = "FoveationWidth",
         .kind = SettingKind::UINT,
         .section = SettingSection::PLACEMENT,
         .label = "Full-density centre width",
         .tooltip = "The centre's width as a share of the screen's width: this part of the image keeps NR's full density at any resolution. A centre wider than the "
-                   "grid is clamped to it, which switches the scaling off. Only after upscaling.",
+                   "grid is clamped to it, which switches the scaling off.",
         .min = 5.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
@@ -678,7 +679,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Full-density centre height",
         .tooltip = "The centre's height as a share of the screen's height, as the width above. On a wide screen the height is usually what the centre can still "
-                   "span. Only after upscaling.",
+                   "span.",
         .min = 5.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
@@ -691,8 +692,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Fall-off length X",
         .tooltip = "How far the density takes to fall from the centre to the edge value along the screen's width, as a share of the screen's height. Longer is "
-                   "gentler and leaves the edges sharper; shorter saves more. A fall-off longer than the distance to the edge simply reaches the edge later. "
-                   "Only after upscaling.",
+                   "gentler and leaves the edges sharper; shorter saves more. A fall-off longer than the distance to the edge simply reaches the edge later.",
         .min = 0.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
@@ -705,7 +705,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Fall-off length Y",
         .tooltip = "The same fall-off along the screen's height, as a share of the screen's height. Shortening it alone is the usual win: a widescreen's aspect "
-                   "gives the vertical ramp less room, so a long shared length never reaches the edge there. Only after upscaling.",
+                   "gives the vertical ramp less room, so a long shared length never reaches the edge there.",
         .min = 0.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
@@ -718,7 +718,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Edge density",
         .tooltip = "The NR density the fall-off reaches at the outermost edge (and Edge x Edge in the corners). 100 % is off. 4K and ultrawide screens are "
-                   "happiest well below it. Only after upscaling.",
+                   "happiest well below it.",
         .min = 25.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,

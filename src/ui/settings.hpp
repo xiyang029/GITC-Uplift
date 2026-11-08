@@ -392,6 +392,12 @@ void SetSourcePick(Settings* settings, SourcePick pick, bool explicit_dlss = fal
 // Writes the toggle's MotionVectorSource. Any click rewrites a legacy MotionVectorSource::DLSS to Auto.
 void SetMotionPick(Settings* settings, MotionPick pick);
 
+// Whether Custom's two axes are apart on this frame: the switch only counts under Resolution = Custom, as
+// StageLayoutTarget reads it.
+[[nodiscard]] inline bool AsymmetricAxes(const Settings& settings) {
+  return settings.resolution_mode == ResolutionMode::CUSTOM && settings.resolution_asymmetric;
+}
+
 struct SessionOptions {
   bool enabled = false;
   uint32_t pass_count = 1u;

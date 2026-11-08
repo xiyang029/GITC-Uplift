@@ -639,13 +639,11 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
   const LayoutTarget target = StageLayoutTarget(settings_, output, stage, pass1, main_snapshot_, dlss_off_.Off());
   StageState& state = stages_[static_cast<size_t>(stage)];
   const nr::Size uniform = state.settle.Update(sources::WorkSize(target.width, target.height, output), now, target.slider_held);
-  // Foveated edge scaling (2026-10-21), as DeviceContext::SettleLayout: at every NR stage, the player's output pixels carried onto the settled grid
-  // (MapToWork), and the identity grid whenever that grid cannot pay for the warp.
-  const nr::foveation::Params foveation_params = nr::foveation::MapToWork(
-      nr::foveation::FromPercent(settings_.foveation_width, settings_.foveation_height, settings_.foveation_falloff_x, settings_.foveation_falloff_y,
-                                 settings_.foveation_edge, output.width, output.height),
+  // Foveated edge scaling (2026-10-21), as DeviceContext::SettleLayout.
+  const nr::foveation::Plan plan = nr::foveation::MakePlanFromShares(
+      settings_.foveation,
+      {settings_.foveation_width, settings_.foveation_height, settings_.foveation_falloff_x, settings_.foveation_falloff_y, settings_.foveation_edge},
       output.width, output.height, uniform.width, uniform.height);
-  const nr::foveation::Plan plan = nr::foveation::MakePlan(settings_.foveation, foveation_params, uniform.width, uniform.height);
   const nr::Size image = {plan.width, plan.height};
   const nr::Size canvas = StageCanvas(image, stage);
   state.work = image;

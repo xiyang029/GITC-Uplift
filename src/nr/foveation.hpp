@@ -62,7 +62,7 @@ struct Params {
 // The player's sliders, whole per cent of the screen: the centre's width as % of the output's width, its height and both
 // fall-offs as % of the output's height.  Returns the output-pixel Params MapToWork takes; 100 % is the screen itself.
 // The two fall-offs are separate because the vertical one is the one a screen's aspect cuts short: shortening it alone
-// lets the vertical ramp reach the edge density.  Called at the two places that know the output's size.
+// lets the vertical ramp reach the edge density.
 inline Params FromPercent(uint32_t width_pct, uint32_t height_pct, uint32_t falloff_x_pct, uint32_t falloff_y_pct,
                           uint32_t edge_pct, uint32_t out_width, uint32_t out_height) {
   const auto pixels = [](uint32_t pct, uint32_t full) {
@@ -72,9 +72,7 @@ inline Params FromPercent(uint32_t width_pct, uint32_t height_pct, uint32_t fall
           pixels(falloff_y_pct, out_height), static_cast<float>(edge_pct) * 0.01f};
 }
 
-// The player's output-pixel parameters on a working grid of work_width x
-// work_height.  Called once per frame before MakeGrid, so the two never
-// disagree about which grid the numbers describe.
+// The player's output-pixel parameters on a working grid of work_width x work_height.
 inline Params MapToWork(const Params& params, uint32_t out_width, uint32_t out_height, uint32_t work_width, uint32_t work_height) {
   const double sx = (out_width == 0u ? 1.0 : static_cast<double>(work_width) / static_cast<double>(out_width));
   const double sy = (out_height == 0u ? 1.0 : static_cast<double>(work_height) / static_cast<double>(out_height));
@@ -214,6 +212,23 @@ inline Plan MakePlan(bool enabled, const Params& params, uint32_t uniform_width,
     plan.grid.y.gmax = static_cast<float>(plan.height) / static_cast<float>(uniform_height);
   }
   return plan;
+}
+
+// The player's sliders for one frame, as the three callers (both SettleLayouts and the overlay's target row) hold them.
+struct Shares {
+  uint32_t width_pct;      // % of the output's width
+  uint32_t height_pct;     // % of the output's height
+  uint32_t falloff_x_pct;  // left/right, % of the output's height
+  uint32_t falloff_y_pct;  // top/bottom, as the height
+  uint32_t edge_pct;       // the density the fall-off reaches at the edge
+};
+
+// FromPercent, MapToWork and MakePlan in one call: the plan for a working grid of work_width x work_height.
+inline Plan MakePlanFromShares(bool enabled, const Shares& shares, uint32_t out_width, uint32_t out_height, uint32_t work_width,
+                               uint32_t work_height) {
+  const Params output = FromPercent(shares.width_pct, shares.height_pct, shares.falloff_x_pct, shares.falloff_y_pct, shares.edge_pct, out_width,
+                                   out_height);
+  return MakePlan(enabled, MapToWork(output, out_width, out_height, work_width, work_height), work_width, work_height);
 }
 
 }  // namespace uplift::nr::foveation

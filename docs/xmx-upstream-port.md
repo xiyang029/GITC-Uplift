@@ -108,6 +108,43 @@ diagnostics hang off a hook path this port does not walk.
 
 `2928eeb`, `7654df9`, `ec1ba21` (README updates), `2643da7`, `ed5d8a7` (1.8.6 release notes),
 `22415f1`, `36302f5` (1.8.5 release notes) -- version strings and docs, checked one by one on 2026-11-07.
+
+## Sweep 2026-11-08: `2928eeb` -> `1226d4f` (1.9.0, 23 commits)
+
+`main` is tagged 1.9.0. **The ABI layer did not move again**: `xemfg/vendor/` and `xmx_generator.hpp`'s
+struct block are byte-identical, and no commit in the range touches a path matching `*xmx*`. Nothing was
+taken. All 23 commits are accounted for, and none of them is XMX code: for the first time a whole upstream
+release lands outside the half this port carries.
+
+### Not applicable: the pre-Ada provider (8)
+
+1.9.0 added NVIDIA's own frame generation for RTX 20/30 -- `eb27d59` (nefh's kernel preparation: `ampere/`
+`cubin_trial.hpp`, `ptx_retarget.hpp`, `fatbin*.hpp`, `endpoint_*.hpp`, `provider_profile.hpp`, `gpu_arch.hpp`),
+`7917987`, `86309cd` (nefh's temporal correction on the retargeted kernel), `9dc04d9`, `aee1f7c` (early
+loading), `81ac24c` (gate refusal step/file wording), `63b03c8` (its tests). This port has no Ampere path at
+all: it hands the black boxes to `libxess_fg.dll` and never retargets a kernel. The one transferable habit is
+`81ac24c`'s "say which step failed and in which file" -- this port's `refused`/`refusedShape` already names
+the shape, and the XeFG gate has no per-file step to name.
+
+### Not applicable: provider-module and panel code this port does not have (8)
+
+- `0fb97c2` (RTX 50 dynamic MFG provider version, `slInit` diagnostics), `7f4391b` (support report, driver
+  profile), `28e5d96` (duplicate addon files, stale early-load entry), `7729014` (`native_notices.rc.in`
+  FILEVERSION) -- all live in the mfgunlock addon's provider/NvAPI/installation layer; this port embeds the
+  provider and installs no notices resource.
+- `f25d6e3` (frame generation chain card, `fg_chain.hpp`), `fce5739`, `26efd00` (which Streamline plugin the
+  game uses), `550728c` (the panel's own colour), `57de3a3` (collapsed by default) -- the panel's chain card.
+  `fg_chain.hpp`'s idea (name the link that is not working) is what the `refused`/`refusedShape` log lines
+  already do here, minus the card.
+- `501f74e` (panel controls for `PreAdaAdmission`/`AutoEarlyLoad`), `7c294c4` (read `ReShade.ini` by its
+  attributes) -- controls and a startup check for the pre-Ada path above.
+
+### Not code (7)
+
+`1226d4f`, `4e179c8`, `f6d158a` (README), `d81220d`, `1685291` (1.9.0 notes: validation, the RTX 3080
+report's cause), `6b65add` (version, notes, README), `7108a77` (`tools/Prepare-Release.ps1`) -- version
+strings and docs, checked one by one on 2026-11-08.
+
 ## The next sweep
 
 ```

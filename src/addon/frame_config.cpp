@@ -73,9 +73,11 @@ FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::Controls
       .resolution_scale = settings.resolution_scale,
       .resolution_asymmetric = settings.resolution_asymmetric,
       .resolution_scale_y = settings.resolution_scale_y,
-      .resolution_slider_held = inputs.drag.resolution_scale,
+      .resolution_slider_held = inputs.drag.resolution_scale || inputs.drag.resolution_scale_y,  // either Custom axis
       .upsampling = settings.upsampling,
-      .foveation = settings.foveation,
+      // Separate axes and edge scaling stand each other down: edge scaling's only gain is a 1:1 plateau against the
+      // uniform grid, and apart axes have already resampled the centre. The switch keeps its value; this stops it acting.
+      .foveation = settings.foveation && !ui::AsymmetricAxes(settings),
       .foveation_width = settings.foveation_width,
       .foveation_height = settings.foveation_height,
       .foveation_falloff_x = settings.foveation_falloff_x,
@@ -98,7 +100,7 @@ FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::Controls
   for (size_t index = 0u; index < settings.passes.size(); ++index) {
     frame.pass_stages[index] = settings.passes[index].stage;
   }
-  // Keep faces: Face protection restarts the extra run's history, so a drag applies it at most every 100 ms, as Skin structure's does.
+  // Keep faces: Face protection restarts the extra run's history, so a drag applies it at most every DRAG_PERIOD, as Skin structure's does.
   frame.look.keep_faces.protection = coalescer->FaceProtection(look_settings, inputs.drag.face_protection, now);
   return frame;
 }
