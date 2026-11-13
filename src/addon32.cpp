@@ -46,10 +46,8 @@
 #include "vk/device_hook.hpp"
 
 // The name ReShade shows in its Add-ons list. The log lines keep their "[Uplift]" prefix (addon/log_bridge.cpp).
-extern "C" __declspec(dllexport) const char* NAME = "GITC Uplift";
-extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "A virtual photography focused version of the DLSS 5 mod: NVIDIA DLSS Neural Rendering (DLSS-NR) with greater "
-    "flexibility, ease of use, stability and hassle-free compatibility across APIs.";
+extern "C" __declspec(dllexport) const char* NAME = uplift::addon::host::ADDON_NAME;
+extern "C" __declspec(dllexport) const char* DESCRIPTION = uplift::addon::host::ADDON_DESCRIPTION;
 
 namespace {
 
@@ -380,11 +378,11 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   reshade::register_event<reshade::addon_event::reshade_finish_effects>(OnFinishEffects);
   reshade::register_event<reshade::addon_event::reshade_open_overlay>(addon::host::OnOpenOverlay<g_state>);
   reshade::register_event<reshade::addon_event::reshade_present>(OnReshadePresent);
-  addon::RegisterCreateDeviceEvent(&OnCreateDevice);
-  addon::RegisterCreateSwapchainEvent(reshade_vulkan_events);  // Plan 11: copy access on a Vulkan swap chain's images (event 97, raw)
+  addon::RegisterCreateDeviceEvent(&addon::host::OnCreateDevice<g_state, NOTE_INSTANCE_API_VERSION>);
+  addon::RegisterCreateSwapchainEvent(reshade_vulkan_events);  // copy access on a Vulkan swap chain's images (event 97, raw)
   // ReShade's own overlay window: it calls OnDrawOverlay only while the panel is open, inside the window it
   // opened for it, so the panel draws no title bar and no border of its own.
-  reshade::register_overlay(NAME, OnDrawOverlay);
+  reshade::register_overlay(addon::host::OVERLAY_TITLE, OnDrawOverlay);
 
   nr::Logf(nr::LogLevel::INFO, "Uplift {} (32-bit) registered (ReShade API {}, Dear ImGui {}, ReShade {})", UPLIFT_VERSION,
            RESHADE_API_VERSION, IMGUI_VERSION_NUM,
