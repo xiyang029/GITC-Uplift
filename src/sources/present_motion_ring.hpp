@@ -20,10 +20,11 @@ inline constexpr size_t PRESENT_MOTION_MIN_SLOTS = 4u;
 inline constexpr size_t PRESENT_MOTION_SLOTS = 8u;  // the most a ring grows to (its arrays' size)
 // A present whose own copy is missing binds the newest copy at most this many frames older, so NR keeps DLSS's vectors (no source switch, no history
 // reset, no zero motion); only with none that recent does it fall back (zeros of the copies' shape natively, Launchpad's or none on a bridge).
-// Capped at 1 (2026-11-01): a vector two frames old points the other way on a fast pan, and the reproject lands a texel or more off, smearing shadows and
-// edges. One frame old is still DLSS's own and close enough; beyond it we run on zero motion instead (RecordPresent keeps the reset off, so NR's history
-// survives the gap).
-inline constexpr uint64_t PRESENT_MOTION_MAX_AGE = 1u;
+// Two frames (2026-11-14): the oldest a four-slot ring always still holds (see the static_assert below), and what upstream 2.0.0 binds, so a present whose
+// own copy was skipped keeps DLSS's vectors rather than moving to zero motion for that frame (RecordPresent keeps the reset off, so NR's history survives
+// either way). Capped at 1 (2026-11-01) before this, because a vector two frames old points the other way on a fast pan and the reproject lands a texel or
+// more off, smearing shadows and edges; a two-frame-old copy brings that smear back, and a one-frame-old one does not.
+inline constexpr uint64_t PRESENT_MOTION_MAX_AGE = 2u;
 // Fix round 1 (M7): at present P the evaluate for P+1 may already have written its slot, (P+1) % N, which held the copy for P+1-N, P's copy of age N-1.
 // So a copy of age N-2 is the oldest a present can always still find; the limit holds for the smallest ring, before any growth.
 static_assert(PRESENT_MOTION_MAX_AGE + 2u <= PRESENT_MOTION_MIN_SLOTS, "an older copy must still be in a four-slot ring when its present binds it");

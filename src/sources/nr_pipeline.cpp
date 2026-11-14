@@ -878,7 +878,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
     }
   }
   // 2026-11-05 (Depth input): this frame's depth copy, made at the evaluate that closed it (RecordDepthCopy), else -- as with
-  // the motion vectors -- the newest at most PRESENT_MOTION_MAX_AGE frames older: one frame's view still separates what
+  // the motion vectors -- the newest at most PRESENT_MOTION_MAX_AGE frames older: a view a frame or two old still separates what
   // DLSSNR's motion needs it to, where NR's own estimate without any depth does not.
   if (depth_copies_.textures[0]) {
     std::array<uint64_t, MOTION_COPY_SLOTS> depth_frames = {};

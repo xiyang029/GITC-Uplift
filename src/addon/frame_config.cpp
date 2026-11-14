@@ -76,9 +76,9 @@ FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::Controls
       .resolution_scale_y = settings.resolution_scale_y,
       .resolution_slider_held = inputs.drag.resolution_scale || inputs.drag.resolution_scale_y,  // either Custom axis
       .upsampling = settings.upsampling,
-      // Separate axes and edge scaling stand each other down: edge scaling's only gain is a 1:1 plateau against the
-      // uniform grid, and apart axes have already resampled the centre. The switch keeps its value; this stops it acting.
-      .foveation = settings.foveation && !ui::AsymmetricAxes(settings),
+      // Edge scaling plans any work grid: FromPercent, MapToWork, MakeAxis and WarpedExtent each work one axis at a time, so
+      // the grid lands on an anisotropic work size as correctly as on a uniform one, and both savings apply at once.
+      .foveation = settings.foveation,
       .foveation_width = settings.foveation_width,
       .foveation_height = settings.foveation_height,
       .foveation_falloff_x = settings.foveation_falloff_x,

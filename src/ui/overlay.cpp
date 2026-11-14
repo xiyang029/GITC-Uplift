@@ -543,10 +543,9 @@ bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* st
   return changed;
 }
 
-// The target row shows the grid that will actually run: with edge scaling on, the warped extent. Gated as BuildFrameSettings
-// gates it (frame_config.cpp): separate Custom axes stand edge scaling down.
+// The target row shows the grid that will actually run: with edge scaling on, the warped extent.
 nr::Size FovAdjustedSize(nr::Size uniform, const OverlayView& view, const Settings& settings) {
-  if (!settings.foveation || AsymmetricAxes(settings) || uniform.Empty()) return uniform;
+  if (!settings.foveation || uniform.Empty()) return uniform;
   const nr::Size out = view.output_size.Empty() ? view.first_stage_input : view.output_size;
   if (out.Empty()) return uniform;
   const nr::foveation::Plan plan = nr::foveation::MakePlanFromShares(
@@ -669,16 +668,14 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
       changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
       // Edge-aware's base band gain, right below the choice it depends on.
       changed |= DrawRow(*FindSetting("GuidedBaseGain"), view, settings, state, true);
-      // Cannot act beside separate axes (frame_config.cpp), so the row leaves rather than greys.
-      if (!AsymmetricAxes(*settings)) {
-        changed |= DrawRow(*FindSetting("Foveation"), view, settings, state, true);
-        if (settings->foveation) {
-          changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state, true);
-          changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state, true);
-          changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state, true);
-          changed |= DrawRow(*FindSetting("FoveationFalloffY"), view, settings, state, true);
-          changed |= DrawRow(*FindSetting("FoveationEdge"), view, settings, state, true);
-        }
+      // The rows stay at every Resolution mode: edge scaling acts on whichever grid the axes land on.
+      changed |= DrawRow(*FindSetting("Foveation"), view, settings, state, true);
+      if (settings->foveation) {
+        changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state, true);
+        changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state, true);
+        changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state, true);
+        changed |= DrawRow(*FindSetting("FoveationFalloffY"), view, settings, state, true);
+        changed |= DrawRow(*FindSetting("FoveationEdge"), view, settings, state, true);
       }
     });
   });

@@ -614,7 +614,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .label = "Separate scales per axis",
         .tooltip = "Resolution = Custom scales width and height on their own axes. A smaller width with a height near 100 % costs "
                    "as much as one uniform scale between them, but keeps vertical detail -- edges and text -- closer to native. "
-                   "Foveated edges stands down while this is on, and its rows leave the panel.",
+                   "Foveated edges can act beside it: its shares are carried onto whichever grid the axes land on.",
         .get = [](const Settings& s) { return Flag(s.resolution_asymmetric); },
         .set = [](Settings& s, double v) { s.resolution_asymmetric = (v != 0.0); },
     },
