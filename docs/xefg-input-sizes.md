@@ -51,7 +51,17 @@ generated N ... refused N | pairs N ... | execute Nus avg` (the per-2s truth, un
 the generator's own log). The log reaches tens of megabytes: read its tail in node, since a content search
 fails past the 20 MB cap.
 
+## Video memory: the capacity hypothesis is ruled out
+
+A player saw XMX use nearly twice NVIDIA's frame generation memory. Upstream measured it on the Streamline
+Sample at 2560x1440 4x (RTX 4070 SUPER, Windows' per-process dedicated counter): no FG 1267 MiB, NVIDIA's
+DLSS-G +580 MiB, XMX +975 MiB, of which XMX's own copies are 160 MiB in 11 resources. Creating XeFG's context
+for 3 generated frames instead of 5 changed nothing. Nothing left to save by lowering the frame count, so no
+capacity option was added (upstream 1.10.0, `603a4fa`). The 160 MiB is the copies' own allocations; this port's
+generator copies each input at its own shape (above) and does not log their sizes, so the number is a reference,
+not a local measurement. `docs/xmx-upstream-port.md` has the sweep that evaluated the counter code and skipped it.
+
 ## Against upstream
 
 Every rule here came from upstream `MFGAdaUnlock-RenoDx` @ `3b8889f`; `docs/xmx-upstream-port.md` carries the
-sweep log and the current comparison base.
+sweep log and the current comparison base (1.10.0, `c25358c`).

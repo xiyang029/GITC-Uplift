@@ -145,6 +145,35 @@ the shape, and the XeFG gate has no per-file step to name.
 report's cause), `6b65add` (version, notes, README), `7108a77` (`tools/Prepare-Release.ps1`) -- version
 strings and docs, checked one by one on 2026-11-08.
 
+## Sweep 2026-11-17: `1226d4f` -> `c25358c` (1.10.0, 18 commits)
+
+`main` and `develop` both moved to `c25358c` (tag 1.10.0); `xmx/proto/xmx-vram` was added. **The ABI layer did not move again**: `xemfg/vendor/` and `xmx_generator.hpp`'s struct block are byte-identical -- `kKnownTimestamp` is still `0x69CB0F4D`, `kInitRva` `0x1871C0`, `kExecuteRva` `0x185800`, and the five `static_assert`s are unchanged. No commit in the range touches a path matching `*xmx*` in this port's tree. Nothing was taken. All 18 commits are accounted for; none is XMX code this port carries.
+
+### Not applicable: provider-module, Streamline host and pre-Ada code (6)
+
+- `921fb4b` (`SL_LOG_*` environment), `e40ac6b` (`ForceFrameGeneration`), `3f79733` (Vulkan DLSS-G provider), `2b4735a`'s Streamline/SR-only host -- this port embeds the XeFG provider and observes NGX's own core; it never loads `sl.interposer` or routes through a Vulkan/DLSS-SR host, so there is no Streamline start to hook or feature list to edit.
+- `45b9729` (architecture answer by caller module), `e5c73fc` (NGX requirements answers, provider export patching, crash dump) -- rewriting the pre-Ada answer or a requirements record is provider-module work; the 1.8.4, 1.8.6 and 1.9.0 sweeps already ruled this class out. Device-removed detection, the one piece that sounds generic, is already here in `src/addon.cpp:971`.
+
+### Not applicable: panel and i18n (3)
+
+`241ad58` (one file per page), `eb4de3b` (six-language tables), `8d837bd` (General-page switches). The port has no panel of its own; `refused`/`refusedShape` already name the failing shape in the log, which is the panel's chain-card idea from `f25d6e3` in the 1.9.0 sweep.
+
+### Not applicable: vendored ABI (1)
+
+`3b3cd4c` -- the dashdogy MFG Unlocker v1.7.0 -> v1.7.1 three-way merge rewrites `sdk_pacing.cpp/.h`, `vk_host.cpp`, `xvk.h`, `cuda_route.cpp` and adds VK tensor/pacer files, all under `xemfg/vendor/`. Read-only black box per `AGENTS.md`; no change handed to it.
+
+### Not taken: VRAM copy counters (1)
+
+`603a4fa` added `g_copy_bytes`/`g_copy_resources` outside the ABI block in upstream's `xmx_generator.hpp` and logged them in its per-10s `Summarize`. The counters are monotonic session totals, but this port's generator log reports per-interval deltas (`ReportRates`, `src/xmx/generator.hpp:201`) -- the wrong semantics for that line, so they were not ported. The transferable result is the measurement itself: 2560x1440 4x on an RTX 4070 SUPER, no FG 1267 MiB, NVIDIA DLSS-G +580 MiB, XMX +975 MiB, of which XMX's own 11 copy resources are 160 MiB; a 3-frame instead of 5-frame XeFG context changed nothing. Recorded in `docs/xefg-input-sizes.md`. No capacity option was added upstream either.
+
+### Not taken: HUD composition (1)
+
+`2b4735a`'s HUD fix sets `init.uiMode = 0` and `execute.uiComposition` in `xmx_generator.hpp`. Both fields already exist in this port's ABI block (`src/xmx/generator.hpp:59`, `:79`) but are never assigned -- correctly, because upstream 1.9.0 also left them untouched and `AGENTS.md` forbids changing what is handed to the black box. Adopting 1.10.0's assignments would alter black-box input, and its `OwnHudlessForThisFrame` additionally depends on a Streamline-host capture this port does not have. Skip.
+
+### Not code (6)
+
+`8f47ce0` (version), `54aaee8` (compat matrix/CI/issue form), `5055ce3`, `685afbe`, `765669e`, `c25358c` (plans, release notes, README) -- none touches the XMX code path.
+
 ## The next sweep
 
 ```
