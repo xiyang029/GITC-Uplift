@@ -1,5 +1,6 @@
 #include "ui/settings_schema.hpp"
 #include "nr/types.hpp"
+#include "ui/settings.hpp"
 
 #include <algorithm>
 #include <array>
@@ -776,17 +777,41 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.foveation_falloff_y = static_cast<uint32_t>(v); },
     },
     {
+        // v3 wrote one edge density for both axes; kept hidden so LoadSettings can still read it and MigrateSettings can carry it to the two rows below.
         .key = "FoveationEdge",
         .kind = SettingKind::UINT,
+        .section = SettingSection::HIDDEN,
+        .label = "Edge density (legacy)",
+        .min = 25.0,
+        .max = 100.0,
+        .flags = BOOKKEEPING,
+        .get = [](const Settings& s) { return s.foveation_edge == 0u ? static_cast<double>(s.foveation_edge_x) : static_cast<double>(s.foveation_edge); },
+        .set = [](Settings& s, double v) { s.foveation_edge = static_cast<uint32_t>(v); },
+    },
+    {
+        .key = "FoveationEdgeX",
+        .kind = SettingKind::UINT,
         .section = SettingSection::PLACEMENT,
-        .label = "Edge density",
-        .tooltip = "The NR density the fall-off reaches at the outermost edge (and Edge x Edge in the corners). 100 % is off. 4K and ultrawide screens are "
-                   "happiest well below it.",
+        .label = "Edge density X",
+        .tooltip = "The NR density the horizontal fall-off reaches at the left/right edges. 100 % is off. 4K and ultrawide screens are happiest well below it.",
         .min = 25.0,
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
-        .get = [](const Settings& s) { return static_cast<double>(s.foveation_edge); },
-        .set = [](Settings& s, double v) { s.foveation_edge = static_cast<uint32_t>(v); },
+        .get = [](const Settings& s) { return static_cast<double>(s.foveation_edge_x); },
+        .set = [](Settings& s, double v) { s.foveation_edge_x = static_cast<uint32_t>(v); if (s.foveation_edge == 0u) s.foveation_edge = static_cast<uint32_t>(v); },
+    },
+    {
+        .key = "FoveationEdgeY",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::PLACEMENT,
+        .label = "Edge density Y",
+        .tooltip = "The NR density the vertical fall-off reaches at the top/bottom edges; independent of X so a widescreen can thin the short vertical ramp "
+                   "more. 100 % is off.",
+        .min = 25.0,
+        .max = 100.0,
+        .flags = APPLY_ON_RELEASE,
+        .get = [](const Settings& s) { return static_cast<double>(s.foveation_edge_y); },
+        .set = [](Settings& s, double v) { s.foveation_edge_y = static_cast<uint32_t>(v); },
     },
     {
         // Split chain, owner's decision Q5a: a later stage group's own Keep faces, default off. Pass 1's group follows Keep faces itself.

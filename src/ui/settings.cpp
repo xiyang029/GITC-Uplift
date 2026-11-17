@@ -88,6 +88,14 @@ void MigrateSettings(Settings* settings) {
   if (settings->config_version < 3u && settings->input_exposure == color::InputExposure::GAME) {
     settings->input_exposure = color::InputExposure::AUTO;
   }
+  // v3 had one FoveationEdge for both axes. LoadSettings reads it through the hidden descriptor into foveation_edge;
+  // its value wins over the defaults in the two new keys. If the file has no legacy key, foveation_edge stays 0 and the
+  // new keys' values stand (the hidden descriptor's getter mirrors them, so SaveSettings still writes a sensible value).
+  if (settings->config_version < 4u && settings->foveation_edge != 0u) {
+    settings->foveation_edge_x = settings->foveation_edge;
+    settings->foveation_edge_y = settings->foveation_edge;
+  }
+  settings->config_version = CONFIG_VERSION;
 }
 
 void SaveSettings(const Settings& settings, ConfigStore* store) {

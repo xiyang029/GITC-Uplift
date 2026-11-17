@@ -642,7 +642,7 @@ sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, st
   // Foveated edge scaling (2026-10-21), as DeviceContext::SettleLayout.
   const nr::foveation::Plan plan = nr::foveation::MakePlanFromShares(
       settings_.foveation,
-      {settings_.foveation_width, settings_.foveation_height, settings_.foveation_falloff_x, settings_.foveation_falloff_y, settings_.foveation_edge},
+      {settings_.foveation_width, settings_.foveation_height, settings_.foveation_falloff_x, settings_.foveation_falloff_y, settings_.foveation_edge_x, settings_.foveation_edge_y},
       output.width, output.height, uniform.width, uniform.height);
   const nr::Size image = {plan.width, plan.height};
   const nr::Size canvas = StageCanvas(image, stage);

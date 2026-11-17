@@ -24,7 +24,7 @@ inline constexpr char ENABLED_KEY[] = "Enabled";  // the one key the add-on poll
 inline constexpr float SKIN_SAME_AS_STRUCTURE = -1.f;
 
 // The version written into the settings file; 3 is the one in which InputExposure's default became Auto. LoadSettings migrates older files.
-inline constexpr uint32_t CONFIG_VERSION = 3u;
+inline constexpr uint32_t CONFIG_VERSION = 4u;
 
 // Every combo is stored as its index, in the order below.
 enum class PlacementSource : uint32_t {
@@ -333,7 +333,9 @@ struct Settings {
   uint32_t foveation_height = 55;    // % of the output's height
   uint32_t foveation_falloff_x = 28;  // left/right sides, % of the output's height
   uint32_t foveation_falloff_y = 15;  // top/bottom sides, % of the output's height: short enough that the vertical ramp reaches the edge density
-  uint32_t foveation_edge = 50;
+  uint32_t foveation_edge = 0;     // legacy v3 single edge key; 0 until an old file supplies it, then used by MigrateSettings
+  uint32_t foveation_edge_x = 50;  // density at the left/right edges
+  uint32_t foveation_edge_y = 50;  // density at the top/bottom edges
   // Split chain (2026-10-10): a later stage group's size (its first pass is not pass 1), keyed by stage; pass 1's group uses Resolution above. Before
   // upscaling is always the first stage, so it has none.
   ResolutionMode resolution_mode_after_dlss = ResolutionMode::FULL;

@@ -15,6 +15,7 @@ if not exist "%VSDIR%\VC\Auxiliary\Build\%VCVARS%" (
   exit /b 1
 )
 call "%VSDIR%\VC\Auxiliary\Build\%VCVARS%" >nul || exit /b 1
+set "VCToolsInstallDir=%VSDIR%\VC\Tools\MSVC\14.52.37025\"
 cd /d "%~dp0"
 rem Known trap: this toolchain's cl prints /showIncludes notes in the localized form, so Ninja never
 rem records header dependencies and editing only a header keeps the previous object files. After a

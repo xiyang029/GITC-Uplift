@@ -550,7 +550,7 @@ nr::Size FovAdjustedSize(nr::Size uniform, const OverlayView& view, const Settin
   if (out.Empty()) return uniform;
   const nr::foveation::Plan plan = nr::foveation::MakePlanFromShares(
       settings.foveation,
-      {settings.foveation_width, settings.foveation_height, settings.foveation_falloff_x, settings.foveation_falloff_y, settings.foveation_edge},
+      {settings.foveation_width, settings.foveation_height, settings.foveation_falloff_x, settings.foveation_falloff_y, settings.foveation_edge_x, settings.foveation_edge_y},
       out.width, out.height, uniform.width, uniform.height);
   return {plan.width, plan.height};
 }
@@ -675,7 +675,8 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
         changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state, true);
         changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state, true);
         changed |= DrawRow(*FindSetting("FoveationFalloffY"), view, settings, state, true);
-        changed |= DrawRow(*FindSetting("FoveationEdge"), view, settings, state, true);
+        changed |= DrawRow(*FindSetting("FoveationEdgeX"), view, settings, state, true);
+        changed |= DrawRow(*FindSetting("FoveationEdgeY"), view, settings, state, true);
       }
     });
   });

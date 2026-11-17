@@ -664,7 +664,7 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
   // before upscaling included, so the player's shares of the output are carried onto `uniform`, the grid the warp lands on.
   const nr::foveation::Plan plan = nr::foveation::MakePlanFromShares(
       settings_.foveation,
-      {settings_.foveation_width, settings_.foveation_height, settings_.foveation_falloff_x, settings_.foveation_falloff_y, settings_.foveation_edge},
+      {settings_.foveation_width, settings_.foveation_height, settings_.foveation_falloff_x, settings_.foveation_falloff_y, settings_.foveation_edge_x, settings_.foveation_edge_y},
       output.width, output.height, uniform.width, uniform.height);
   const nr::Size image = {plan.width, plan.height};
   const nr::Size canvas = StageCanvas(image, stage);

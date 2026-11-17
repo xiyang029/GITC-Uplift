@@ -83,7 +83,8 @@ FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::Controls
       .foveation_height = settings.foveation_height,
       .foveation_falloff_x = settings.foveation_falloff_x,
       .foveation_falloff_y = settings.foveation_falloff_y,
-      .foveation_edge = settings.foveation_edge,
+      .foveation_edge_x = settings.foveation_edge_x,
+      .foveation_edge_y = settings.foveation_edge_y,
       .pre_upscale = settings.pre_upscale,
       .look = LookConfigFrom(look_settings, coalescer->LaterPasses(look_settings, inputs.drag.pass_slider, now)),
       .launchpad_motion = (settings.motion_vectors == ui::MotionVectorSource::AUTO || settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD

@@ -56,7 +56,8 @@ struct Params {
   uint32_t center_height;
   uint32_t falloff_x;  // the fall-off on the left/right sides
   uint32_t falloff_y;  // the fall-off on the top/bottom sides
-  float edge;          // density beyond the fall-off, per axis
+  float edge_x;        // density beyond the horizontal fall-off
+  float edge_y;        // density beyond the vertical fall-off
 };
 
 // The player's sliders, whole per cent of the screen: the centre's width as % of the output's width, its height and both
@@ -64,12 +65,13 @@ struct Params {
 // The two fall-offs are separate because the vertical one is the one a screen's aspect cuts short: shortening it alone
 // lets the vertical ramp reach the edge density.
 inline Params FromPercent(uint32_t width_pct, uint32_t height_pct, uint32_t falloff_x_pct, uint32_t falloff_y_pct,
-                          uint32_t edge_pct, uint32_t out_width, uint32_t out_height) {
+                          uint32_t edge_x_pct, uint32_t edge_y_pct, uint32_t out_width, uint32_t out_height) {
   const auto pixels = [](uint32_t pct, uint32_t full) {
     return (std::clamp(pct, 0u, 100u) * full + 50u) / 100u;  // rounded to the nearest pixel
   };
   return {pixels(width_pct, out_width), pixels(height_pct, out_height), pixels(falloff_x_pct, out_height),
-          pixels(falloff_y_pct, out_height), static_cast<float>(edge_pct) * 0.01f};
+          pixels(falloff_y_pct, out_height), static_cast<float>(edge_x_pct) * 0.01f,
+          static_cast<float>(edge_y_pct) * 0.01f};
 }
 
 // The player's output-pixel parameters on a working grid of work_width x work_height.
@@ -162,8 +164,8 @@ struct Grid {
 inline Grid MakeGrid(bool enabled, const Params& params, uint32_t full_width, uint32_t full_height) {
   Grid grid;
   if (!enabled) return grid;
-  grid.x = MakeAxis(full_width, params.center_width, params.falloff_x, params.edge);
-  grid.y = MakeAxis(full_height, params.center_height, params.falloff_y, params.edge);
+  grid.x = MakeAxis(full_width, params.center_width, params.falloff_x, params.edge_x);
+  grid.y = MakeAxis(full_height, params.center_height, params.falloff_y, params.edge_y);
   if (grid.active() && grid.PixelFactor() > 1.0 - kMinSaving) {
     grid = Grid{};
   }
@@ -220,14 +222,15 @@ struct Shares {
   uint32_t height_pct;     // % of the output's height
   uint32_t falloff_x_pct;  // left/right, % of the output's height
   uint32_t falloff_y_pct;  // top/bottom, as the height
-  uint32_t edge_pct;       // the density the fall-off reaches at the edge
+  uint32_t edge_x_pct;     // density the horizontal fall-off reaches at the left/right edges
+  uint32_t edge_y_pct;     // density the vertical fall-off reaches at the top/bottom edges
 };
 
 // FromPercent, MapToWork and MakePlan in one call: the plan for a working grid of work_width x work_height.
 inline Plan MakePlanFromShares(bool enabled, const Shares& shares, uint32_t out_width, uint32_t out_height, uint32_t work_width,
                                uint32_t work_height) {
-  const Params output = FromPercent(shares.width_pct, shares.height_pct, shares.falloff_x_pct, shares.falloff_y_pct, shares.edge_pct, out_width,
-                                   out_height);
+  const Params output = FromPercent(shares.width_pct, shares.height_pct, shares.falloff_x_pct, shares.falloff_y_pct, shares.edge_x_pct,
+                                   shares.edge_y_pct, out_width, out_height);
   return MakePlan(enabled, MapToWork(output, out_width, out_height, work_width, work_height), work_width, work_height);
 }
 

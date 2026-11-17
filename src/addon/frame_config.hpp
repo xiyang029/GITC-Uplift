@@ -80,7 +80,8 @@ struct FrameSettings {
   uint32_t foveation_height = 55;     // and its height, % of the output's height
   uint32_t foveation_falloff_x = 28;  // fall-off on the left/right sides, % of the output's height
   uint32_t foveation_falloff_y = 15;  // fall-off on the top/bottom sides: short enough that the vertical ramp reaches the edge density
-  uint32_t foveation_edge = 50;       // the density the fall-off reaches at the edge, in percent (25 to 100, where 100 is off)
+  uint32_t foveation_edge_x = 50;     // density at the left/right edges, in percent (25 to 100, where 100 is off)
+  uint32_t foveation_edge_y = 50;     // density at the top/bottom edges
   bool pre_upscale = false;  // NR before DLSS-SR upscales
   sources::LookConfig look;  // the look stage, the colour fixes, Mask, UI correction, passes 2..10
   bool launchpad_motion = true;       // MotionVectors Auto, Launchpad or Lumenite: the Present path may bind UPLIFT_MV
