@@ -2,6 +2,7 @@
 
 #include "nr/keys.hpp"
 #include "nr/log.hpp"
+#include "nvfp4/NrNvfp4.h"
 
 namespace uplift::nr {
 namespace {
@@ -37,7 +38,9 @@ NVSDK_NGX_Result Feature::Create(ID3D12GraphicsCommandList* list, const CreateIn
   parameters_->Set(keys::VISIBILITY_NODE_MASK, 1u);
   parameters_->Set(keys::WIDTH, info.capacity.width);
   parameters_->Set(keys::HEIGHT, info.capacity.height);
-  parameters_->Set(keys::PRESET, info.preset);
+  requested_preset_ = info.preset;
+  // A 4-bit model keeps the runtime on preset 1 (Model A); our CUDA kernels replace its launches one by one.
+  parameters_->Set(keys::PRESET, DlssNr::Nvfp4::IsNvfp4(info.preset) ? 1u : info.preset);
   parameters_->Set(keys::SCALING_RATIO, 1.f);
   parameters_->Set(keys::PERF_QUALITY_VALUE, static_cast<int>(info.performance) - 1);
   const NVSDK_NGX_Result result = snippet_.CreateFeature(list, parameters_, &handle_, &network_);
@@ -90,7 +93,18 @@ NVSDK_NGX_Result Feature::Evaluate(ID3D12GraphicsCommandList* list, const Evalua
   parameters_->Set(keys::ENABLED, inputs.bypass ? 0 : 1);
   parameters_->Set(keys::UI_CORRECTION, inputs.ui_correction ? 1 : 0);
   parameters_->Set(keys::DEPTH_INVERTED, inputs.depth_inverted);
+  // The 4-bit kernels borrow the runtime's Model A buffers through the NvAPI hook. Bracket every
+  // evaluation (whatever the model) so the layers capture work counters, then verify our kernels ran.
+  DlssNr::Nvfp4::BeginEvaluation(requested_preset_);
   const NVSDK_NGX_Result result = snippet_.EvaluateFeature(list, handle_, parameters_);
+  DlssNr::Nvfp4::EndEvaluation(list);
+  if (DlssNr::Nvfp4::IsNvfp4(requested_preset_) && !DlssNr::Nvfp4::OursRan(true)) {
+    // No fallback: the runtime's own Model A output is never shown for a pass that asked for 4-bit.
+    // Returning a failure reuses Session's EVALUATE_FAILED path (failure count + EnterFailed after 3).
+    Logf(LogLevel::ERR, "NR 4-bit model {} did not run its kernels ({}); refusing this pass, no fallback",
+         requested_preset_, DlssNr::Nvfp4::Problem());
+    return NVSDK_NGX_Result_FAIL_PlatformError;
+  }
   if (NVSDK_NGX_SUCCEED(result)) {
     has_evaluation_ = true;
     const bool enabled = !inputs.bypass && controls.intensity > 0.f;

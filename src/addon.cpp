@@ -37,6 +37,7 @@
 #include "addon/e2e_harness.hpp"
 #include "addon/fg_preset.hpp"
 #include "addon/frame_rate.hpp"
+#include "addon/nvfp4_hook.hpp"
 #include "addon/reflex_override.hpp"
 #include "addon/sl_fg_hooks.hpp"
 #include "addon/environment.hpp"
@@ -596,6 +597,7 @@ void PollHooks() {
   // SetSleepMode caller.
   addon::slfg::EnsureSlFgHooks();
   addon::reflex::EnsureReflexHook();
+  addon::EnsureNvfp4Hook();  // the 4-bit kernels ride on nvapi64.dll's QueryInterface, like the FG preset
   // Live panel changes: re-submit the cached game submissions on the game's present thread.
   addon::slfg::RefreshFromPanel();
   addon::slfg::FgPresetTick();  // the FG model preset's live switch (a drain, once per panel choice)
@@ -3974,6 +3976,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   addon::host::ApplyStartEnabled(*g_state);
 
   g_state->addon_directory = addon::host::ModulePath(addon_module).parent_path();
+  addon::SetNvfp4AssetsDirectory(g_state->addon_directory);
   g_state->game_exe_path = addon::host::ModulePath(nullptr);
   g_state->game_directory = g_state->game_exe_path.parent_path();
   // One resolution (UPLIFT_STATE_DIR, else LOCALAPPDATA, else temp) shared

@@ -4,6 +4,7 @@
 #include <format>
 #include <utility>
 
+#include "addon/nvfp4_hook.hpp"
 #include "memory_units.hpp"
 #include "nr/log.hpp"
 #include "text/nr_messages.hpp"
@@ -359,6 +360,16 @@ TriggerPoint VkDlssContext::PrepareFrame(void* queue, const FrameSettings& setti
   }
 
   ApplySessionOptions(*session_, settings, chain_, settings_generation_);
+  // The four-bit kernels are CUDA-on-D3D12 only: refuse rather than silently run the runtime's model.
+  {
+    bool wants_nvfp4 = settings.session.presets[0] >= 4u;
+    for (uint32_t pass = 1u; pass < settings.session.pass_count && !wants_nvfp4; ++pass) {
+      wants_nvfp4 = settings.session.presets[pass] >= 4u;
+    }
+    if (wants_nvfp4) {
+      RefuseNvfp4("the 4-bit models need the D3D12 processing path (this game runs NR on Vulkan)");
+    }
+  }
   // The look stage, the colour fixes and passes 2..10 reach the pipeline at each recording (ApplyLookConfig, with its frame time); the mask copy goes
   // as soon as Mask is off.
   if (!settings.look.mask) {

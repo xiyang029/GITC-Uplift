@@ -6,6 +6,7 @@
 
 #include "addon/dred.hpp"
 #include "addon/frame_rate.hpp"
+#include "addon/nvfp4_hook.hpp"
 #include "nr/log.hpp"
 #include "text/nr_messages.hpp"
 
@@ -225,6 +226,15 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
   }
 
   ApplySessionOptions(*session_, settings, chain_, settings_generation_);
+  // The four-bit models replace the runtime's Model A launches on this D3D12 path. Configuring the
+  // kernels is idempotent while the choice is unchanged; asking for none leaves the runtime alone.
+  {
+    bool wants_nvfp4 = settings.session.presets[0] >= 4u;
+    for (uint32_t pass = 1u; pass < settings.session.pass_count && !wants_nvfp4; ++pass) {
+      wants_nvfp4 = settings.session.presets[pass] >= 4u;
+    }
+    RequestNvfp4(wants_nvfp4);
+  }
   UpdateSession(now);
 
   if (present_group && present_encoding) {

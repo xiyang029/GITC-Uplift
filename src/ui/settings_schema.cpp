@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <format>
+#include <iterator>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -13,8 +14,24 @@ namespace uplift::ui {
 namespace {
 
 constexpr std::array<std::string_view, 3> MODELS = {"Style A", "Style B", "Style C"};
-constexpr std::array<std::string_view, 3> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8"};
-constexpr std::array<std::string_view, 3> PASS_NETWORKS = {"Same as pass 1", "A: Legacy", "B: Small FP8"};
+constexpr std::array<std::string_view, 6> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8",
+                                                         "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one"};
+constexpr std::array<std::string_view, 6> PASS_NETWORKS = {"Same as pass 1", "A: Legacy", "B: Small FP8",
+                                                           "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one"};
+// A network preset is stored as the NGX preset number (0,1,2 or the four-bit 4/15/16), but the UI's
+// CHOICE rows work on a 0-based option index. Map between them in one place.
+constexpr std::array<uint32_t, 6> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 15u, 16u};
+
+double NetworkPresetIndex(uint32_t preset) {
+  const auto it = std::find(NETWORK_PRESET_VALUES.begin(), NETWORK_PRESET_VALUES.end(), preset);
+  return static_cast<double>(it == NETWORK_PRESET_VALUES.end() ? 0u : std::distance(NETWORK_PRESET_VALUES.begin(), it));
+}
+
+uint32_t NetworkPresetValue(double index) {
+  const size_t i = static_cast<size_t>(index);
+  return (i < NETWORK_PRESET_VALUES.size() ? NETWORK_PRESET_VALUES[i] : 0u);
+}
+
 constexpr std::array<std::string_view, 3> SOURCES = {"Auto", "After DLSS", "Present"};
 constexpr std::array<std::string_view, 5> MOTION_VECTORS = {"Auto", "DLSS", "Launchpad", "None", "Lumenite"};  // stored-index order (Setup shows Lumenite after Launchpad)
 constexpr std::array<std::string_view, 5> PRESETS = {"Game", "J", "K", "L", "M"};
@@ -1443,8 +1460,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "Which NR network runs.",
         .choices = NR_NETWORKS,
         .flags = RESTARTS_HISTORY | NETWORK_PRESET,
-        .get = [](const Settings& s) { return static_cast<double>(s.preset); },
-        .set = [](Settings& s, double v) { s.preset = static_cast<uint32_t>(v); },
+        .get = [](const Settings& s) { return NetworkPresetIndex(s.preset); },
+        .set = [](Settings& s, double v) { s.preset = NetworkPresetValue(v); },
     },
     {
         .key = "Performance",
@@ -1840,6 +1857,17 @@ void PassSet(Settings& s, double v) {
   }
 }
 
+// Pass n's own network preset, mapped the same way as the main row.
+template <size_t Index>
+double PassPresetGet(const Settings& s) {
+  return NetworkPresetIndex(s.passes[Index].preset);
+}
+
+template <size_t Index>
+void PassPresetSet(Settings& s, double v) {
+  s.passes[Index].preset = NetworkPresetValue(v);
+}
+
 constexpr size_t PASS_ROW_COUNT = 11u;
 constexpr size_t LATER_PASS_COUNT = MAX_PASSES - 1u;
 
@@ -2022,8 +2050,8 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .tooltip = "Which NR network this pass runs. Same as pass 1 uses the Setup network.",
           .choices = PASS_NETWORKS,
           .flags = PASS_SWITCH | NETWORK_PRESET | RESTARTS_HISTORY,
-          .get = &PassGet<Index, &PassSettings::preset>,
-          .set = &PassSet<Index, &PassSettings::preset>,
+          .get = &PassPresetGet<Index>,
+          .set = &PassPresetSet<Index>,
           .pass = PASS,
       },
   });

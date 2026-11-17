@@ -79,6 +79,7 @@ class Feature final : public FeatureInterface {
   uint32_t last_mask_mode_ = 0u;
   bool last_enabled_ = false;
   bool has_evaluation_ = false;
+  uint32_t requested_preset_ = 1u;  // the preset the user asked for, before the 4-bit remap to runtime preset 1
 };
 
 }  // namespace uplift::nr

@@ -130,8 +130,15 @@ add_library(uplift_nr STATIC
   src/nr/real_host.cpp
   src/nr/vk_feature.cpp
   src/nr/vk_host.cpp
-  src/nr/session.cpp)
+  src/nr/session.cpp
+  src/nvfp4/NrFfnV2.cpp
+  src/nvfp4/NrSwin4.cpp
+  src/nvfp4/NrNet4.cpp
+  src/nvfp4/NrNvfp4.cpp)
 target_include_directories(uplift_nr PUBLIC "${CMAKE_SOURCE_DIR}/src")
+# The NVFP4 sources use their own short includes and NVIDIA's nvapi.h for the CUDA-on-D3D12 entry points.
+target_include_directories(uplift_nr PRIVATE "${CMAKE_SOURCE_DIR}/src/nvfp4")
+target_include_directories(uplift_nr SYSTEM PRIVATE "${UPLIFT_NVAPI_INCLUDE}")
 target_include_directories(uplift_nr SYSTEM PUBLIC "${UPLIFT_NGX_INCLUDE}")
 # nr::Snippet's Vulkan binding and VkHost/VkFeature name Vulkan's types. Headers only: nothing links a Vulkan library.
 target_include_directories(uplift_nr SYSTEM PUBLIC "${UPLIFT_VULKAN_INCLUDE}")
@@ -322,6 +329,7 @@ add_library(uplift_addon_core STATIC
   src/addon/frame_rate.cpp
   src/addon/sl_fg_hooks.cpp
   src/addon/reflex_override.cpp
+  src/addon/nvfp4_hook.cpp
   src/addon/reshade_version.cpp
   src/addon/ngx_bridge.cpp
   src/addon/d3d11_identity.cpp

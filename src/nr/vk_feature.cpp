@@ -2,6 +2,7 @@
 
 #include "nr/keys.hpp"
 #include "nr/log.hpp"
+#include "nvfp4/NrNvfp4.h"
 #include "nr/vk_handles.hpp"
 
 namespace uplift::nr {
@@ -31,6 +32,12 @@ VkFeature::~VkFeature() {
 
 NVSDK_NGX_Result VkFeature::Create(ID3D12GraphicsCommandList* list, const CreateInfo& info) {
   if (handle_ != nullptr || list == nullptr || info.capacity.Empty()) return NVSDK_NGX_Result_FAIL_InvalidParameter;
+  // The 4-bit kernels are CUDA-on-D3D12 and have no Vulkan path. Fail creation rather than silently
+  // running the runtime's own model under a 4-bit choice (the add-on's context also reports this).
+  if (DlssNr::Nvfp4::IsNvfp4(info.preset)) {
+    Logf(LogLevel::ERR, "NR 4-bit model {} cannot run on Vulkan; refusing feature creation", info.preset);
+    return NVSDK_NGX_Result_FAIL_PlatformError;
+  }
   if (parameters_ == nullptr) {
     parameters_ = snippet_.AllocateParameters();
   }

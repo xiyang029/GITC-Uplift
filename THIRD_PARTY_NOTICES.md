@@ -1,5 +1,13 @@
 # Third-party notices
 
+## NVFP4 4-bit NR kernels (GPL-3.0) — from OptiScaler by wilsjo2
+The four-bit NR implementation in `src/nvfp4/` (the NvAPI CUDA-on-D3D12 Model A replacement and its
+weight loader) and the hook in `src/addon/nvfp4_hook.cpp` derive from the NVFP4 work in OptiScaler
+v0.9.0 (https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass). That work is licensed under the
+GNU General Public License v3.0; incorporating it makes this project GPL-3.0 licensed. The full licence
+is in `LICENSE`. The trained weight files are not committed: the user supplies them in
+`gitc-uplift.addon64`'s directory under `nvfp4/`. Source: https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass
+
 ## openNR (MIT) — Copyright (c) 2026 Carlos Lopez Jr.
 Snippet loading, caller-identity spoof and NGX parameter-provider logic in `src/nr/snippet.cpp`
 and `src/nr/pe_imports.cpp` are derived from `benchmarks/native/include/neural_rendering_direct.hpp`.
