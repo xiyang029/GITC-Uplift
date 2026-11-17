@@ -170,9 +170,86 @@ strings and docs, checked one by one on 2026-11-08.
 
 `2b4735a`'s HUD fix sets `init.uiMode = 0` and `execute.uiComposition` in `xmx_generator.hpp`. Both fields already exist in this port's ABI block (`src/xmx/generator.hpp:59`, `:79`) but are never assigned -- correctly, because upstream 1.9.0 also left them untouched and `AGENTS.md` forbids changing what is handed to the black box. Adopting 1.10.0's assignments would alter black-box input, and its `OwnHudlessForThisFrame` additionally depends on a Streamline-host capture this port does not have. Skip.
 
+Re-checked on 2026-11-17 while sweeping 1.10.1: `AGENTS.md`'s wording is "keep upstream's assignments
+exactly" (do not invent your own), so moving to upstream's own assignments is not what it forbids, and
+`OwnHudlessForThisFrame` falls back to the game's `DLSSG.HUDLess` when the Streamline host has nothing,
+which this port already captures (`src/xmx/generator.hpp:527-547`). The decision still stands, but the
+1.10.1 sweep below states the reasons it is still deferred.
+
 ### Not code (6)
 
 `8f47ce0` (version), `54aaee8` (compat matrix/CI/issue form), `5055ce3`, `685afbe`, `765669e`, `c25358c` (plans, release notes, README) -- none touches the XMX code path.
+
+## Sweep 2026-11-17: `c25358c` -> `395ed32` (1.10.1, 1 commit)
+
+`main` moved on to `395ed32` (tag 1.10.1); `c25358c` is its parent, so this is the single commit the
+1.10.0 sweep above left. **The ABI layer did not move**: `xmx_generator.hpp`'s struct block is
+byte-identical -- `kKnownTimestamp` is still `0x69CB0F4D`, `kInitRva` `0x1871C0`, `kExecuteRva`
+`0x185800`, and the five `static_assert`s are unchanged. This commit touches no file under
+`xemfg/vendor/` at all, so the vendor delta recorded in the 1.10.0 sweep is unchanged by it. Nothing
+was taken; the commit's XMX work is one item, deferred on purpose below.
+
+### Deferred: the HUD-composition guard (1)
+
+`395ed32` is upstream's repair of the HUD composition `2b4735a` introduced, and it is the piece that
+makes that feature adoptable by a mod. `xmx_generator.hpp` (44 lines) gains `Report::hud`,
+`SetHudState`, `same_size`/`same_family` and the decision
+
+```
+execute.uiComposition = next.hudless && previous.hudless && UiCompositionWanted() ? 1u : 0u;  // [DLSSG] XmxUiComposition, default 0
+hud_inputs = execute.uiComposition == 0 && next.hudless && previous.hudless && HudCompositeWanted();  // [DLSSG] HudFix, default 1
+composite  = hud_inputs && same_family(next.hudless, next.backbuffer) && same_family(previous.hudless,
+             previous.backbuffer) && !Tripped() && !failed && same_size(next..) && same_size(previous..);
+```
+
+When `composite` holds, `execute.previous.backbuffer`/`execute.next.backbuffer` become the HUD-less
+copies, XeFG interpolates those, and `hudcomposite::Apply` then paints the real frame's pixels (where
+they differ from the HUD-less colour by more than 3/255) over the generated frame. `xmx_policy.hpp`
+(45 lines) adds `FormatFamily` and `HudGuard` -- a 16-frame window, 12 of whose measured frames over a
+30%-of-screen difference share trip it, and once tripped it stays tripped for the session; one pixel in
+sixteen is counted, from a counter buffer read back 6 passes behind. `xmx_hud_composite.hpp` (92 lines)
+gains that readback plus `Measure`/`Tripped`, and `tests/xmx_policy_tests.cpp` covers the guard. The log
+line is `HUD: on: XeFG interpolates the HUD-less color; the real frame's HUD is composed over it` or
+`HUD: off: ... NN% of the screen differed; RenoDX or another post-process after it?`.
+
+Not taken now, for three reasons:
+
+- **The payoff is outside this port's main configuration.** The composite needs the frame XeFG sees to
+  be the game's own colour, so it engages with NR off or with NR at Present, and is expected to trip off
+  whenever NR has already run on that frame (NR stage = After DLSS, `src/ui/settings_schema.cpp:1126-1130`),
+  because the HUD-less colour the game hands over is not the NR'd image. It then falls back to today's
+  1.9.0 behaviour by itself, but it would pay off only for users who do not use the stage this add-on
+  exists for. Not measured on hardware.
+- **Upstream changed this logic twice in two days** (`2b4735a`, then this commit). Porting it now adds a
+  file to re-sweep every pass while XMX here is still an opt-in experimental switch
+  (`src/ui/settings.hpp:299`, off by default); one or two sweeps will settle its shape.
+- **It changes what is handed to the black box** (the HUD-less colour as the interpolated back buffer,
+  plus `uiComposition`, and `uiMode` from 1.10.0) on a path this port has never exercised, and it cannot
+  be validated without a DLSS-G game that supplies `DLSSG.HUDLess`. A mistake there sits behind the crash
+  latch (`src/addon/removal_latch.cpp`).
+
+Revisit when XMX stops being experimental, when HUD ghosting is reported, or when upstream leaves this
+code alone for a sweep or two. If taken, take 1.10.0 and 1.10.1 together -- the composite without this
+guard is exactly the bug this commit fixes. The porting shape is already clear: measure the difference
+first from the two copies `Capture` already makes (`src/xmx/generator.hpp:527-547`); compile the
+composite shader through this repo's `shaders/*.hlsl`/dxc path rather than upstream's
+`LoadLibraryW("d3dcompiler_47.dll")`; insert the pass at `src/xmx/generator.hpp:936`, where the
+generated output is copied into `DLSSG.OutputInterpolated`, reading `state.outputs[frameIndex - 1]`
+(already `UNORDERED_ACCESS`) and the port's own copies (already `kXefgInputState` =
+`NON_PIXEL_SHADER_RESOURCE`, exactly what `Apply` asks for); add `FormatFamily`/`HudGuard` to
+`src/xmx/policy.hpp`; gate it behind a setting, or an `[Uplift]` ini key following `XmxJitter`. Acceptance:
+`.\build.cmd release`, `HUD: on` with NR off and with NR at Present in one DLSS-G game, `HUD: off: ...`
+with NR at After DLSS, no crash latch.
+
+### Not applicable: provider module, panel, Streamline files and i18n (1 commit)
+
+`addon.cpp`, `addon_provider.inl`, `sl_module.hpp`, `sl_host.hpp`, `swapchain_format_guard.hpp`,
+`fg_chain.hpp`, `framecount.hpp`, `force_fg.hpp`, `preada_admission.hpp`, `hud_capture.hpp`,
+`xemfg/dependency_manager.*`, `xemfg/sl_vulkan.cpp`, `xemfg/native_*`, `streamline_catalog.json`,
+`overlay_page_general.inl`, `i18n/string_keys.hpp` and the six `strings_*.inl` tables, plus
+`tools/Repair-XeDependencies.ps1`, `tools/sl_sample.py` and the golden PNGs -- the provider-module /
+Streamline-host / panel line of work the 1.10.0 sweep already ruled out. The three `xmx_*` files above
+are the only XMX files in the commit.
 
 ## The next sweep
 
