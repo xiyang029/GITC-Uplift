@@ -333,7 +333,6 @@ struct Settings {
   uint32_t foveation_height = 55;    // % of the output's height
   uint32_t foveation_falloff_x = 28;  // left/right sides, % of the output's height
   uint32_t foveation_falloff_y = 15;  // top/bottom sides, % of the output's height: short enough that the vertical ramp reaches the edge density
-  uint32_t foveation_edge = 0;     // legacy v3 single edge key; 0 until an old file supplies it, then used by MigrateSettings
   uint32_t foveation_edge_x = 50;  // density at the left/right edges
   uint32_t foveation_edge_y = 50;  // density at the top/bottom edges
   // Split chain (2026-10-10): a later stage group's size (its first pass is not pass 1), keyed by stage; pass 1's group uses Resolution above. Before

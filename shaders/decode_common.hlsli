@@ -44,8 +44,9 @@ Texture2D<float4> change_texture : register(t1);
 Texture2D<float> exposure_texture : register(t2);
 Texture2D<float4> mask_texture : register(t3);  // Uplift's copy of UPLIFT_MASK, read with OPTION_MASK
 
-static const float SPATIAL_RADIUS = 1.5f;  // the tent's half-width, in output pixels (v2 design §3.8; per axis since 2026-10-29)
-static const float MIN_WEIGHT = 1e-4f;     // below this total the edge-aware sample falls back to bilinear
+static const float SPATIAL_RADIUS = 1.5f;      // the tent's half-width, in output pixels (v2 design §3.8)
+static const float SPATIAL_INV_RADIUS = 1.f / SPATIAL_RADIUS;  // so the tent's weight is a multiply, not a divide
+static const float MIN_WEIGHT = 1e-4f;         // below this total the edge-aware sample falls back to bilinear
 
 // Band shaping (2026-10-26; density scale 2026-10-27). The upsample's two bands are shaped before they are
 // combined: the detail band by how coarse the working grid is here, both bands by how dark the pixel is.
@@ -82,15 +83,16 @@ float3 ChangeBilinear(float2 position, uint2 size) {
   return lerp(top, bottom, fraction.y);
 }
 
-// One tap's spatial weight: a tent around `position`, its half-width SPATIAL_RADIUS *output* pixels on each axis,
-// which is `radius` work texels. The two axes differ (2026-10-29): a Custom resolution may scale width and height
-// apart, and one work texel then spans 1.67 output pixels across and 1.25 down. A tent fixed at 1.5 work texels
-// would be an ellipse on screen -- flat across, tall down -- so the residual edge - classic would mean something
-// different per axis and no single density could shape both. Dividing the radius by each axis' own upsampling
-// keeps the support round in output space, which is the space the image is judged in.
-float TentWeight(float2 position, float2 tap, float2 radius) {
+// One tap's spatial weight: a tent around `position`, its half-width SPATIAL_RADIUS work texels on both axes.
+//
+// It was per axis from 2026-10-29 to 2026-11-05, dividing SPATIAL_RADIUS by each axis' own upsampling so a Custom
+// resolution that scales width and height apart kept the support round in output space. The floor added under
+// that quotient on 2026-11-05 made it constant: the per-axis upsampling is density / scale with scale <= 1 and
+// density >= 1, so it is never below one, and max(SPATIAL_RADIUS / upsampling, SPATIAL_RADIUS) is SPATIAL_RADIUS
+// at every scale. No caller carries a radius any more, and each axis' weight is one multiply instead of a divide.
+float TentWeight(float2 position, float2 tap) {
   const float2 gap = abs(position - tap);  // not `distance`: an HLSL intrinsic
-  return max(1.f - gap.x / radius.x, 0.f) * max(1.f - gap.y / radius.y, 0.f);
+  return max(1.f - gap.x * SPATIAL_INV_RADIUS, 0.f) * max(1.f - gap.y * SPATIAL_INV_RADIUS, 0.f);
 }
 
 // The change field at `tap`, clamped to the field's texels; the position a caller weights it by stays the
@@ -111,15 +113,15 @@ float4 ChangeTap(int2 tap, uint2 size) {
 // poison the sum and hand the pixel back to Compose's finite guard as an untouched source -- so they select
 // a zero weight and a zero value instead, and stay out of the hull. The change field's own writers sanitise
 // (ChangeField, ResolveStrengths), so this only guards a field read before it is written.
-void AccumulateTap(float4 change, float2 position, float2 tap, float2 radius, float guide, float range_k,
-                   bool want_range, inout float3 sum, inout float total, inout float3 tap_min, inout float3 tap_max) {
+void AccumulateTap(float4 change, float2 position, float2 tap, float guide, float range_k, bool want_range,
+                   inout float3 sum, inout float total, inout float3 tap_min, inout float3 tap_max) {
   const bool finite = all(isfinite(change));
   if (want_range && finite) {
     tap_min = min(tap_min, change.xyz);
     tap_max = max(tap_max, change.xyz);
   }
   const float difference = guide - change.w;
-  const float weight = finite ? TentWeight(position, tap, radius) * exp2(difference * difference * range_k) : 0.f;
+  const float weight = finite ? TentWeight(position, tap) * exp2(difference * difference * range_k) : 0.f;
   sum += weight * (finite ? change.xyz : float3(0.f, 0.f, 0.f));
   total += weight;
 }
@@ -144,22 +146,15 @@ void AccumulateTap(float4 change, float2 position, float2 tap, float2 radius, fl
 // pull the mix below it; the default cannot, so that path skips the hull's min/max entirely. The value is
 // uniform, so the branch costs nothing. The hull is over every tap, the zero-weight ones included, so the
 // clamp sees the range it always has: that is what the second loop loads them for.
-float3 ChangeEdgeAware(float2 position, uint2 size, float density, float2 axis_density, bool want_range,
-                       out float3 tap_min, out float3 tap_max, out float3 classic) {
+float3 ChangeEdgeAware(float2 position, uint2 size, float density, bool want_range, out float3 tap_min,
+                       out float3 tap_max, out float3 classic) {
   const int2 base = int2(floor(position));
   const float2 fraction = position - float2(base);
   const float range_k = RANGE_K / density;
-  // The tent's half-width per axis, in work texels: output-space round, so an axis the grid resolves less often
-  // gets a proportionally narrower one.
-  //
-  // The floor is SPATIAL_RADIUS itself (2026-11-05). A floor of one texel looked like it kept the nine taps alive,
-  // but a tent exactly one texel wide puts all of its weight on the centre 2x2 -- and there the tent's weights are
-  // the bilinear weights, tap for tap. So `edge` came out equal to `classic`, the detail band was exactly zero,
-  // and edge-aware quietly became Classic everywhere the grid was coarser than 67 %: Quality, Balanced,
-  // Performance, 33 % and 25 % all measured 0 % outer-tap weight. Flooring at the kernel's own half-width keeps the
-  // support the kernel was designed around at every scale, which is what upstream's fixed 1.5 does.
-  const float2 ideal = SPATIAL_RADIUS / max(axis_density, float2(1.f, 1.f));
-  const float2 radius = max(ideal, float2(SPATIAL_RADIUS, SPATIAL_RADIUS));
+  // The tent's half-width is SPATIAL_RADIUS at every scale: the per-axis radius the 2026-10-29 kernel carried
+  // became constant once 2026-11-05 floored it (see TentWeight), so it is not computed here any more. The floor
+  // is still the design: a tent one texel wide is the bilinear cell, which put `edge` equal to `classic` and
+  // silently turned edge-aware into Classic wherever the grid was coarser than 67 %.
 
   const float4 c00 = ChangeTap(base, size);
   const float4 c10 = ChangeTap(base + int2(1, 0), size);
@@ -177,20 +172,20 @@ float3 ChangeEdgeAware(float2 position, uint2 size, float density, float2 axis_d
   float total = 0.f;
   tap_min = float3(1e30f, 1e30f, 1e30f);
   tap_max = float3(-1e30f, -1e30f, -1e30f);
-  AccumulateTap(c00, position, float2(base), radius, guide, range_k, want_range, sum, total, tap_min, tap_max);
-  AccumulateTap(c10, position, float2(base + int2(1, 0)), radius, guide, range_k, want_range, sum, total, tap_min, tap_max);
-  AccumulateTap(c01, position, float2(base + int2(0, 1)), radius, guide, range_k, want_range, sum, total, tap_min, tap_max);
-  AccumulateTap(c11, position, float2(base + int2(1, 1)), radius, guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c00, position, float2(base), guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c10, position, float2(base + int2(1, 0)), guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c01, position, float2(base + int2(0, 1)), guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c11, position, float2(base + int2(1, 1)), guide, range_k, want_range, sum, total, tap_min, tap_max);
 
   const int2 outer = int2(fraction.x < 0.5f ? -1 : 2, fraction.y < 0.5f ? -1 : 2);
   const int2 ring[4] = {int2(outer.x, 0), int2(outer.x, 1), int2(0, outer.y), int2(1, outer.y)};
   [unroll] for (int i = 0; i < 4; ++i) {
     const int2 tap = base + ring[i];
-    AccumulateTap(ChangeTap(tap, size), position, float2(tap), radius, guide, range_k, want_range, sum, total, tap_min,
+    AccumulateTap(ChangeTap(tap, size), position, float2(tap), guide, range_k, want_range, sum, total, tap_min,
                   tap_max);
   }
   const int2 corner = base + outer;
-  AccumulateTap(ChangeTap(corner, size), position, float2(corner), radius, guide, range_k, want_range, sum, total, tap_min,
+  AccumulateTap(ChangeTap(corner, size), position, float2(corner), guide, range_k, want_range, sum, total, tap_min,
                 tap_max);
 
   if (want_range) {
@@ -224,11 +219,14 @@ float EditDarkness(float guide) {
 
 // The same guide ChangeField stores in .w -- log2 of the model domain's linear luminance plus the encoding's
 // epsilon -- at the output pixel's own rate: a field coarser than the output has one average per cell, and
-// anything that multiplies the change per output pixel needs this. The source goes through EncodeModel first:
-// the field's .w measures the model domain, not LinearLight's scene light, and on HDR the two place shadows
-// differently. EncodeModel also carries the finiteness guard, so the decode needs no second one.
-float ChangeGuide(uint encoding, uint primaries, float3 source, float scale) {
-  const float3 model = EncodeModel(encoding, primaries, source, scale);
+// anything that multiplies the change per output pixel needs this.
+//
+// The model domain is not scene light: on HDR it is the tone-mapped, gamut-clipped encode, which places shadows
+// differently, so HDR reads the caller's linear colour through EncodeLinear rather than transforming the stored
+// value again. SDR keeps reading the stored value, because the encode there is `saturate` and a round trip through
+// SrgbEncode/SrgbDecode is not the same bits. `light` arrives sanitised, which is EncodeModel's finiteness guard.
+float ChangeGuide(uint encoding, float3 value, float3 light) {
+  const float3 model = (IsSdr(encoding) ? saturate(value) : EncodeLinear(encoding, light));
   return log2(max(Luminance(SrgbDecode(model)), 0.f) + ChangeEpsilon(encoding));
 }
 
@@ -306,6 +304,12 @@ float4 DecodePixel(uint2 pixel) {
   }
   precise float scale = input_scale * GameExposure(has_exposure, exposure, exposure_factor);
   float3 change;
+  // Edge-aware needs the pixel in scene light for its guide before it knows whether there is a change; the other
+  // modes build it only once a change exists, which is what Compose's zero test buys them. The flag is uniform
+  // (one mode per pass), so the branch below costs a coherent test rather than a per-pixel choice, and the compose
+  // is one copy of the code.
+  float3 original = float3(0.f, 0.f, 0.f);
+  bool has_original = false;
   if (upsampling == 0u) {
     change = change_texture.Load(int3(pixel, 0)).xyz;
   } else {
@@ -328,9 +332,10 @@ float4 DecodePixel(uint2 pixel) {
       // this output pixel sits in the region, not on the screen.
       const FovSample sx = FovFullToWorkSample1(pixel.x, width, size.x, foveation_x, foveation_gmax_x);
       const FovSample sy = FovFullToWorkSample1(pixel.y, height, size.y, foveation_y, foveation_gmax_y);
-      // Output texels per change-field texel, per axis: the tent's support has to be round in output space, so
-      // each axis needs its own upsampling rather than one number for both -- a Custom resolution may scale width
-      // and height apart, and then the two differ. `ratio` is the uniform scale on that axis, `warp` the foveated
+      // Output texels per change-field texel, per axis. The tent itself no longer follows this -- its half-width
+      // is a fixed SPATIAL_RADIUS work texels (TentWeight) -- but the shaping does: the density below decides how
+      // far the kernel's correction fades in and how wide its range is, and that is per axis, because a Custom
+      // resolution may scale width and height apart. `ratio` is the uniform scale on that axis, `warp` the foveated
       // grid's own: sx/sy measure against the warp's normalizer (gmax is work / uniform) while ratio measures
       // against the whole working grid, so ratio carries that normalizer's mean as well. Multiplying by the
       // warp's factor leaves the local upsampling -- 1 where the field is 1:1 with the output, the field's own
@@ -340,8 +345,8 @@ float4 DecodePixel(uint2 pixel) {
       const float2 warp = float2(foveation_gmax_x, foveation_gmax_y);
       // ratio >= 1 by construction: sources::WorkSize caps the work grid at the region on every side.
       const float2 axis = float2(sx.density, sy.density) * ratio * warp;
-      // The shaping still needs one number: the geometric mean is the scale whose per-axis shaping matches the
-      // tent's area, which is what the kernel's fade describes.
+      // The shaping still needs one number: the geometric mean is the scale its single fade and range describe
+      // the cell's area at.
       const float density = sqrt(axis.x * axis.y);
       // Both bands' shadow attenuation is read at this output pixel, not from the field: EditDarkness's ramp has
       // a slope only the finest sample resolves, and a guide averaged over a cell of `density` output pixels
@@ -349,7 +354,11 @@ float4 DecodePixel(uint2 pixel) {
       // reproduces the field's own .w from the source texel the decode has already loaded, so the ramp sees the
       // quantity the field pass measured, at the rate the change is finally applied. .w stays the bilateral's
       // guide: that comparison is between samples of one field at one resolution.
-      const float dark = EditDarkness(ChangeGuide(encoding, primaries, source.rgb, scale));
+      // One scene-light read serves the shaping's guide and the rebuild's start: before this, HDR transformed the
+      // stored value once for the guide and again inside Compose.
+      original = SceneLinear(encoding, primaries, source.rgb, scale);
+      has_original = true;
+      const float dark = EditDarkness(ChangeGuide(encoding, source.rgb, SanitiseLight(original)));
       // 1e-5 covers the few ulp the two sqrt'd products carry; the next real scale up (Custom 99 %) is four
       // orders of magnitude further, so nothing that resamples can slip in.
       if (density <= 1.f + 1e-5f) {
@@ -369,7 +378,7 @@ float4 DecodePixel(uint2 pixel) {
         const float2 position = float2(sx.position, sy.position);
         float3 tap_min, tap_max;
         float3 classic;
-        const float3 edge = ChangeEdgeAware(position, size, density, axis, hull, tap_min, tap_max, classic);
+        const float3 edge = ChangeEdgeAware(position, size, density, hull, tap_min, tap_max, classic);
         change = dark * ChangeBands(classic, edge, tap_min, tap_max, guided_low_gain, density, hull);
       }
     } else {
@@ -381,10 +390,15 @@ float4 DecodePixel(uint2 pixel) {
   if ((options & OPTION_MASK) != 0u) {
     change *= mask;
   }
-  // Compose returns the source untouched when the change is zero, which is what NR leaves wherever it did not
-  // edit. `change == 0` here is exactly Compose's own test, and the mask multiply cannot disturb it.
+  // A zero change leaves the pixel to the source untouched, which is what NR leaves wherever it did not edit. The
+  // test sits before the scene-light transform below, so an untouched pixel pays neither that nor the rebuild;
+  // Compose itself only guards non-finite values. The mask multiply cannot turn a non-zero change into zero.
   if (all(change == float3(0.f, 0.f, 0.f))) return source;
-  return float4(Compose(encoding, primaries, source.rgb, change, scale, transfer_strength, color_strength, options, chroma_clamp),
+  if (!has_original) {
+    original = SceneLinear(encoding, primaries, source.rgb, scale);
+  }
+  return float4(Compose(encoding, primaries, source.rgb, original, change, scale, transfer_strength, color_strength,
+                        options, chroma_clamp),
                 source.a);
 }
 

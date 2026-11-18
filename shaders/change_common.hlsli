@@ -35,10 +35,19 @@ uint Mirror(uint p, uint size) {
 }
 
 // Linear light for resampling and the compose: scene-linear BT.709 with diffuse white at 1.0, or for
-// SDR the sRGB-decoded display value. Non-finite values count as black, as encode does.
-float3 LinearLight(uint encoding, uint primaries, float3 value, float scale) {
-  const float3 light = (IsSdr(encoding) ? SrgbDecode(saturate(value)) : ToSceneLinear(encoding, primaries, value, scale));
+// SDR the sRGB-decoded display value. Unguarded, because the compose has to see a non-finite original to hand
+// the stored value back untouched; everything that only reads a colour takes it through LinearLight below.
+float3 SceneLinear(uint encoding, uint primaries, float3 value, float scale) {
+  return (IsSdr(encoding) ? SrgbDecode(saturate(value)) : ToSceneLinear(encoding, primaries, value, scale));
+}
+
+float3 SanitiseLight(float3 light) {
   return (all(isfinite(light)) ? light : float3(0.f, 0.f, 0.f));
+}
+
+// Linear light for resampling and the guides: non-finite values count as black, as encode does.
+float3 LinearLight(uint encoding, uint primaries, float3 value, float scale) {
+  return SanitiseLight(SceneLinear(encoding, primaries, value, scale));
 }
 
 // The model domain of a linear-light value: EncodeModel after its ToSceneLinear step.
@@ -105,12 +114,12 @@ float3 Rebuild(uint encoding, float3 original, float3 change, float transfer_str
   return rebuilt;
 }
 
-// An output pixel from its stored `value` and the upsampled final change. A zero change
-// returns `value` exactly; so does a non-finite original or result (the final finite guard).
-float3 Compose(uint encoding, uint primaries, float3 value, float3 change, float scale, float transfer_strength,
-               float color_strength, uint options, float chroma_clamp) {
-  if (all(change == float3(0.f, 0.f, 0.f))) return value;
-  const float3 original = (IsSdr(encoding) ? SrgbDecode(saturate(value)) : ToSceneLinear(encoding, primaries, value, scale));
+// An output pixel from its stored `value`, its linear `original` and the upsampled final change. A non-finite
+// original or result returns `value` exactly (the final finite guard). The original is the caller's, not built
+// here: the decode's edge-aware path needs it for its guide before it knows whether there is a change, and the
+// other modes build it only after Compose's zero test, so each pixel is transformed to scene light once.
+float3 Compose(uint encoding, uint primaries, float3 value, float3 original, float3 change, float scale,
+               float transfer_strength, float color_strength, uint options, float chroma_clamp) {
   if (!all(isfinite(original)) || !all(isfinite(change))) return value;
   const float3 rebuilt = Rebuild(encoding, original, change, transfer_strength, color_strength, options, chroma_clamp);
   const float3 stored =

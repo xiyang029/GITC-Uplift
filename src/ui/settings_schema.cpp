@@ -799,18 +799,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.foveation_falloff_y = static_cast<uint32_t>(v); },
     },
     {
-        // v3 wrote one edge density for both axes; kept hidden so LoadSettings can still read it and MigrateSettings can carry it to the two rows below.
-        .key = "FoveationEdge",
-        .kind = SettingKind::UINT,
-        .section = SettingSection::HIDDEN,
-        .label = "Edge density (legacy)",
-        .min = 25.0,
-        .max = 100.0,
-        .flags = BOOKKEEPING,
-        .get = [](const Settings& s) { return s.foveation_edge == 0u ? static_cast<double>(s.foveation_edge_x) : static_cast<double>(s.foveation_edge); },
-        .set = [](Settings& s, double v) { s.foveation_edge = static_cast<uint32_t>(v); },
-    },
-    {
         .key = "FoveationEdgeX",
         .kind = SettingKind::UINT,
         .section = SettingSection::PLACEMENT,
@@ -820,7 +808,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 100.0,
         .flags = APPLY_ON_RELEASE,
         .get = [](const Settings& s) { return static_cast<double>(s.foveation_edge_x); },
-        .set = [](Settings& s, double v) { s.foveation_edge_x = static_cast<uint32_t>(v); if (s.foveation_edge == 0u) s.foveation_edge = static_cast<uint32_t>(v); },
+        .set = [](Settings& s, double v) { s.foveation_edge_x = static_cast<uint32_t>(v); },
     },
     {
         .key = "FoveationEdgeY",
