@@ -221,6 +221,7 @@ struct State {
     std::string waiting = "off", notice;        // what Status() says before anything was replaced; why launches were last left alone
     bool active = false;                        // a block was replaced since the last Enable()
     uint64_t replaced = 0, passed = 0, learnt = 0, smallReplaced = 0, partialReplaced = 0;
+    uint64_t ioPassed = 0;                      // input/output blocks left to the runtime while enabled
     uint64_t skipped = 0, rerecorded = 0;       // blocks not launched; launches of the runtime's kernels given a record of the set
     std::array<uint64_t, 4> levelReplaced{}, encoderReplaced{};
     uint64_t postReplaced = 0, preReplaced = 0;
@@ -1116,6 +1117,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         } catch (...) {
         }
         if(list && list->thinPreUsed && kind.post) { Notice(s,"Thin4 POST missing after Thin4 PRE; evaluation refused"); return NVAPI_ERROR; }
+        if (s.enabled && !s.paused) ++s.ioPassed;
         LeaveWide(s, commands);
         return s.launch(commands, kernels, count);
     }
@@ -1335,6 +1337,26 @@ unsigned UseSet(unsigned set) {
     const unsigned overrideSet = s.evaluationSetAt < s.evaluationSets.size() ? s.evaluationSets[s.evaluationSetAt++] : kDefaultSet;
     s.passSet = overrideSet == kDefaultSet ? set : overrideSet;
     return s.passSet;
+}
+
+bool SetComplete(unsigned set, std::string* missing) {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    const unsigned n = set == kDefaultSet ? s.options.set : set;
+    bool complete = s.manifest.loaded && n < kMaxSets;
+    if (complete && n) {
+        const auto& chosen = s.manifest.sets[n];
+        complete = chosen.present && !chosen.fp8.empty() && (!chosen.blob.empty() || (n == 1 && s.manifest.trainedIsFirst));
+    }
+    if (!complete && missing)
+        *missing = !s.manifest.loaded ? "swin4/swin4.txt" : n == 1 ? "swin4/swin4_trained.*" : "swin4/swin4_set" + std::to_string(n) + ".*";
+    return complete;
+}
+
+unsigned long long Faults() {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    return s.passed + s.ioPassed;
 }
 
 void UseSetsForNextEvaluations(const unsigned* sets, unsigned count) {

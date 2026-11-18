@@ -14,13 +14,18 @@ namespace uplift::ui {
 namespace {
 
 constexpr std::array<std::string_view, 3> MODELS = {"Style A", "Style B", "Style C"};
-constexpr std::array<std::string_view, 6> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8",
-                                                         "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one"};
-constexpr std::array<std::string_view, 6> PASS_NETWORKS = {"Same as pass 1", "A: Legacy", "B: Small FP8",
-                                                           "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one"};
-// A network preset is stored as the NGX preset number (0,1,2 or the four-bit 4/15/16), but the UI's
+constexpr std::array<std::string_view, 7> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8",
+                                                         "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one",
+                                                         "NVFP4: B feed-forward"};
+constexpr std::array<std::string_view, 7> PASS_NETWORKS = {"Same as pass 1", "A: Legacy", "B: Small FP8",
+                                                           "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one",
+                                                           "NVFP4: B feed-forward"};
+// A network preset is stored as the NGX preset number (0,1,2 or the four-bit 4/15/16/17), but the UI's
 // CHOICE rows work on a 0-based option index. Map between them in one place.
-constexpr std::array<uint32_t, 6> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 15u, 16u};
+constexpr std::array<uint32_t, 7> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 15u, 16u, 17u};
+// One label and one preset per row: a mismatch would silently map an option to another network.
+static_assert(NR_NETWORKS.size() == NETWORK_PRESET_VALUES.size());
+static_assert(PASS_NETWORKS.size() == NETWORK_PRESET_VALUES.size());
 
 double NetworkPresetIndex(uint32_t preset) {
   const auto it = std::find(NETWORK_PRESET_VALUES.begin(), NETWORK_PRESET_VALUES.end(), preset);

@@ -8,8 +8,10 @@
 //   4  Model A with the 4-bit kernels (fused blocks 256 and 128, split blocks, transformer, feed-forward; trained weights)
 //   15 NVFP4 3xPass-in-one (weight set 12)
 //   16 NVFP4 2xPass-in-one (weight set 13)
+//   17 NVFP4 Model B's feed-forward (Model B's own 4-bit weights; the rest of the pass is the runtime's Model B)
 // Any other value from 4 up (5..14 were models that have been removed) is refused, never run as another model.
-// The runtime itself is given preset 1 (Model A) for these, because our kernels replace its launches one by one.
+// The runtime itself is given preset 1 (Model A) for these, because our kernels replace its launches one by one -- and
+// preset 2 (Model B) for the one that is Model B's feed-forward, which must be the model the runtime runs.
 // Assets: <OptiScaler.dll's folder>/OptiScaler/nvfp4, laid out as the Display Filter package's nvfp4 folder.
 //
 // NO FALLBACK. A pass that asks for one of these and does not get it (files missing, another runtime build, the Vulkan
@@ -26,12 +28,20 @@ namespace DlssNr::Nvfp4
 // The numbers are the Display Filter application's (standalone/NrCapture/Common.h).
 inline constexpr unsigned ModelANvfp4 = 4,
                           ModelTwoTriple = 15, // one pass with the look of three
-                          ModelTwoDouble = 16; // one pass with the look of two
+                          ModelTwoDouble = 16, // one pass with the look of two
+                          ModelBFeedForward = 17; // Model B's feed-forward alone, in 4 bits
 constexpr bool IsPassInOne(unsigned preset) { return preset == ModelTwoTriple || preset == ModelTwoDouble; }
-constexpr bool IsKnown(unsigned preset) { return preset == ModelANvfp4 || IsPassInOne(preset); }
+// Model B's 4-bit weights are the transformer feed-forward's alone: that pass keeps the runtime's fused blocks and
+// split blocks/transformer, which is what Model B is, and only the feed-forward is replaced.
+constexpr bool IsModelBFeedForward(unsigned preset) { return preset == ModelBFeedForward; }
+constexpr bool IsKnown(unsigned preset) { return preset == ModelANvfp4 || IsPassInOne(preset) || IsModelBFeedForward(preset); }
 // Every value from 4 up asks for a 4-bit model: one this build does not have fails visibly (BeginEvaluation).
 constexpr bool IsNvfp4(unsigned preset) { return preset >= ModelANvfp4; }
 constexpr unsigned WeightSet(unsigned preset) { return IsPassInOne(preset) ? preset - 3 : 0; } // 0: the trained 4-bit codes
+// What the runtime is asked for: the model our kernels have the weights of.
+constexpr unsigned RuntimePreset(unsigned preset) {
+    return !IsNvfp4(preset) ? preset : (IsModelBFeedForward(preset) ? 2u : 1u);
+}
 
 void SetLog(void (*log)(const char* line));
 // For the NvAPI query hook, inside pass borrowing's wrap: transparent until Configure() switches the layers on, and

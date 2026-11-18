@@ -65,6 +65,8 @@ void Pause(bool paused);
 inline constexpr unsigned kDefaultSet = ~0u;
 // Returns the effective set after a harness override, for the other families.
 unsigned UseSet(unsigned set);
+bool SetComplete(unsigned set, std::string* missing);  // are this set's weight files all there?
+unsigned long long Faults();                          // blocks left to / run with other weights than ours
 // Optional harness override for successive UseSet calls (one per Processor evaluation). kDefaultSet entries keep
 // that call's preset selection. Clear with (nullptr, 0) after the frame. Existing hosts need not call this.
 void UseSetsForNextEvaluations(const unsigned* sets, unsigned count);

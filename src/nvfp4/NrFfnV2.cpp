@@ -164,6 +164,10 @@ struct State {
     std::string notice;                         // why an evaluation was last left to the runtime; logged when it changes
     uint64_t evaluations = 1, lastReplaced = 0; // cc_cb_clear launches seen (+1); the evaluation that last had a pair replaced
     uint64_t pairs = 0, passedThrough = 0, smallContracts = 0;
+    uint64_t faults = 0;                        // failed pairs and set-selection faults since the last Enable()
+    // Per model: the files of the sets a pass can ask for. Model B's weights are its own, so its sets are its own too.
+    std::array<std::array<bool, 14>, 2> setFile{};
+    std::array<bool, 2> trainedFile{};          // ffn_v2_trained.bin present
     uint64_t testFailAt = 0;                    // development: fail the contract of this pair (1-based), see Enable()
     int generation = 0;                         // stamps our flags; a new value for every feed-forward pair
     unsigned passSet = kDefaultSet;             // UseSet()
@@ -449,6 +453,14 @@ unsigned SharedBytes(unsigned groups, unsigned halves) {
     return 64 + o.stages * o.stepsPerStage * (groups * kAqUnit + halves * kWqHalf);
 }
 
+// The set of weights this pair will use. There is no numbered set file for the requested one, or trained weights
+// were asked for but there is no such file: record a fault and fall back to the first set.
+uint64_t SetAt(State& s, const ModelWeights& weights, const Options& opt) {
+    if (s.passSet < weights.setAt.size() && weights.setAt[s.passSet]) return weights.setAt[s.passSet];
+    if (s.passSet < weights.setAt.size() || (opt.trained && !weights.trained && !weights.trainedIsFirst)) ++s.faults;
+    return opt.trained ? weights.trained : 0;
+}
+
 // chainedInput: x comes with the runtime's producer flags (o.p[6]); otherwise x is complete once the work recorded
 // before us has run, which a barrier ensures. Everything that can fail here fails before the first launch of ours.
 int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, const Original& o, unsigned model, unsigned block, bool chainedInput) {
@@ -476,7 +488,7 @@ int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, cons
                           tokens, w.tx, generation};
     LaunchKernel(commands, d.pack, &pack, sizeof pack, tiles * 8, 16, 0);
     if ((opt.barriers & 2) || !chained) Barrier(commands);
-    const uint64_t set = s.passSet < weights.setAt.size() && weights.setAt[s.passSet] ? weights.setAt[s.passSet] : opt.trained ? weights.trained : 0;
+    const uint64_t set = SetAt(s, weights, opt);
     const ExpandParams expand{buffers.xq.Address(), weights.weights.Address() + set + w.w1, buffers.hq.Address(), session.FlagAddress(block, tiles, true),
                               chained ? session.FlagAddress(block, tiles, false) : 0, tokens, w.out1, w.th,
                               opt.expandGroups, opt.expandHalves, generation};
@@ -494,7 +506,7 @@ void RecordContract(ID3D12GraphicsCommandList* commands, ID3D12Device* device, c
     const auto& weights = d.models[model];
     const auto& w = weights.blocks[block];
     const auto& opt = s.options;
-    const uint64_t set = s.passSet < weights.setAt.size() && weights.setAt[s.passSet] ? weights.setAt[s.passSet] : opt.trained ? weights.trained : 0;
+    const uint64_t set = SetAt(s, weights, opt);
     const ContractParams contract{session.blocks[block].hq.Address(), weights.weights.Address() + set + w.w2, o.p[1], weights.weights.Address() + set + w.gain, o.p[2],
                                   o.p[7], o.p[4], opt.chained ? session.FlagAddress(block, tiles, true) : 0, tokens, w.out2,
                                   opt.contractGroups, opt.contractHalves, generation};
@@ -566,6 +578,7 @@ int ChooseModel(State& s, const ListState& list) {
 NvAPI_Status Fail(State& s, ListState& list, ID3D12GraphicsCommandList* commands, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count,
                   const char* what) noexcept {
     const bool half = list.pending.active;
+    ++s.faults;
     s.enabled = false;
     list.replacing = false;
     list.pending.active = false;
@@ -754,8 +767,16 @@ void Enable(const Options& options) {
         std::error_code ignored;
         s.modelFiles[model] = !options.modelFolders || fs::exists(options.assets / kModelFolder[model] / "ffn_v2.txt", ignored);
     }
+    std::error_code absent;
+    for (int model = 0; model < 2; ++model) {
+        const fs::path root = options.modelFolders ? options.assets / kModelFolder[model] : options.assets;
+        s.trainedFile[model] = fs::exists(root / "ffn_v2_trained.bin", absent);
+        for (unsigned n = 0; n < s.setFile[model].size(); ++n)
+            s.setFile[model][n] = n >= 2 && fs::exists(root / ("ffn_v2_set" + std::to_string(n) + ".bin"), absent);
+    }
     if (const wchar_t* v = _wgetenv(L"NR_FFN_DEBUG_BARRIERS")) s.options.barriers = unsigned(wcstoul(v, nullptr, 0)) & 15u;
     if (const wchar_t* v = _wgetenv(L"NR_FFN_DEBUG_CHAINED")) s.options.chained = *v != L'0';
+    s.faults = 0;
     s.failed = false;
     s.enabled = !s.broken;
     s.status = s.broken ? "failed; restart to use it again" : "on, waiting for the model's next transformer pass";
@@ -798,6 +819,25 @@ void UseSet(unsigned set) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
     s.passSet = set;
+}
+
+bool SetComplete(unsigned set, std::string* missing, int model) {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    const unsigned which = unsigned(model) < 2u ? unsigned(model) : 0u;
+    const bool numbered = set != kDefaultSet;
+    const bool complete = numbered ? set < s.setFile[which].size() && s.setFile[which][set]
+                                   : !s.options.trained || s.trainedFile[which];
+    if (!complete && missing)
+        *missing = std::string(s.options.modelFolders ? (which ? "modelB/" : "modelA/") : "") +
+                   (numbered ? "ffn_v2_set" + std::to_string(set) + ".bin" : std::string("ffn_v2_trained.bin"));
+    return complete;
+}
+
+unsigned long long Faults() {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    return s.faults + s.passedThrough;
 }
 
 void SkipPair(ID3D12GraphicsCommandList* commands) {

@@ -78,6 +78,8 @@ void ReleaseDevice(ID3D12Device* device);
 // UseSet: the set of the evaluations that follow; kDefaultSet or a set that does not exist: none (FamilyOptions::trained
 // decides the records, nothing is left out). Blocks are only left out of an evaluation whose launches were recognised.
 void UseSet(unsigned set);
+bool SetComplete(unsigned set, std::string* missing);  // are this set's weight files all there?
+unsigned long long Faults();                          // blocks left to / run with other weights than ours
 // For hosts that know where an evaluation of the model ends.
 void EndEvaluation(ID3D12GraphicsCommandList* commands) noexcept;
 // Checker-only: after a fence, write full/base/final/unpooled stored bytes captured

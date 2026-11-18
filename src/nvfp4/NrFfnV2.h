@@ -68,5 +68,9 @@ void RuntimeLaunches(ID3D12GraphicsCommandList* commands, unsigned launches, uns
 // the first set or the trained one, as Options::trained says.
 constexpr unsigned kDefaultSet = ~0u;
 void UseSet(unsigned set);
+// Are this set's weight files all there? `model`: 0 Model A, 1 Model B (each folder has its own sets); a missing
+// file is named under that model's folder.
+bool SetComplete(unsigned set, std::string* missing, int model = 0);
+unsigned long long Faults();                          // pairs left to the runtime or run with another set's weights
 void SkipPair(ID3D12GraphicsCommandList* commands);
 }

@@ -26,6 +26,7 @@ constexpr unsigned kStarting = 30;
 struct Work
 {
     unsigned long long swin = 0, net = 0, ffn = 0;
+    unsigned long long swinFaults = 0, netFaults = 0, ffnFaults = 0;
 };
 
 void (*gLog)(const char*) = nullptr;
@@ -37,6 +38,7 @@ std::string gEnableProblem; // a layer that could not be switched on: nothing ca
 std::string gRefused;       // a path that cannot run these models at all
 bool gOurs = false;         // the evaluation in progress asked for a 4-bit model
 bool gPassInOne = false;
+bool gFeedForwardOnly = false; // ... and only its feed-forward is ours (Model B)
 std::string gSetMissing;     // the pass-in-one model asked for has no weight files: nothing else is run in its place
 Work gBefore;
 unsigned gMissed = 0; // evaluations in a row that asked for our kernels and did not get them
@@ -113,13 +115,19 @@ Work Read()
     work.swin = SwinWork(NrSwin4::Status(true));
     work.net = After(NrNet4::Status(true), " replaced ");
     work.ffn = After(NrFfnV2::Status(true), "feed-forward pairs replaced: ");
+    work.swinFaults = NrSwin4::Faults();
+    work.netFaults = NrNet4::Faults();
+    work.ffnFaults = NrFfnV2::Faults();
     return work;
 }
 
-void PauseAll(bool paused)
+// Pause what a pass must not take over. Model B's feed-forward has only its feed-forward in 4 bits: the fused blocks
+// and the split blocks/transformer keep the runtime's kernels for it, so they stay paused -- switched on, they would
+// leave out launches Model B does not have.
+void PauseForEvaluation(bool paused, bool feedForwardOnly)
 {
-    NrSwin4::Pause(paused);
-    NrNet4::Pause(paused);
+    NrSwin4::Pause(paused || feedForwardOnly);
+    NrNet4::Pause(paused || feedForwardOnly);
     NrFfnV2::Pause(paused);
 }
 } // namespace
@@ -206,7 +214,7 @@ void Configure(bool wanted, const std::filesystem::path& assets)
         failed("split blocks and transformer", e);
     }
     // Idle until an evaluation asks: other users of the same NvAPI calls (DLSS itself) pass straight through.
-    PauseAll(true);
+    PauseForEvaluation(true, false);
     gMissed = 0;
     gRunning = gToldFailed = false;
     if (gEnableProblem.empty())
@@ -220,17 +228,28 @@ void BeginEvaluation(unsigned requestedPreset)
     std::lock_guard guard(gMutex);
     gOurs = IsNvfp4(requestedPreset);
     gPassInOne = IsPassInOne(requestedPreset);
-    PauseAll(!gOurs);
-    // A pass-in-one model is the same kernels with its own set of weights.
+    gFeedForwardOnly = IsModelBFeedForward(requestedPreset);
+    // A pass-in-one model is the same kernels with its own set of weights. The set must be chosen first: each
+    // family checks the files of the set it will actually use. Model B's feed-forward has its own weights and no set
+    // of its own: it runs the one set its folder carries.
     const unsigned set = WeightSet(requestedPreset);
     const unsigned taken = NrSwin4::UseSet(set ? set : NrSwin4::kDefaultSet);
+    NrNet4::UseSet(gFeedForwardOnly ? NrNet4::kDefaultSet : taken);
+    NrFfnV2::UseSet(gFeedForwardOnly ? NrFfnV2::kDefaultSet : taken);
     gSetMissing.clear();
     if (gOurs && !IsKnown(requestedPreset))
         gSetMissing = "model " + std::to_string(requestedPreset) + " was removed from this build; choose another NR model";
-    else if (gOn && set && taken != set)
-        gSetMissing = "this model's weight files are missing (OptiScaler/nvfp4/swin4/swin4_set" + std::to_string(set) + ".*)";
-    NrNet4::UseSet(taken);
-    NrFfnV2::UseSet(taken);
+    else if (gOurs && gOn && gEnableProblem.empty())
+    {
+        std::string file;
+        const bool complete = gFeedForwardOnly
+            ? NrFfnV2::SetComplete(NrFfnV2::kDefaultSet, &file, 1)
+            : NrSwin4::SetComplete(taken, &file) && NrNet4::SetComplete(taken, &file) &&
+                  NrFfnV2::SetComplete(taken, &file);
+        if (!complete)
+            gSetMissing = "a weight file of this model is missing or incomplete (OptiScaler/nvfp4/" + file + ")";
+    }
+    PauseForEvaluation(!gOurs || !gSetMissing.empty(), gFeedForwardOnly);
     if (gOurs && gOn)
         gBefore = Read();
 }
@@ -240,7 +259,7 @@ void EndEvaluation(ID3D12GraphicsCommandList* list)
     NrFfnV2::EndEvaluation(list);
     NrSwin4::EndEvaluation(list);
     NrNet4::EndEvaluation(list);
-    PauseAll(true);
+    PauseForEvaluation(true, gFeedForwardOnly);
 }
 
 bool OursRan(bool whole)
@@ -259,20 +278,29 @@ bool OursRan(bool whole)
     else
     {
         const Work now = Read();
+        // Model B's feed-forward is the only part of that pass that is ours: its fused blocks and its split
+        // blocks/transformer are the runtime's, so their counters stay put by design.
         const std::string swin = NrSwin4::Status(false);
-        if (swin.rfind("active", 0) != 0 || now.swin <= gBefore.swin)
+        if (!gFeedForwardOnly && (swin.rfind("active", 0) != 0 || now.swin <= gBefore.swin))
             why = "fused blocks: " + swin;
-        else if (whole && now.net <= gBefore.net)
+        else if (!gFeedForwardOnly && whole && now.net <= gBefore.net)
             why = "split blocks and transformer: " + NrNet4::Status(false);
         else if (whole && now.ffn <= gBefore.ffn)
             why = "feed-forward: " + NrFfnV2::Status(false);
         else if (NrFfnV2::Failed())
             why = "a feed-forward pair failed half-way";
+        else if (!gFeedForwardOnly && now.swinFaults > gBefore.swinFaults)
+            why = "part of this pass ran with the runtime's own weights (fused blocks: " + NrSwin4::Status(false) + ")";
+        else if (!gFeedForwardOnly && now.netFaults > gBefore.netFaults)
+            why = "part of this pass ran without our kernels or weights (split blocks and transformer: " + NrNet4::Status(false) + ")";
+        else if (now.ffnFaults > gBefore.ffnFaults)
+            why = "part of this pass ran without our kernels or weights (feed-forward: " + NrFfnV2::Status(false) + ")";
     }
     if (why.empty())
     {
         if (!gRunning)
-            Say("running: this pass is our 4-bit kernels | " + NrSwin4::Status(false) + " | " + NrNet4::Status(false));
+            Say(gFeedForwardOnly ? "running: this pass is Model B, its feed-forward in our 4-bit kernels | " + NrFfnV2::Status(false)
+                                 : "running: this pass is our 4-bit kernels | " + NrSwin4::Status(false) + " | " + NrNet4::Status(false));
         gRunning = true;
         gToldFailed = false;
         gMissed = 0;
