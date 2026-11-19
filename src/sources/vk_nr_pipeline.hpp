@@ -219,8 +219,11 @@ class VkNrPipeline final : private nr::PassResolver {
     std::array<vk::NrImage, 2> history;         // the stabilised levels, ping-pong
     std::array<vk::NrImage, 2> detail_history;  // the stabilised fine band, ping-pong
     vk::NrImage state;                          // 1x1 RGBA32F: the scene cut
+    std::array<vk::NrImage, 2> change_history;  // the change field's own stabiliser's, ping-pong, at the work image
     uint32_t current = 0u;                      // the history this frame writes
+    uint32_t change_current = 0u;               // the change field's history this frame writes
     bool history_valid = false;                 // the histories hold a previous frame
+    bool change_valid = false;                  // and the change field's do
     bool carried = false;                       // the histories and the state were moved UNDEFINED -> GENERAL (once: they carry across frames)
     uint64_t bytes = 0u;
     nr::Mark last_use;
@@ -392,7 +395,7 @@ class VkNrPipeline final : private nr::PassResolver {
   float NoteEncoding(const VkDlssTarget& target);
   // Generate the required change field, optionally shape it, and make the writes visible to composition.
   AfterNr RecordAfterNr(VkCommandBuffer buffer, uint32_t slot, const color::VkEncodePass& encode, VkImageView nr_output, uint32_t passes_run, bool reduced, bool look_ready,
-                        color::Upsampling upsampling, const color::VkStabilizeMotion& motion, bool reset);
+                        color::Upsampling upsampling, const color::VkStabilizeMotion& motion, nr::foveation::Grid foveation, bool reset);
   void LogAllocationFailure(nr::Size size);  // once until an allocation works again
 
   vk::NrFunctions functions_;

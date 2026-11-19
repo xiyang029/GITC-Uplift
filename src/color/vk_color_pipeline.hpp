@@ -147,6 +147,19 @@ struct VkShapePass {
   bool sdr = false;
 };
 
+// The change field's own stabiliser (Change stabilisation): NR's field, after the shape, averaged along the vectors so a residue the network is unsure of
+// stops shimmering. It is not part of the look: it runs with shaping off, and it reads and writes the field the decode consumes. Every image GENERAL.
+struct VkChangeStabilizePass {
+  VkImageView change = VK_NULL_HANDLE;    // C, RGBA16F, sampled: this frame's field after the shape
+  VkImageView previous = VK_NULL_HANDLE;  // the other buffer of the pair: last frame's, RGBA16F sampled
+  VkImageView current = VK_NULL_HANDLE;   // this frame's, RGBA16F storage
+  nr::Size image;                         // the work image the field is at
+  float rate = 1.f;                       // look::StabilizeRate of the change field's own time
+  bool reset = false;
+  VkStabilizeMotion motion;
+  nr::foveation::Grid foveation;          // map motion-vector endpoints into the nonuniform work grid
+};
+
 // Plan 14 Task 10 (v2 design §3.14, amendment 2): the exposure meter and governor, one thread group before the encode. The state image's x is the encode's
 // and the decode's exposure multiplier.
 struct VkMeterPass {
@@ -242,6 +255,9 @@ class VkColorPipeline {
   bool RecordStabilize(VkCommandBuffer buffer, uint32_t slot, const VkStabilizePass& pass);
   bool RecordDetail(VkCommandBuffer buffer, uint32_t slot, const VkStabilizePass& pass);
   bool RecordShape(VkCommandBuffer buffer, uint32_t slot, const VkShapePass& pass);
+  bool RecordChangeStabilize(VkCommandBuffer buffer, uint32_t slot, const VkChangeStabilizePass& pass);  // the change field's own stabiliser
+  // Orders Uplift's compute writes before its next compute reads/writes.
+  void ComputeBarrier(VkCommandBuffer buffer) const;
   // Plan 14 Task 10: the meter before the encode; and pass `index`'s (1..RESOLVE_PASSES: passes 2..10) own strengths between NR's passes.
   bool RecordMeter(VkCommandBuffer buffer, uint32_t slot, const VkMeterPass& pass);
   bool RecordResolve(VkCommandBuffer buffer, uint32_t slot, uint32_t index, const VkResolvePass& pass);
@@ -272,17 +288,14 @@ class VkColorPipeline {
   // Writes `constants` into the ring slot of (`slot`, `pass`), binds `pipeline`, pushes the set, and dispatches width x height in 8x8 groups.
   void Dispatch(VkCommandBuffer buffer, VkPipeline pipeline, uint32_t slot, uint32_t pass, std::span<const uint32_t> constants, const Bindings& bindings,
                 uint32_t width, uint32_t height);
-  // Compute writes so far are visible to the compute reads and writes after.
-  void ComputeBarrier(VkCommandBuffer buffer) const;
-
   vk::NrFunctions functions_;
   VkDevice device_ = VK_NULL_HANDLE;
   VkPhysicalDeviceMemoryProperties memory_ = {};
   VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
-  // The sampled encode, the in-place encodes, the private-colour decode, the in-place decodes, the motion copy, the look's three, the resolve, the sampled
-  // meter, the in-place meters, and Keep faces'.
-  static constexpr size_t PIPELINES = 1u + OUTPUT_VARIANTS + 1u + OUTPUT_VARIANTS + 1u + 3u + 1u + 1u + OUTPUT_VARIANTS + 1u;
+  // The sampled encode, the in-place encodes, the private-colour decode, the in-place decodes, the motion copy, the look's three, the change field's
+  // stabiliser, the resolve, the sampled meter, the in-place meters, and Keep faces'.
+  static constexpr size_t PIPELINES = 1u + OUTPUT_VARIANTS + 1u + OUTPUT_VARIANTS + 1u + 3u + 1u + 1u + 1u + OUTPUT_VARIANTS + 1u;
   std::array<VkPipeline, PIPELINES> pipelines_ = {};
   std::array<bool, PIPELINES> failed_ = {};  // a variant that could not be built is not retried every frame
   VkBuffer ring_buffer_ = VK_NULL_HANDLE;

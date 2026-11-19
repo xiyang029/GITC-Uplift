@@ -139,7 +139,7 @@ struct OverlayState {
   bool defaults_view = false;   // session only; the add-on keeps it when the overlay closes
   std::string_view enable_warning_key;  // requested checkbox confirmation; ImGui owns the open modal
   bool confirm_present_stage = false;  // The diagram changes both Source and FG placement when the warning is accepted.
-  bool confirm_restore = false;  // the first click of Restore all defaults
+  bool confirm_restore = false;  // requested Restore all defaults modal, cleared on dismissal
   bool retry_now = false;        // the add-on calls DeviceContext::RetryNow after DrawOverlay and clears it
   // An APPLY_ON_RELEASE slider being held: the value it shows. The setting keeps the applied one until release.
   std::optional<int> pending_release;

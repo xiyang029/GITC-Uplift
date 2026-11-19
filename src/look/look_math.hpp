@@ -41,6 +41,10 @@ struct LookSettings {
   StabilizeMode stabilize = StabilizeMode::OFF;
   float stabilize_ms = 250.f;  // τ
   bool stabilize_detail = false;
+  // NR's own change field, averaged along the vectors whatever the look does with it (the pass runs after the shape, and without Shape result too): NR's
+  // output flickers by a grey level or two where the input is still. 0 ms is off.
+  bool stabilize_change = false;  // independent of `enabled`: it alters the picture, so it is opted into
+  uint32_t stabilize_change_ms = 60u;  // τ, whole milliseconds
   friend bool operator==(const LookSettings&, const LookSettings&) = default;
 };
 

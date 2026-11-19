@@ -207,6 +207,16 @@ inline Plan MakePlan(bool enabled, const Params& params, uint32_t uniform_width,
   plan.grid = MakeGrid(enabled, params, uniform_width, uniform_height);
   plan.width = WarpedExtent(uniform_width, plan.grid.x);
   plan.height = WarpedExtent(uniform_height, plan.grid.y);
+  // Judge the guide-resample trade-off by the dimensions that will actually be allocated. Rounding, parity
+  // alignment and the 16-texel minimum can make the realized saving smaller than the ideal density integral.
+  const uint64_t uniform_pixels = uint64_t{uniform_width} * uniform_height;
+  const uint64_t warped_pixels = uint64_t{plan.width} * plan.height;
+  if (plan.grid.active() && uniform_pixels != 0u
+      && static_cast<double>(warped_pixels) / static_cast<double>(uniform_pixels) > 1.0 - kMinSaving) {
+    plan.grid = Grid{};
+    plan.width = uniform_width;
+    plan.height = uniform_height;
+  }
   if (plan.grid.x.packed != 0u && uniform_width != 0u) {
     plan.grid.x.gmax = static_cast<float>(plan.width) / static_cast<float>(uniform_width);
   }

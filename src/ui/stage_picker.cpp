@@ -23,8 +23,8 @@ void CenterText(ImDrawList& draw, ImVec2 center, ImU32 color, const std::string&
   draw.AddText({center.x - size.x * 0.5f, center.y - size.y * 0.5f}, color, label.c_str());
 }
 
-void Arrow(ImDrawList& draw, ImVec2 from, ImVec2 to, ImU32 color, float head) {
-  draw.AddLine(from, to, color);
+void Arrow(ImDrawList& draw, ImVec2 from, ImVec2 to, ImU32 color, float head, float stroke) {
+  draw.AddLine(from, to, color, stroke);
   if (to.x == from.x) {
     draw.AddTriangleFilled(to, {to.x - head, to.y - head * 1.6f}, {to.x + head, to.y - head * 1.6f}, color);
   } else {
@@ -36,31 +36,26 @@ void Arrow(ImDrawList& draw, ImVec2 from, ImVec2 to, ImU32 color, float head) {
 
 bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state) {
   gui::PushID("Source");
-  // The row's own label column, the hint beside it, and the reset arrow in the row-end slot: the same
-  // RowLabel the panel's other rows use, so the diagram's caption lines up with everything above and below it.
   bool changed = false;
   const bool can_reset = !IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"));
-  // The caption row: the label in its column, and the reset arrow at the row's end. The diagram below takes the
-  // row's whole width from the panel's edge, so it must not inherit the caption's control width -- reading the
-  // origin and the available width before RowLabel sets them is what keeps it the same size whether or not the
-  // arrow is drawn.
-  const ImVec2 diagram_origin = gui::GetCursorScreenPos();
   const float diagram_width = std::max(1.f, gui::GetContentRegionAvail().x);
-  widgets::RowLabel("NR stage", "Choose a stage for pass 1");
+  const float right = gui::GetCursorScreenPos().x + diagram_width;
+  widgets::GroupHeading("NR stage");
+  widgets::ItemTooltip("Choose a stage for pass 1");
   if (can_reset) {
     const char* const default_stage = (view.dlss_explicit ? "Present on Vulkan" : "After DLSS");
-    if (widgets::ResetButton("Stage", default_stage)) {
+    const bool reset = widgets::RightLink(style::icons::kUndo, right);
+    widgets::ItemTooltip("Reset to default (%s)", gui::Display(default_stage).c_str());
+    if (reset) {
       const auto pick = view.dlss_explicit ? SourcePick::PRESENT : SourcePick::AFTER_DLSS;
       SetSourcePick(settings, pick, view.dlss_explicit);
       state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(pick), view.setup);
       changed = true;
     }
   }
-  // The diagram starts on the line under the caption, at the panel's left edge, as wide as the panel. RowLabel
-  // left the cursor on the caption's own line, so the diagram's first line is one row height below it.
+  widgets::NextGap(style::BlockGap());
   const float em = gui::GetFontSize();
-  const float caption_bottom = ImGui::GetCursorScreenPos().y;
-  const ImVec2 origin(diagram_origin.x, caption_bottom + ImGui::GetTextLineHeightWithSpacing());
+  const ImVec2 origin = gui::GetCursorScreenPos();
   const float width = diagram_width;
   const bool folded = !style::FitsStageColumns(width);
   // The panel's one column rule: the six nodes sit on one line only while the diagram is FitsStageColumns wide,
@@ -68,32 +63,35 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
   // so a folded diagram is never followed by a two-column reading.
   widgets::stage_columns = !folded;
   const int columns = folded ? 3 : 6;
-  const float margin = std::min(0.55f * em, width * 0.025f);
-  const float gap = std::min(1.05f * em, width * 0.04f);
+  const float margin = std::min(style::RowGap(), width * 0.03f);
+  const float gap = std::min(style::BlockGap(), width * 0.05f);
   const float cell = std::max(1.f, (width - 2.f * margin - gap * (columns - 1)) / columns);
-  const float height = em * 3.0f, pitch = cell + gap, row = em * 9.6f;
-  const float button_h = gui::GetFrameHeight() * 1.6f, hook_y = em * 3.f;
-  const float button_w = std::max(1.f, std::min(9.2f * em, pitch - em * 0.28f));
-  float bottom = origin.y;
+  const float height = 2.f * em + 2.f * style::LabelGap();
+  const float pitch = cell + gap;
+  const float button_h = 2.f * em + gui::GetStyle().FramePadding.y * 2.f;
+  const float hook_y = height * 0.5f + style::BlockGap();
+  const float row = height * 0.5f + hook_y + button_h + style::LabelGap() + em + style::SectionGap();
+  const float button_w = std::max(1.f, std::min({9.2f * em, pitch - style::LabelGap(), width - 2.f * margin}));
+  const float bottom = origin.y + (folded ? row : 0.f) + height * 0.5f + hook_y + button_h + style::LabelGap() + em;
   ImDrawList& draw = *gui::GetWindowDrawList();
-  const ImU32 wire = style::ToU32(style::tokens::kTextSecondary);
-  const ImU32 ink = style::ToU32(style::tokens::kTextPrimary);
-  const ImU32 surface = style::ToU32(style::tokens::kBgCard);
-  const float head = em * 0.17f;
+  const ImU32 wire = style::ToU32(style::tokens::kStroke);
+  const float stroke = std::max(1.f, style::Px(1.f));
+  const float head = std::min(style::LabelGap() * 0.55f, gap * 0.25f);
   std::array<ImVec2, 6> centers{};
   for (int i = 0; i < 6; ++i) centers[i] = {origin.x + margin + cell * 0.5f + (i % columns) * pitch,
-                                              origin.y + height * 0.5f + em * 0.3f + (i / columns) * row};
+                                              origin.y + height * 0.5f + (i / columns) * row};
 
   for (int i = 0; i < 5; ++i) {
     const ImVec2 from{centers[i].x + cell * 0.5f, centers[i].y};
-    const ImVec2 to{centers[i + 1].x - cell * 0.5f - 1.f, centers[i + 1].y};
+    const ImVec2 to{centers[i + 1].x - cell * 0.5f, centers[i + 1].y};
     if (folded && i == 2) {
-      const float right = origin.x + width - 1.f, left = origin.x + 1.f, mid = to.y - height * 0.59f;
-      const ImVec2 turn[]{from, {right, from.y}, {right, mid}, {left, mid}, {left, to.y}};
-      draw.AddPolyline(turn, 5, wire, ImDrawFlags_None, 1.f);
-      Arrow(draw, turn[4], to, wire, head);
+      const float edge = origin.x + width - stroke, left = origin.x + stroke;
+      const float mid = to.y - height * 0.5f - style::RowGap();
+      const ImVec2 turn[]{from, {edge, from.y}, {edge, mid}, {left, mid}, {left, to.y}};
+      draw.AddPolyline(turn, 5, wire, ImDrawFlags_None, stroke);
+      Arrow(draw, turn[4], to, wire, head, stroke);
     } else {
-      Arrow(draw, from, to, wire, head);
+      Arrow(draw, from, to, wire, head, stroke);
     }
   }
 
@@ -101,21 +99,23 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
   const std::array<const char*, 6> compact{"Game", "RR", "DLSS", "PP + HUD", "FG", "Display"};
   for (int i = 0; i < 6; ++i) {
     const ImVec2 c = centers[i], lo{c.x - cell * 0.5f, c.y - height * 0.5f}, hi{c.x + cell * 0.5f, c.y + height * 0.5f};
+    const bool inactive = (i == 1 && !view.setup.before_upscaling_on_rr) || (i == 4 && !view.frame_generation_active);
+    const ImU32 surface = style::ToU32(inactive ? style::tokens::Mix(style::tokens::kBgCard, style::tokens::kBgControl, 0.5f)
+                                                 : style::tokens::kBgControl);
     if (i == 4) {
       const float inset = std::min(cell * 0.12f, em * 0.75f);
       const ImVec2 hex[]{{lo.x + inset, lo.y}, {hi.x - inset, lo.y}, {hi.x, c.y}, {hi.x - inset, hi.y}, {lo.x + inset, hi.y}, {lo.x, c.y}};
       draw.AddConvexPolyFilled(hex, 6, surface);
-      draw.AddPolyline(hex, 6, wire, ImDrawFlags_Closed, 1.f);
     } else {
-      draw.AddRectFilled(lo, hi, surface, style::tokens::kRadiusSmall);
-      draw.AddRect(lo, hi, wire, style::tokens::kRadiusSmall);
+      draw.AddRectFilled(lo, hi, surface, style::ControlRadius(height));
     }
     std::string label = gui::Display(nodes[i]);
-    if (ImGui::CalcTextSize(label.c_str()).x > cell - em * (i == 4 ? 1.5f : 0.35f)) label = gui::Display(compact[i]);
-    CenterText(draw, c, (i == 1 && !view.setup.before_upscaling_on_rr) || (i == 4 && !view.frame_generation_active) ? wire : ink, label);
+    const float room = cell - (i == 4 ? std::min(cell * 0.24f, em * 1.5f) : style::LabelGap());
+    if (ImGui::CalcTextSize(label.c_str()).x > room) label = widgets::Ellipsize(gui::Display(compact[i]).c_str(), room);
+    CenterText(draw, c, style::ToU32(inactive ? style::tokens::kTextSecondary : style::tokens::kTextPrimary), label);
     if (gui::IsWindowHovered() && gui::IsMouseHoveringRect(lo, hi)) {
-      if (i == 1) widgets::ItemTooltip("Ray Reconstruction denoises and upscales together when used in place of DLSS Super Resolution.");
-      else widgets::ItemTooltip("%s", nodes[i]);
+      if (i == 1) widgets::MouseTooltip("Ray Reconstruction denoises and upscales together when used in place of DLSS Super Resolution.");
+      else widgets::MouseTooltip("%s", gui::Display(nodes[i]).c_str());
     }
   }
 
@@ -127,51 +127,51 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     const int prior = preceding[i];
     const ImVec2 c = centers[prior];
     const bool at_fold = folded && prior == 2;
-    const float tap_x = at_fold ? origin.x + width - 1.f : c.x + pitch * 0.5f;
-    const float x = std::clamp(tap_x, origin.x + margin + button_w * 0.5f, origin.x + width - margin - button_w * 0.5f);
+    const float tap_x = at_fold ? origin.x + width - stroke : c.x + pitch * 0.5f;
+    const float inset = margin + button_w * 0.5f;
+    const float x = origin.x + std::clamp(tap_x - origin.x, std::min(inset, width * 0.5f), std::max(width - inset, width * 0.5f));
     const float y = c.y + hook_y;
-    const float bend_y = y - em * 0.65f;
-    if (!at_fold) draw.AddLine({tap_x, c.y}, {tap_x, bend_y}, wire);
-    draw.AddLine({tap_x, bend_y}, {x, bend_y}, wire);
+    const float bend_y = y - style::RowGap();
+    if (!at_fold) draw.AddLine({tap_x, c.y}, {tap_x, bend_y}, wire, stroke);
+    if (tap_x != x) draw.AddLine({tap_x, bend_y}, {x, bend_y}, wire, stroke);
     draw.AddCircleFilled({tap_x, at_fold ? bend_y : c.y}, head, wire);
-    Arrow(draw, {x, bend_y}, {x, y - 1.f}, wire, head);
+    Arrow(draw, {x, bend_y}, {x, y}, wire, head, stroke);
 
     const auto source = static_cast<SourcePick>(std::min(i, size_t{2}));
     std::string_view why = view.setup.stage_options[static_cast<size_t>(source)].why;
     if (source == SourcePick::PRESENT && why == FG_PRESENT_OFF_REASON) why = {};
     if (i == 2 && !view.before_fg_unavailable.empty()) why = view.before_fg_unavailable;
     const auto run = view.stage_runs[i];
-    const ImVec4 color = style::tokens::kAccent;  // the panel's one accent, as a selected segment uses it
     gui::PushID(static_cast<int>(i));
     gui::SetCursorScreenPos({x - button_w * 0.5f, y});
-    gui::PushStyleVar(ImGuiStyleVar_FrameRounding, gui::GetStyle().FrameRounding);
-    gui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.f);
-    gui::PushStyleColor(ImGuiCol_Border, selected == i ? color : style::tokens::kTextSecondary);
-    if (run.count) {
-      // A running stage is the accent's wash with its words in the accent, as a selected segment is.
-      gui::PushStyleColor(ImGuiCol_Button, style::tokens::kAccentWash);
-      gui::PushStyleColor(ImGuiCol_Text, color);
+    const std::string full_label = gui::Display(NR_STAGE_NAMES[i]);
+    const float room = button_w - 2.f * style::LabelGap();
+    std::string label = full_label;
+    if (i == 2 && ImGui::CalcTextSize(label.c_str()).x > room) label = gui::Display("Before\nFramegen");
+    if (ImGui::CalcTextSize(label.c_str()).x > room) label = widgets::Ellipsize(full_label.c_str(), room);
+    bool clicked;
+    {
+      style::StyleScope button;
+      button.Var(ImGuiStyleVar_FrameRounding, style::ControlRadius(button_h))
+          .Var(ImGuiStyleVar_FramePadding, ImVec2(style::LabelGap(), gui::GetStyle().FramePadding.y));
+      if (selected == i) button.SelectedButton();
+      gui::BeginDisabled(view.setup.stopped || !why.empty());
+      clicked = ImGui::Button((label + "###stage").c_str(), {button_w, button_h});
+      gui::EndDisabled();
     }
-    std::string label = gui::Display(NR_STAGE_NAMES[i]);
-    if (i == 2 && ImGui::CalcTextSize(label.c_str()).x + 2.f * gui::GetStyle().FramePadding.x > button_w) label = gui::Display("Before\nFramegen");
-    gui::BeginDisabled(view.setup.stopped || !why.empty());
-    const bool clicked = ImGui::Button(label.c_str(), {button_w, button_h});
-    gui::EndDisabled();
     if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || (gui::GetIO().NavVisible && gui::IsItemFocused())) {
-      widgets::ItemTooltip("%s", why.empty() ? (i == 0 && view.setup.before_upscaling_on_rr ? "NR works on Ray Reconstruction's input." : TIPS[i]) : why.data());
+      const char* tip = i == 0 && view.setup.before_upscaling_on_rr ? "NR works on Ray Reconstruction's input." : TIPS[i];
+      const std::string details = why.empty() ? gui::Display(tip) : gui::Display(why);
+      if (gui::IsItemFocused() && gui::GetIO().NavVisible) widgets::MouseTooltip("%s\n%s", full_label.c_str(), details.c_str());
+      else widgets::ItemTooltip("%s\n%s", full_label.c_str(), details.c_str());
     }
-    gui::PopStyleColor(run.count ? 2 : 1);
-    gui::PopStyleVar(3);
     gui::PopID();
 
-    float stage_bottom = y + button_h;
     if (run.count) {
       const std::string passes = run.count == 1 ? std::format("P{}  x1", run.first + 1) : std::format("P{}-{}  x{}", run.first + 1, run.first + run.count, run.count);
-      const float text_top = stage_bottom + gui::GetStyle().ItemInnerSpacing.y;
-      CenterText(draw, {x, text_top + gui::GetTextLineHeight() * 0.5f}, gui::GetColorU32(color), passes);
-      stage_bottom = text_top + gui::GetTextLineHeight();
+      const float text_top = y + button_h + style::LabelGap();
+      CenterText(draw, {x, text_top + em * 0.5f}, style::ToU32(style::tokens::kTextSecondary), widgets::Ellipsize(passes.c_str(), button_w));
     }
-    bottom = std::max(bottom, stage_bottom);
     if (!clicked) continue;
     if (i == 3 && view.frame_generation_active && settings->fg_present != Settings::FgPresent::AFTER) {
       state->confirm_present_stage = true;

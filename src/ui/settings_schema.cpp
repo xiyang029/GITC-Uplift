@@ -21,8 +21,10 @@ constexpr std::array<std::string_view, 7> PASS_NETWORKS = {"Same as pass 1", "A:
                                                            "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one",
                                                            "NVFP4: B feed-forward"};
 // A network preset is stored as the NGX preset number (0,1,2 or the four-bit 4/15/16/17), but the UI's
-// CHOICE rows work on a 0-based option index. Map between them in one place.
-constexpr std::array<uint32_t, 7> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 15u, 16u, 17u};
+// CHOICE rows work on a 0-based option index. Map between them in one place. The pass-in-one pair is 16 before
+// 15 because the preset numbers do not follow the option order: 16 is the double model ("the look of two"),
+// 15 the triple one, exactly as OptiScaler's own menu lists them.
+constexpr std::array<uint32_t, 7> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 16u, 15u, 17u};
 // One label and one preset per row: a mismatch would silently map an option to another network.
 static_assert(NR_NETWORKS.size() == NETWORK_PRESET_VALUES.size());
 static_assert(PASS_NETWORKS.size() == NETWORK_PRESET_VALUES.size());
@@ -135,6 +137,10 @@ double Flag(bool value) {
 
 bool StabilizeOff(const Settings& s) {
   return s.look.stabilize == look::StabilizeMode::OFF;
+}
+
+bool ChangeStabilizeOff(const Settings& s) {
+  return !s.look.stabilize_change;
 }
 
 // The Adaptation rows matter wherever the meter can be used: Metered, and Auto, which meters when the game's exposure is missing, broken or blended.
@@ -592,6 +598,29 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return Flag(s.look.stabilize_detail); },
         .set = [](Settings& s, double v) { s.look.stabilize_detail = (v != 0.0); },
         .hidden = StabilizeOff,
+    },
+    {
+        .key = "StabilizeChange",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::LIMITS,
+        .label = "Stabilise NR's change",
+        .tooltip = "Smooths the change NR itself makes, along the motion vectors, so a residue the network is unsure of stops shimmering. Real edits "
+                   "still come through; the cost is a little lag on them.",
+        .get = [](const Settings& s) { return Flag(s.look.stabilize_change); },
+        .set = [](Settings& s, double v) { s.look.stabilize_change = (v != 0.0); },
+    },
+    {
+        .key = "StabilizeChangeMs",
+        .kind = SettingKind::UINT,
+        .section = SettingSection::LIMITS,
+        .label = "NR change time (ms)",
+        .tooltip = "Longer is steadier but slower to follow NR's real edits.",
+        .min = 16.0,
+        .max = 1000.0,
+        .flags = setting_flags::SLIDER,
+        .get = [](const Settings& s) { return static_cast<double>(s.look.stabilize_change_ms); },
+        .set = [](Settings& s, double v) { s.look.stabilize_change_ms = static_cast<uint32_t>(v); },
+        .hidden = ChangeStabilizeOff,
     },
     {
         .key = "Source",

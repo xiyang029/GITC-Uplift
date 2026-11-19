@@ -219,7 +219,7 @@ file(MAKE_DIRECTORY "${UPLIFT_SHADER_OUTPUT}")
 set(UPLIFT_SHADER_HEADERS)
 foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0" "decode_cs|cs_6_0" "motion_cs|cs_6_0"
                         "look_pyramid_cs|cs_6_0" "look_stabilize_cs|cs_6_0" "look_shape_cs|cs_6_0" "resolve_cs|cs_6_0"
-                        "meter_cs|cs_6_0" "faces_cs|cs_6_0")
+                        "meter_cs|cs_6_0" "faces_cs|cs_6_0" "change_stabilize_cs|cs_6_0")
   string(REPLACE "|" ";" shader_parts "${shader}")
   list(GET shader_parts 0 shader_name)
   list(GET shader_parts 1 shader_profile)
@@ -271,6 +271,8 @@ uplift_add_spirv(resolve_vk resolve_cs)
 uplift_add_spirv(meter_vk_sampled meter_cs)
 # Keep faces: the twin's recombination and the later passes' protection.
 uplift_add_spirv(faces_vk faces_cs)
+# NR's change field stabilised on its own (the same HLSL both APIs).
+uplift_add_spirv(change_stabilize_vk change_stabilize_cs)
 foreach(format IN ITEMS rgba16f r11g11b10f rgba8 rgb10a2 rgba32f)
   uplift_add_spirv(encode_vk_${format} encode_cs -DUPLIFT_VK_SOURCE_STORAGE=1 "-DUPLIFT_VK_TARGET_FORMAT=\"${format}\"")
   uplift_add_spirv(decode_vk_${format} decode_cs -DUPLIFT_VK_SOURCE_STORAGE=1 "-DUPLIFT_VK_TARGET_FORMAT=\"${format}\"")

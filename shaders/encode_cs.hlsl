@@ -75,6 +75,26 @@ float3 AreaModel(uint2 pixel, float scale) {
   }
   float3 sum = float3(0.f, 0.f, 0.f);
   float total = 0.f;
+  // A separable Custom scale can leave one axis at native size. Dimension equality is dispatch-uniform and
+  // guarantees that axis has one exact source texel per footprint, so avoid the generic two-dimensional loop.
+  if (source_width == width) {
+    const int x = first.x;
+    [loop] for (int y = first.y; y <= min(last.y, first.y + MAX_TAPS - 1); ++y) {
+      const float cover_y = min(high.y, float(y + 1)) - max(low.y, float(y));
+      sum += cover_y * LinearLight(encoding, primaries, UPLIFT_LOAD_SOURCE(source + int2(x, y)).rgb, scale);
+      total += cover_y;
+    }
+    return QuantizeHalf(EncodeLinear(encoding, sum / total));
+  }
+  if (source_height == height) {
+    const int y = first.y;
+    [loop] for (int x = first.x; x <= min(last.x, first.x + MAX_TAPS - 1); ++x) {
+      const float cover_x = min(high.x, float(x + 1)) - max(low.x, float(x));
+      sum += cover_x * LinearLight(encoding, primaries, UPLIFT_LOAD_SOURCE(source + int2(x, y)).rgb, scale);
+      total += cover_x;
+    }
+    return QuantizeHalf(EncodeLinear(encoding, sum / total));
+  }
   [loop] for (int y = first.y; y <= min(last.y, first.y + MAX_TAPS - 1); ++y) {
     const float cover_y = min(high.y, float(y + 1)) - max(low.y, float(y));
     [loop] for (int x = first.x; x <= min(last.x, first.x + MAX_TAPS - 1); ++x) {

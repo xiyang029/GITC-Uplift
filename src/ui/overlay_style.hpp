@@ -3,9 +3,7 @@
 // The panel's style: the design tokens every control draws with (ui/overlay_widgets.hpp), and the one thing
 // that writes them into ImGui's global style.
 //
-//   - `tokens`, `icons` and the font sizes are the values every panel control draws with; they are ported from
-//     FoveatedDLSS5's src/addons/dlss5/ui/theme.hpp, so the owner's two add-ons share one look, and they are
-//     the only place a colour, a radius or a size is written down.
+//   - `tokens` and `icons` are the shared vocabulary for built-in and hand-drawn controls.
 //   - Restore() / RefreshForDpi() put those same tokens into ImGui's global style, which is what ReShade's own
 //     UI and every other add-on draw with.
 //
@@ -15,7 +13,7 @@
 //
 // Nothing here touches ReShade's font atlas (an add-on must not load a font of its own) or ReShade's config,
 // and nothing calls ImGuiStyle::ScaleAllSizes (IMGUI_API, and this add-on links no ImGui) or
-// ImGui::SetWindowFontScale (obsolete, and global): the size fields are scaled by hand, per window DPI.
+// ImGui::SetWindowFontScale (obsolete, and global): sizes follow the window's already-scaled body font.
 //
 // Include after <imgui.h> and reshade.hpp (which ui/localized_imgui.hpp pulls in), as the rest of the panel does.
 
@@ -27,9 +25,7 @@
 
 namespace uplift::ui::style {
 
-// The panel's palette, its corner radii and the row geometry. A short ramp: the panel, the cards and wells
-// sunk into it, and the controls standing on it. No shadows to spend, so elevation is one small step of
-// lightness and a hairline only where a step alone cannot be seen.
+// Four neutral elevations. Hover and press change the local surface; they do not introduce new layers.
 namespace tokens {
 
 constexpr ImVec4 Hex(std::uint32_t rgb, float alpha = 1.f) {
@@ -51,55 +47,40 @@ constexpr ImVec4 Fade(const ImVec4& color, float alpha) {
 
 constexpr ImVec4 kTransparent = ImVec4(0.f, 0.f, 0.f, 0.f);
 
-constexpr ImVec4 kBgWindow = Hex(0x14161A, 0.96f);
-constexpr ImVec4 kBgCard = Hex(0x1B1E24);        // recessed: a status card, the well an input sits in
-constexpr ImVec4 kBgControl = Hex(0x24282F);     // a button at rest, a segmented control's track
-constexpr ImVec4 kBgControlHover = Hex(0x2C3139);
-constexpr ImVec4 kStroke = Hex(0x252930);
-constexpr ImVec4 kTextPrimary = Hex(0xE8EAED);
-constexpr ImVec4 kTextSecondary = Hex(0x9AA0A8);
-constexpr ImVec4 kWarn = Hex(0xF5A623);          // ReShade's unsaved-changes marker
-constexpr ImVec4 kBad = Hex(0xEB5757);           // a latched safety lock's words, the one red on the panel
-constexpr ImVec4 kAccent = Hex(0x4CA6A0);        // the one saturated colour in the panel
-constexpr ImVec4 kAccentHover = Hex(0x5BB8B2);
-constexpr ImVec4 kAccentActive = Hex(0x3E8C87);
+constexpr ImVec4 kBgWindow = Hex(0x151617, 0.98f);
+constexpr ImVec4 kBgCard = Hex(0x222426);
+constexpr ImVec4 kBgControl = Hex(0x303336);
+constexpr ImVec4 kBgPopup = Hex(0x404448);
+constexpr ImVec4 kBgControlHover = Mix(kBgControl, kBgPopup, 0.70f);
+constexpr ImVec4 kBgControlActive = Mix(kBgPopup, Hex(0xFFFFFF), 0.10f);
+constexpr ImVec4 kTextPrimary = Hex(0xECEEF0);
+constexpr ImVec4 kTextSecondary = Hex(0xB2B7BB);
+constexpr ImVec4 kBad = Hex(0xF18B89);  // semantic safety warning only
+constexpr ImVec4 kAccent = Hex(0x74C8BF);
+constexpr ImVec4 kAccentHover = Mix(kAccent, kTextPrimary, 0.22f);
+constexpr ImVec4 kOnAccent = Hex(0x101718);
+constexpr ImVec4 kAccentActive = Mix(kAccent, kOnAccent, 0.18f);
+constexpr ImVec4 kAccentWash = Fade(kAccent, 0.16f);
+constexpr ImVec4 kAccentHalo = Fade(kAccent, 0.32f);
+constexpr ImVec4 kAccentStrong = Fade(kAccent, 0.70f);
+constexpr ImVec4 kSelected = Mix(kBgControl, kAccent, 0.19f);
+constexpr ImVec4 kSelectedHover = Mix(kBgControlHover, kAccent, 0.24f);
+constexpr ImVec4 kSelectedActive = Mix(kBgControlActive, kAccent, 0.30f);
+constexpr ImVec4 kSurfaceHover = Fade(kTextPrimary, 0.08f);
+constexpr ImVec4 kSurfaceActive = Fade(kTextPrimary, 0.16f);
+constexpr ImVec4 kStroke = Fade(kTextSecondary, 0.40f);  // functional connectors, not outlines
 
-// The accent tints both layers share: hover wells, press washes, focus rings, selection.
-constexpr ImVec4 kAccentWash = Hex(0x4CA6A0, 0.14f);
-constexpr ImVec4 kAccentHalo = Hex(0x4CA6A0, 0.28f);
-constexpr ImVec4 kAccentStrong = Hex(0x4CA6A0, 0.45f);
+constexpr float kBaseFont = 13.f;
+constexpr float kHeadingScale = 1.15f;
+constexpr float kRadiusCard = 8.f;
+constexpr float kPad = 4.f;
+constexpr float kRowGap = 6.f;
+constexpr float kGroupGap = 12.f;
+constexpr float kSectionGap = 20.f;
 
-// An on switch: the accent held back a step from a primary action's fill, so a panel with several switches
-// on does not read as a row of saturated blocks.
-constexpr ImVec4 kAccentQuiet = Mix(kAccent, kBgWindow, 0.18f);
-constexpr ImVec4 kAccentQuietHover = Mix(kAccentHover, kBgWindow, 0.12f);
-constexpr ImVec4 kHairline = Hex(0xFFFFFF, 0.06f);   // an inner top edge on raised surfaces
-constexpr ImVec4 kSurfaceHover = Hex(0xFFFFFF, 0.05f);  // a flat row's hover, without a second surface
-constexpr ImVec4 kOnAccent = Hex(0x101216);          // words on the accent or on kBad
-
-// Radii: the window and its popups, a card or a control, and a small mark (a grab, a knob).
-constexpr float kRadiusCard = 10.f;
-constexpr float kRadiusControl = 8.f;
-constexpr float kRadiusSmall = 5.f;
-constexpr float kRowGap = 8.f;
-constexpr float kCardPadding = 12.f;
-constexpr float kTooltipPadX = 8.f;
-constexpr float kTooltipPadY = 6.f;
-
-// Row geometry, in units of the font size so it follows the player's ReShade font. The label column is a
-// fixed width, never more than kLabelShare of a narrow panel, so every control on the panel starts at the
-// same x; a label wider than the column extends into it, its right edge against the control. A panel
-// narrower than kStackEm has no room for a label column beside a usable control (ReShade docks it at
-// ~450 px), so there each label goes on its own line over a control as wide as the panel. A slider's value
-// sits just right of its rail, its right edge on the control column's, instead of under the knob.
-//
-// kStackEm is measured against the width the row actually has, which inside a two-column group is that
-// column. At 24 em no row on the panel ever cleared it -- not even a single-column one at the width the panel
-// opens at -- so every row stacked, and a row ending in a switch put that switch alone at the right of the
-// line under its label. Nine em is the narrowest column that still holds a label and its control: below that
-// the label goes over the control, which is the only thing stacking is for.
-constexpr float kLabelEm = 8.5f;
-constexpr float kLabelShare = 0.38f;
+// Row geometry measured in the body font; the width limit is relative to the current column.
+constexpr float kLabelEm = 10.5f;
+constexpr float kLabelShare = 0.42f;
 constexpr float kStackEm = 9.f;
 constexpr float kTooltipEm = 35.f;
 
@@ -113,18 +94,14 @@ constexpr const char* kUndo = "\xef\x83\xa2";       // U+F0E2 undo
 
 // The panel's spacing rhythm, resolved from the live font size, so every gap, inset and control follows
 // ReShade's font-size setting instead of a fixed pixel grid. Each step is one of the same rhythm the rows use.
-inline float Units(float count) { return gui::GetFontSize() * (4.f / 13.f) * count; }
-// A size token as the live window's pixels. RefreshForDpi scales the fields it writes into ImGui's global style;
-// the ones the panel pushes itself (a card's inset, a tooltip's, a section header's) never go through it, so they
-// take the same scale here -- without this a 150% panel drew those at their 100% size.
-inline float Px(float value) {
-  const float dpi = gui::GetWindowDpiScale();
-  return value * ((dpi > 0.01f && dpi < 8.f) ? dpi : 1.f);
-}
-inline float LabelGap() { return Units(0.75f); }
-inline float RowGap() { return Units(1.25f); }
-inline float BlockGap() { return Units(3); }
-inline float SectionGap() { return Units(4.5f); }
+inline float Scale() { return gui::GetFontSize() / tokens::kBaseFont; }
+inline float Px(float value) { return value * Scale(); }
+inline float Units(float count) { return Px(tokens::kPad * count); }
+inline float LabelGap() { return Px(tokens::kPad); }
+inline float RowGap() { return Px(tokens::kRowGap); }
+inline float BlockGap() { return Px(tokens::kGroupGap); }
+inline float SectionGap() { return Px(tokens::kSectionGap); }
+constexpr float ControlRadius(float height) { return height * 0.24f; }
 
 // The panel's two-column reading is one number, and it is the stage diagram's: a section shows its two groups
 // side by side only where the diagram above draws its six nodes on one line. Below that the diagram folds onto
@@ -173,9 +150,15 @@ class StyleScope {
   // A button with no surface of its own: the reset arrows and other quiet icon actions.
   StyleScope& FlatButton() {
     return Color(ImGuiCol_Button, tokens::kTransparent)
-        .Color(ImGuiCol_ButtonHovered, tokens::kAccentWash)
-        .Color(ImGuiCol_ButtonActive, tokens::kAccentHalo)
+        .Color(ImGuiCol_ButtonHovered, tokens::kSurfaceHover)
+        .Color(ImGuiCol_ButtonActive, tokens::kSurfaceActive)
         .Color(ImGuiCol_Text, tokens::kTextSecondary);
+  }
+  StyleScope& SelectedButton() {
+    return Color(ImGuiCol_Button, tokens::kSelected)
+        .Color(ImGuiCol_ButtonHovered, tokens::kSelectedHover)
+        .Color(ImGuiCol_ButtonActive, tokens::kSelectedActive)
+        .Color(ImGuiCol_Text, tokens::kAccent);
   }
  private:
   int colors_ = 0;
@@ -197,32 +180,27 @@ struct SlotColor {
 constexpr SlotColor kPalette[] = {
     {ImGuiCol_Text, tokens::kTextPrimary},
     {ImGuiCol_TextDisabled, tokens::kTextSecondary},
-    {ImGuiCol_TextLink, tokens::kAccent},
+    {ImGuiCol_TextLink, tokens::kTextSecondary},
     {ImGuiCol_WindowBg, tokens::kBgWindow},
     {ImGuiCol_ChildBg, tokens::kBgCard},
-    // A popup (a combo's list, a tooltip) opens over a card, so it takes the control tone: at the card's own
-    // tone it would sit flush against what it covers and only its hairline would say it is there.
-    {ImGuiCol_PopupBg, tokens::kBgControl},
-    // A frame's edge is a hairline, not a line: on the panel's dark ramp a full-strength stroke reads as a
-    // chrome outline around every combo and slider. Cards keep kHairline of their own.
-    {ImGuiCol_Border, tokens::Fade(tokens::kTextPrimary, 0.10f)},
+    {ImGuiCol_PopupBg, tokens::kBgPopup},
+    {ImGuiCol_Border, tokens::kTransparent},
     {ImGuiCol_BorderShadow, tokens::kTransparent},
 
     // Inputs, drags, combos, checkboxes and plots stand on a card, so they take the control tone: the card
     // is what they sit in, and at the well's own fill a text box or a combo read as a hole in the panel.
     {ImGuiCol_FrameBg, tokens::kBgControl},
     {ImGuiCol_FrameBgHovered, tokens::kBgControlHover},
-    // Pressed inputs take one step up, not a tint: the accent belongs to the controls that mean "on".
-    {ImGuiCol_FrameBgActive, tokens::kBgControlHover},
+    {ImGuiCol_FrameBgActive, tokens::kBgControlActive},
 
     {ImGuiCol_Button, tokens::kBgControl},
     {ImGuiCol_ButtonHovered, tokens::kBgControlHover},
-    {ImGuiCol_ButtonActive, tokens::kAccentActive},
+    {ImGuiCol_ButtonActive, tokens::kBgControlActive},
 
-    // Rows, tree nodes and section headers: one step up from the panel, the accent only while held.
-    {ImGuiCol_Header, tokens::kBgCard},
+    // A selected menu entry uses a translucent plate that also reads on the popup surface.
+    {ImGuiCol_Header, tokens::kAccentWash},
     {ImGuiCol_HeaderHovered, tokens::kSurfaceHover},
-    {ImGuiCol_HeaderActive, tokens::kAccentWash},
+    {ImGuiCol_HeaderActive, tokens::kSurfaceActive},
 
     // Title bar and tabs keep the panel's own layer when idle, one step up when active; the selected tab
     // also carries the accent overline.
@@ -248,9 +226,9 @@ constexpr SlotColor kPalette[] = {
     {ImGuiCol_SliderGrab, tokens::kAccent},
     {ImGuiCol_SliderGrabActive, tokens::kAccentHover},
     {ImGuiCol_InputTextCursor, tokens::kAccent},
-    {ImGuiCol_NavCursor, tokens::kAccentHalo},
+    {ImGuiCol_NavCursor, tokens::kAccentStrong},
     {ImGuiCol_TextSelectedBg, tokens::kAccentHalo},
-    {ImGuiCol_UnsavedMarker, tokens::kWarn},
+    {ImGuiCol_UnsavedMarker, tokens::kTextSecondary},
 
     {ImGuiCol_Separator, tokens::kStroke},
     {ImGuiCol_SeparatorHovered, tokens::kAccentStrong},
@@ -286,24 +264,17 @@ inline ImGuiStyle& OriginalStyle() {
   return original;
 }
 
-// The DPI scale the size fields were last applied at; 0 means "ReShade's own style is in place".
-inline float& AppliedDpi() {
-  static float dpi = 0.f;
-  return dpi;
+inline bool& Applied() {
+  static bool applied = false;
+  return applied;
 }
 
-// Borders where they carry information and nowhere else: none around the panel or a card, since the ramp
-// separates those two, and a hairline around a frame and around a popup -- a recessed fill alone is hard to
-// make out on a dark panel, and a popup has neither a neighbour nor a shadow to lift it off what is behind
-// it. A blue title bar or tab is the same kind of frame, so those stay flat in the panel's own colours too.
-inline void ApplyBorders(float scale) {
+inline void ApplyBorders() {
   ImGuiStyle& style = ImGui::GetStyle();
   style.WindowBorderSize = 0.f;
   style.ChildBorderSize = 0.f;
-  // No border on a control: the panel separates layers by fill, and a line around every combo, slider and
-  // button is the one thing that made the panel read as chrome. Popups keep one so they lift off the panel.
   style.FrameBorderSize = 0.f;
-  style.PopupBorderSize = (std::max)(1.f, scale);
+  style.PopupBorderSize = 0.f;
   style.TabBorderSize = 0.f;
   style.TabBarBorderSize = 0.f;
   style.SeparatorTextBorderSize = 0.f;
@@ -332,7 +303,7 @@ inline void ApplyAt(float scale) {
   style.FontScaleMain = font_scale_main;
   style.FontScaleDpi = font_scale_dpi;
 
-  ApplyBorders(scale);
+  ApplyBorders();
 
   // A window and the popups above it take the card radius plus a step, a card or a scrollbar inside it the
   // card radius, the controls on it the control radius, and a grab the small one. The spacing rhythm is
@@ -341,17 +312,14 @@ inline void ApplyAt(float scale) {
   style.PopupRounding = (tokens::kRadiusCard + 2.f) * scale;
   style.ChildRounding = tokens::kRadiusCard * scale;
   style.ScrollbarRounding = tokens::kRadiusCard * scale;
-  style.FrameRounding = tokens::kRadiusControl * scale;
-  style.GrabRounding = tokens::kRadiusSmall * scale;
-  style.TabRounding = tokens::kRadiusControl * scale;
-  style.DragDropTargetRounding = tokens::kRadiusControl * scale;
-
-  style.WindowPadding = ImVec2(16.f * scale, 14.f * scale);
-  style.FramePadding = ImVec2(9.f * scale, 6.f * scale);
-  // Rows sit on the DPI scale, the paragraph gaps inside them on the font (style::Units): ReShade's own Ctrl +
-  // wheel font size then moves the air between groups and leaves the row grid alone.
+  style.WindowPadding = ImVec2(tokens::kGroupGap * scale, tokens::kGroupGap * scale);
+  style.FramePadding = ImVec2(2.f * tokens::kPad * scale, 1.25f * tokens::kPad * scale);
+  style.FrameRounding = ControlRadius(ImGui::GetFrameHeight());
+  style.GrabRounding = style.FrameRounding;
+  style.TabRounding = style.FrameRounding;
+  style.DragDropTargetRounding = style.FrameRounding;
   style.ItemSpacing = ImVec2(tokens::kRowGap * scale, tokens::kRowGap * scale);
-  style.ItemInnerSpacing = ImVec2(6.f * scale, 5.f * scale);
+  style.ItemInnerSpacing = ImVec2(tokens::kPad * scale, tokens::kPad * scale);
   style.CellPadding = ImVec2(8.f * scale, 4.f * scale);
   style.SeparatorTextPadding = ImVec2(14.f * scale, 6.f * scale);
   style.IndentSpacing = 18.f * scale;
@@ -366,7 +334,7 @@ inline void ApplyAt(float scale) {
   style.TreeLinesRounding = 3.f * scale;
   style.WindowMinSize = ImVec2(style.WindowMinSize.x * scale, style.WindowMinSize.y * scale);
 
-  style.DisabledAlpha = 0.50f;  // faded rather than greyed, so a disabled row stays readable
+  style.DisabledAlpha = 0.55f;
   style.WindowTitleAlign = ImVec2(0.f, 0.5f);
   style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
   style.SelectableTextAlign = ImVec2(0.f, 0.5f);
@@ -380,13 +348,13 @@ inline void ApplyAt(float scale) {
   style.CircleTessellationMaxError = 0.30f;
 
   ApplyPalette();
-  AppliedDpi() = scale;
+  Applied() = true;
 }
 
 inline void Restore() {
-  if (AppliedDpi() == 0.f) return;  // nothing was applied: ReShade's style is already in place
+  if (!Applied()) return;
   ImGui::GetStyle() = OriginalStyle();
-  AppliedDpi() = 0.f;
+  Applied() = false;
 }
 
 inline void RefreshForDpi() {
@@ -394,10 +362,8 @@ inline void RefreshForDpi() {
   // (runtime::load_config -> load_custom_style) whenever its settings are touched, which put ReShade's
   // colours back over the panel's. Applying is one struct copy and the palette table.
   //
-  // The window already knows its monitor's scale, so this needs no HWND and no WM_DPICHANGED handling of
-  // its own: a window dragged to another monitor re-applies here.
-  const float dpi = ImGui::GetWindowDpiScale();
-  ApplyAt((dpi > 0.01f && dpi < 8.f) ? dpi : 1.f);
+  // GetFontSize already includes the host's font/DPI changes. Do not multiply by monitor DPI again.
+  ApplyAt(Scale());
 }
 
 }  // namespace detail

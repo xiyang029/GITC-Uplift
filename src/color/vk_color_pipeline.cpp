@@ -5,6 +5,7 @@
 #include <format>
 #include <vector>
 
+#include "change_stabilize_vk.h"
 #include "color/color_pipeline.hpp"
 #include "decode_vk_presr.h"
 #include "decode_vk_r11g11b10f.h"
@@ -37,8 +38,8 @@ namespace {
 
 constexpr uint32_t PASS_CONSTANTS = 24u;  // the encode's, the decode's, the motion copy's and the stabiliser's constant buffers: 16 dwords, the foveated grid's four, the base band's gain and the decode's target size (one dword spare)
 // Ring slots per recording (Plan 14): one per dispatch, as each dispatch reads its own constants. The encode, the decode, the motion copy, the change
-// pass, the stabiliser's scene cut, levels and detail, the shape, the meter, one resolve per later pass, then one per pyramid level (look::MakeAtlas makes at
-// most 16).
+// pass, the stabiliser's scene cut, levels and detail, the shape, the change field's own stabiliser, the meter, one resolve per later pass, then one per
+// pyramid level (look::MakeAtlas makes at most 16).
 constexpr uint32_t ENCODE_PASS = 0u;
 constexpr uint32_t DECODE_PASS = 1u;
 constexpr uint32_t MOTION_PASS = 2u;
@@ -47,8 +48,9 @@ constexpr uint32_t STABILIZE_CUT_PASS = 4u;
 constexpr uint32_t STABILIZE_LEVELS_PASS = 5u;
 constexpr uint32_t DETAIL_PASS = 6u;
 constexpr uint32_t SHAPE_PASS = 7u;
-constexpr uint32_t METER_PASS = 8u;
-constexpr uint32_t RESOLVE_PASS = 9u;                                              // pass index 1 (the second NR pass); index n at RESOLVE_PASS + n - 1
+constexpr uint32_t CHANGE_STABILIZE_PASS = 8u;
+constexpr uint32_t METER_PASS = 9u;
+constexpr uint32_t RESOLVE_PASS = 10u;                                              // pass index 1 (the second NR pass); index n at RESOLVE_PASS + n - 1
 constexpr uint32_t PYRAMID_PASS = RESOLVE_PASS + VkColorPipeline::RESOLVE_PASSES;  // level 1; level k at PYRAMID_PASS + k - 1
 constexpr uint32_t PYRAMID_LEVELS = 24u;
 // Keep faces: pass 1's levels (round 5: their own, since they also write the fill's pyramid), the levels every later pass shares (their constants are the
@@ -75,6 +77,10 @@ constexpr uint32_t STABILIZE_DETAIL = 2u;
 constexpr uint32_t STABILIZE_FLAG_RESET = 1u;
 constexpr uint32_t STABILIZE_FLAG_MOTION = 2u;
 constexpr uint32_t STABILIZE_FLAG_VECTORS = 4u;
+// change_stabilize_cs.hlsl's flags (the same three, without modes: it is one dispatch).
+constexpr uint32_t CHANGE_STABILIZE_FLAG_RESET = 1u;
+constexpr uint32_t CHANGE_STABILIZE_FLAG_MOTION = 2u;
+constexpr uint32_t CHANGE_STABILIZE_FLAG_VECTORS = 4u;
 constexpr uint32_t FACES_MODE_LEVEL = 0u;  // faces_cs.hlsl's modes (ColorPipeline's)
 constexpr uint32_t FACES_MODE_FIRST = 1u;
 constexpr uint32_t FACES_MODE_LATER = 2u;
@@ -84,7 +90,8 @@ constexpr uint32_t FACES_FLAG_FIRST = 1u;  // faces_cs.hlsl's flags
 constexpr uint32_t FACES_FLAG_FILL = 2u;
 
 // Pipeline slots: the sampled encode, the in-place encodes (one per output variant), the private-colour decode, the in-place decodes, the motion copy, and
-// (Plan 14) the look's pyramid, stabiliser and shape, the resolve, the sampled meter and the in-place meters (one per output variant).
+// (Plan 14) the look's pyramid, stabiliser and shape, the change field's own stabiliser, the resolve, the sampled meter and the in-place meters (one per output
+// variant).
 constexpr uint32_t ENCODE_SAMPLED = 0u;
 constexpr uint32_t ENCODE_STORAGE = 1u;
 constexpr uint32_t DECODE_PRESR = ENCODE_STORAGE + VkColorPipeline::OUTPUT_VARIANTS;
@@ -93,7 +100,8 @@ constexpr uint32_t MOTION_COPY = DECODE_STORAGE + VkColorPipeline::OUTPUT_VARIAN
 constexpr uint32_t LOOK_PYRAMID = MOTION_COPY + 1u;
 constexpr uint32_t LOOK_STABILIZE = LOOK_PYRAMID + 1u;
 constexpr uint32_t LOOK_SHAPE = LOOK_STABILIZE + 1u;
-constexpr uint32_t RESOLVE = LOOK_SHAPE + 1u;
+constexpr uint32_t CHANGE_STABILIZE = LOOK_SHAPE + 1u;
+constexpr uint32_t RESOLVE = CHANGE_STABILIZE + 1u;
 constexpr uint32_t METER_SAMPLED = RESOLVE + 1u;
 constexpr uint32_t METER_STORAGE = METER_SAMPLED + 1u;
 constexpr uint32_t FACES = METER_STORAGE + VkColorPipeline::OUTPUT_VARIANTS;  // Keep faces
@@ -126,6 +134,7 @@ constexpr Shader MOTION_SHADER = UPLIFT_VK_SHADER(g_motion_vk);
 constexpr Shader PYRAMID_SHADER = UPLIFT_VK_SHADER(g_look_pyramid_vk);
 constexpr Shader STABILIZE_SHADER = UPLIFT_VK_SHADER(g_look_stabilize_vk);
 constexpr Shader SHAPE_SHADER = UPLIFT_VK_SHADER(g_look_shape_vk);
+constexpr Shader CHANGE_STABILIZE_SHADER = UPLIFT_VK_SHADER(g_change_stabilize_vk);
 constexpr Shader RESOLVE_SHADER = UPLIFT_VK_SHADER(g_resolve_vk);
 constexpr Shader METER_SAMPLED_SHADER = UPLIFT_VK_SHADER(g_meter_vk_sampled);
 constexpr Shader FACES_SHADER = UPLIFT_VK_SHADER(g_faces_vk);
@@ -194,6 +203,30 @@ std::array<uint32_t, PASS_CONSTANTS> StabilizeConstants(uint32_t mode, const VkS
       (vectors ? motion.rect.height : 1u),
       0u,
       0u,
+  };
+}
+
+// change_stabilize_cs.hlsl's constants: no modes, so no atlas (ColorPipeline's ChangeStabilizeConstants).
+std::array<uint32_t, PASS_CONSTANTS> ChangeStabilizeConstants(const VkChangeStabilizePass& pass) {
+  const VkStabilizeMotion& motion = pass.motion;
+  const bool vectors = (motion.vectors.view != VK_NULL_HANDLE);
+  const uint32_t flags =
+      (pass.reset ? CHANGE_STABILIZE_FLAG_RESET : 0u) | CHANGE_STABILIZE_FLAG_MOTION | (vectors ? CHANGE_STABILIZE_FLAG_VECTORS : 0u);
+  return {
+      pass.image.width,
+      pass.image.height,
+      Bits(pass.rate),
+      flags,
+      motion.rect.x,
+      motion.rect.y,
+      (vectors ? motion.rect.width : 1u),
+      (vectors ? motion.rect.height : 1u),
+      Bits(motion.scale_x),
+      Bits(motion.scale_y),
+      pass.foveation.x.packed,
+      pass.foveation.y.packed,
+      Bits(pass.foveation.x.gmax),
+      Bits(pass.foveation.y.gmax),
   };
 }
 
@@ -347,12 +380,13 @@ bool VkColorPipeline::PrepareLook() {
   const bool pyramid = (PipelineFor(LOOK_PYRAMID) != VK_NULL_HANDLE);
   const bool stabilize = (PipelineFor(LOOK_STABILIZE) != VK_NULL_HANDLE);
   const bool shape = (PipelineFor(LOOK_SHAPE) != VK_NULL_HANDLE);
+  const bool change = (PipelineFor(CHANGE_STABILIZE) != VK_NULL_HANDLE);
   // Keep faces: built here too, outside the hooked evaluate. A failure only keeps Keep faces from running (FacesReady), never NR; fix round 1 (M3): it is
   // said once, as a warning.
   if (pipelines_[FACES] == VK_NULL_HANDLE && !failed_[FACES] && PipelineFor(FACES) == VK_NULL_HANDLE) {
     nr::Log(nr::LogLevel::WARN, "Keep faces is unavailable on this device: its Vulkan pipeline could not be built");
   }
-  return pyramid && stabilize && shape && PipelineFor(RESOLVE) != VK_NULL_HANDLE;
+  return pyramid && stabilize && shape && change && PipelineFor(RESOLVE) != VK_NULL_HANDLE;
 }
 
 bool VkColorPipeline::Prepare(VkFormat output_format) {
@@ -368,7 +402,8 @@ bool VkColorPipeline::Prepared(VkFormat output_format) const {
   const std::optional<uint32_t> variant = OutputVariantOf(output_format);
   const bool look = (pipelines_[LOOK_PYRAMID] != VK_NULL_HANDLE && pipelines_[LOOK_STABILIZE] != VK_NULL_HANDLE && pipelines_[LOOK_SHAPE] != VK_NULL_HANDLE
                      && pipelines_[RESOLVE] != VK_NULL_HANDLE);
-  return variant && look && pipelines_[ENCODE_STORAGE + *variant] != VK_NULL_HANDLE && pipelines_[DECODE_STORAGE + *variant] != VK_NULL_HANDLE
+  const bool change = (pipelines_[CHANGE_STABILIZE] != VK_NULL_HANDLE);
+  return variant && look && change && pipelines_[ENCODE_STORAGE + *variant] != VK_NULL_HANDLE && pipelines_[DECODE_STORAGE + *variant] != VK_NULL_HANDLE
          && pipelines_[METER_STORAGE + *variant] != VK_NULL_HANDLE;
 }
 
@@ -408,6 +443,8 @@ VkPipeline VkColorPipeline::PipelineFor(uint32_t index) {
     shader = STABILIZE_SHADER;
   } else if (index == LOOK_SHAPE) {
     shader = SHAPE_SHADER;
+  } else if (index == CHANGE_STABILIZE) {
+    shader = CHANGE_STABILIZE_SHADER;
   } else if (index == RESOLVE) {
     shader = RESOLVE_SHADER;
   } else if (index == METER_SAMPLED) {
@@ -674,6 +711,17 @@ bool VkColorPipeline::RecordShape(VkCommandBuffer buffer, uint32_t slot, const V
       Bits(shape.max_color),
   };
   Dispatch(buffer, pipeline, slot, SHAPE_PASS, constants, bindings, pass.atlas.image.width, pass.atlas.image.height);
+  return true;
+}
+
+bool VkColorPipeline::RecordChangeStabilize(VkCommandBuffer buffer, uint32_t slot, const VkChangeStabilizePass& pass) {
+  if (!Initialized() || !SlotInRange(slot, "RecordChangeStabilize")) return false;
+  const VkPipeline pipeline = PipelineFor(CHANGE_STABILIZE);
+  if (pipeline == VK_NULL_HANDLE) return false;
+  Bindings bindings;
+  bindings.sampled = {Own(pass.change), Own(pass.previous), pass.motion.vectors, VkSampledView{}, VkSampledView{}};
+  bindings.storage[0] = pass.current;
+  Dispatch(buffer, pipeline, slot, CHANGE_STABILIZE_PASS, ChangeStabilizeConstants(pass), bindings, pass.image.width, pass.image.height);
   return true;
 }
 

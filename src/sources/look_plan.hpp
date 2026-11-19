@@ -70,10 +70,11 @@ struct LookConfig {
 // The look stage's surfaces one recording needs, apart from the main set so that the look never restarts NR's history.
 // Shared by Direct3D 12's NrPipeline and Vulkan's VkNrPipeline, which allocate them alike.
 struct LookPlan {
-  nr::Size image;           // the work image size; empty when shaping is inactive
-  bool shape = false;       // the basis and both atlases
-  bool stabilize = false;   // the level histories and the scene-cut state
-  bool detail = false;      // the detail histories
+  nr::Size image;            // the work image size; empty when neither shaping nor the change stabiliser is on
+  bool shape = false;        // the basis and both atlases
+  bool stabilize = false;    // the level histories and the scene-cut state
+  bool detail = false;       // the detail histories
+  bool change = false;       // the change field's own histories (at the image size, whatever the shape does)
   friend bool operator==(const LookPlan&, const LookPlan&) = default;
 };
 

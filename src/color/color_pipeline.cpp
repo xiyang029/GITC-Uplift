@@ -10,6 +10,7 @@
 #include "decode_ps.h"
 #include "decode_vs.h"
 #include "encode_cs.h"
+#include "change_stabilize_cs.h"
 #include "faces_cs.h"
 #include "look_pyramid_cs.h"
 #include "look_shape_cs.h"
@@ -52,7 +53,8 @@ constexpr uint32_t FACES_SHOW_TABLE = 17u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_FIRST_TABLE = 18u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_TABLE = 19u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_SWAPPED_TABLE = 20u * TABLE_SIZE;
-constexpr uint32_t DESCRIPTORS_PER_SLOT = 21u * TABLE_SIZE;
+constexpr uint32_t CHANGE_STABILIZE_TABLE = 21u * TABLE_SIZE;
+constexpr uint32_t DESCRIPTORS_PER_SLOT = 22u * TABLE_SIZE;
 constexpr uint32_t STABILIZE_CUT = 0u;  // look_stabilize_cs.hlsl's modes and flags
 constexpr uint32_t STABILIZE_LEVELS = 1u;
 constexpr uint32_t STABILIZE_DETAIL = 2u;
@@ -66,6 +68,9 @@ constexpr uint32_t FACES_MODE_SHOW = 3u;
 constexpr uint32_t FACES_MODE_DESPIKE = 4u;
 constexpr uint32_t FACES_FLAG_FIRST = 1u;  // faces_cs.hlsl's flags
 constexpr uint32_t FACES_FLAG_FILL = 2u;
+constexpr uint32_t CHANGE_STABILIZE_FLAG_RESET = 1u;  // change_stabilize_cs.hlsl's flags
+constexpr uint32_t CHANGE_STABILIZE_FLAG_MOTION = 2u;
+constexpr uint32_t CHANGE_STABILIZE_FLAG_VECTORS = 4u;
 
 uint32_t Bits(float value) {
   return std::bit_cast<uint32_t>(value);
@@ -103,6 +108,18 @@ std::array<uint32_t, PASS_CONSTANTS> StabilizeConstants(uint32_t mode, const Sta
       pass.atlas.image.width, pass.atlas.image.height, pass.atlas.levels, mode, pass.bands.stable_level, flags,
       Bits(pass.rate), Bits(pass.bands.low_level), Bits(motion.scale_x), Bits(motion.scale_y), motion.vectors.rect.x,
       motion.vectors.rect.y, (vectors ? motion.vectors.rect.width : 1u), (vectors ? motion.vectors.rect.height : 1u), 0u, 0u,
+  };
+}
+
+// change_stabilize_cs.hlsl's constants: no modes, so no atlas.
+std::array<uint32_t, PASS_CONSTANTS> ChangeStabilizeConstants(const ChangeStabilizePass& pass) {
+  const StabilizeMotion& motion = pass.motion;
+  const bool vectors = (motion.vectors.resource != nullptr);
+  const uint32_t flags = (pass.reset ? CHANGE_STABILIZE_FLAG_RESET : 0u) | CHANGE_STABILIZE_FLAG_MOTION | (vectors ? CHANGE_STABILIZE_FLAG_VECTORS : 0u);
+  return {
+      pass.image.width, pass.image.height, Bits(pass.rate), flags, motion.vectors.rect.x, motion.vectors.rect.y,
+      (vectors ? motion.vectors.rect.width : 1u), (vectors ? motion.vectors.rect.height : 1u), Bits(motion.scale_x), Bits(motion.scale_y),
+      pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
   };
 }
 
@@ -204,6 +221,7 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
       || !build_compute(g_look_pyramid_cs, sizeof(g_look_pyramid_cs), &pyramid_pipeline_, "look pyramid")
       || !build_compute(g_look_stabilize_cs, sizeof(g_look_stabilize_cs), &stabilize_pipeline_, "look stabiliser")
       || !build_compute(g_look_shape_cs, sizeof(g_look_shape_cs), &shape_pipeline_, "look shape")
+      || !build_compute(g_change_stabilize_cs, sizeof(g_change_stabilize_cs), &change_stabilize_pipeline_, "change stabiliser")
       || !build_compute(g_resolve_cs, sizeof(g_resolve_cs), &resolve_pipeline_, "resolve")) {
     return false;
   }
@@ -484,6 +502,14 @@ bool ColorPipeline::RecordShape(ID3D12GraphicsCommandList* list, uint32_t slot, 
       Bits(shape.edit_strength), Bits(shape.max_brighten), Bits(shape.max_darken), Bits(shape.max_color),
   };
   DispatchCompute(list, shape_pipeline_.Get(), constants, base, pass.atlas.image.width, pass.atlas.image.height);
+  return true;
+}
+
+bool ColorPipeline::RecordChangeStabilize(ID3D12GraphicsCommandList* list, uint32_t slot, const ChangeStabilizePass& pass) {
+  if (!SlotInRange(slot, "RecordChangeStabilize")) return false;
+  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + CHANGE_STABILIZE_TABLE;
+  WriteTable(base, {{pass.change}, {pass.previous}, {pass.motion.vectors.resource, MotionViewOf(pass.motion)}}, {{pass.current}});
+  DispatchCompute(list, change_stabilize_pipeline_.Get(), ChangeStabilizeConstants(pass), base, pass.image.width, pass.image.height);
   return true;
 }
 

@@ -123,6 +123,10 @@ float2 FovUnwarp(float2 v, uint2 packed, float2 gmax) {
 // over `full`): the encode footprint, exact under the warp.
 void FovWorkFootprint(uint2 pixel, uint2 work, uint2 full, uint2 packed, float2 gmax, inout float2 lo,
                       inout float2 hi) {
+  // AreaModel also uses this helper for ordinary downscaling. Its initial rectangle is already inside `full`,
+  // so the identity grid needs neither the per-axis tests nor the final clamps. The packed grid is uniform for
+  // the dispatch, making this a coherent early-out.
+  if (!FovAny(packed)) return;
   [branch] if (FovAxisOn(packed.x) && work.x != full.x) {
     const FovAxis p = FovDecode(packed.x, gmax.x);
     const float v0 = float(pixel.x) / float(work.x);

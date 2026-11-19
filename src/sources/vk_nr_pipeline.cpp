@@ -118,7 +118,9 @@ VkNrPipeline::~VkNrPipeline() {
     for (vk::NrImage* image : {&set.intermediates.a, &set.intermediates.b, &set.intermediates.zero_motion, &set.intermediates.canvas_motion,
                                &set.intermediates.private_color, &set.intermediates.change, &set.look.basis, &set.look.gauss, &set.look.peaks,
                                &set.look.history[0], &set.look.history[1], &set.look.detail_history[0], &set.look.detail_history[1], &set.look.state,
-                               &set.exposure.state, &set.faces.twin, &set.faces.detail, &set.faces.atlas, &set.faces.fill}) {
+                               &set.look.change_history[0], &set.look.change_history[1], &set.exposure.state, &set.faces.twin,
+                               &set.faces.detail,
+                               &set.faces.atlas, &set.faces.fill}) {
       vk::DestroyNrImage(functions_, device_, image);
     }
     DestroyCheckBuffer(functions_, device_, set.check.buffer, set.check.memory);
@@ -161,9 +163,15 @@ void VkNrPipeline::SetLookConfig(const LookConfig& config) {
   // A new Detail radius or Stabilize mode starts the stabiliser afresh. Split chain: in every set.
   const bool restart_stabilizer = (config.look.detail_radius != config_.look.detail_radius || config.look.stabilize != config_.look.stabilize
                                    || config.look.stabilize_detail != config_.look.stabilize_detail);
+  // The change stabiliser's own: its τ may change freely, but switching it or reshaping with it restarts it too.
+  const bool restart_change = (!config.look.stabilize_change || config.look.stabilize_change != config_.look.stabilize_change
+                               || config.look.shape != config_.look.shape);
   for (StageSet& set : sets_) {
     if (restart_stabilizer) {
       set.look.history_valid = false;
+    }
+    if (restart_change) {
+      set.look.change_valid = false;
     }
   }
   config_ = config;
@@ -201,8 +209,9 @@ void VkNrPipeline::RetireSet(StageSet* set) {
 void VkNrPipeline::RetireLook(StageSet* set) {
   if (set->look.plan == LookPlan{}) return;
   auto destroy = [functions = functions_, device = device_,
-                  images = std::array<vk::NrImage, 8>{set->look.basis, set->look.gauss, set->look.peaks, set->look.history[0], set->look.history[1],
-                                                      set->look.detail_history[0], set->look.detail_history[1], set->look.state}]() mutable {  // the plan's only
+                  images = std::array<vk::NrImage, 10>{set->look.basis, set->look.gauss, set->look.peaks, set->look.history[0], set->look.history[1],
+                                                       set->look.detail_history[0], set->look.detail_history[1], set->look.state,
+                                                       set->look.change_history[0], set->look.change_history[1]}]() mutable {  // the plan's only
     for (vk::NrImage& image : images) {
       vk::DestroyNrImage(functions, device, &image);
     }
@@ -462,10 +471,15 @@ bool VkNrPipeline::EnsureLook(const LookPlan& plan) {
     make(plan.detail, plan.image, VK_FORMAT_R16G16B16A16_SFLOAT, MODEL_BYTES_PER_PIXEL, LOOK_USAGE, &history);
   }
   make(plan.stabilize, {1u, 1u}, VK_FORMAT_R32G32B32A32_SFLOAT, STATE_BYTES, VK_IMAGE_USAGE_STORAGE_BIT, &created.state);
+  // The change field's own stabiliser, at the work image whatever the look does with it.
+  for (vk::NrImage& history : created.change_history) {
+    make(plan.change, plan.image, VK_FORMAT_R16G16B16A16_SFLOAT, MODEL_BYTES_PER_PIXEL, LOOK_USAGE, &history);
+  }
   if (!made) {
     // Never used by the GPU: freed here.
     for (vk::NrImage* image : {&created.basis, &created.gauss, &created.peaks, &created.history[0], &created.history[1],
-                               &created.detail_history[0], &created.detail_history[1], &created.state}) {
+                               &created.detail_history[0], &created.detail_history[1], &created.state, &created.change_history[0],
+                               &created.change_history[1]}) {
       vk::DestroyNrImage(functions_, device_, image);
     }
     if (!allocation_failure_logged_) {
@@ -538,6 +552,11 @@ void VkNrPipeline::OpenRecording(VkCommandBuffer buffer, std::span<const vk::NrI
     if (!set_->look.carried) {
       for (const vk::NrImage* image : {&set_->look.history[0], &set_->look.history[1], &set_->look.detail_history[0], &set_->look.detail_history[1], &set_->look.state}) {
         open(*image);
+      }
+      // The change field's pair carries too.
+      if (set_->look.plan.change) {
+        open(set_->look.change_history[0]);
+        open(set_->look.change_history[1]);
       }
       set_->look.carried = true;
     }
@@ -702,7 +721,7 @@ float VkNrPipeline::NoteEncoding(const VkDlssTarget& target) {
 
 VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32_t slot, const color::VkEncodePass& encode, VkImageView nr_output, uint32_t passes_run,
                                                   bool reduced, bool look_ready, color::Upsampling upsampling, const color::VkStabilizeMotion& motion,
-                                                  bool reset) {
+                                                  nr::foveation::Grid foveation, bool reset) {
   if (set_->look.plan != LookPlan{}) {
     set_->look.last_use = slot_marks_[slot];
   }
@@ -714,14 +733,40 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
                                           .model_input = (passes_run == 1u ? set_->intermediates.a.view : VK_NULL_HANDLE)})) {
     return {.ok = false};
   }
-  Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-  const AfterNr after = {.view = change, .upsampling = (reduced ? std::optional{upsampling} : std::nullopt)};
-  if (!shape) return after;
+  color_.ComputeBarrier(buffer);
+  AfterNr after = {.view = change, .upsampling = (reduced ? std::optional{upsampling} : std::nullopt)};
+  // 5. The change field's own stabiliser: the field the decode consumes, averaged along the vectors, into the other buffer
+  //    of the pair. It is not part of the look - a look that shapes nothing still has a change field to steady - so it is
+  //    its own step, taken whether or not the look's passes below run.
+  const auto stabilise_change = [&after, this, buffer, slot, change, look_ready, motion, foveation, reset]() {
+    if (!look_ready || !set_->look.plan.change) {
+      return;
+    }
+    const uint32_t current = set_->look.change_current;
+    const VkImageView stable = set_->look.change_history[current].view;
+    color_.RecordChangeStabilize(buffer, slot,
+                                 {.change = change,
+                                  .previous = set_->look.change_history[1u - current].view,
+                                  .current = stable,
+                                  .image = set_->look.plan.image,
+                                  .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
+                                  .reset = (reset || !set_->look.change_valid),
+                                  .motion = motion,
+                                  .foveation = foveation});
+    color_.ComputeBarrier(buffer);
+    set_->look.change_current = 1u - current;
+    set_->look.change_valid = true;
+    after.view = stable;
+  };
+  if (!shape) {
+    stabilise_change();
+    return after;
+  }
   // 2. The pyramids.
   const look::Atlas& atlas = set_->look.atlas;
   const look::Bands bands = look::MakeBands(config_.look.detail_radius, atlas.image.height, atlas.levels);
   color_.RecordPyramid(buffer, slot, {.change = change, .gauss = set_->look.gauss.view, .peaks = set_->look.peaks.view, .atlas = atlas});
-  Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  color_.ComputeBarrier(buffer);
   // 3. The stabiliser: the two levels the low band reads, then the fine band.
   VkImageView history = VK_NULL_HANDLE;
   VkImageView detail = VK_NULL_HANDLE;
@@ -741,14 +786,14 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
         .motion = motion,
     };
     color_.RecordStabilize(buffer, slot, stabilize);
-    Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    color_.ComputeBarrier(buffer);
     if (set_->look.plan.detail) {
       detail = set_->look.detail_history[current].view;
       stabilize.change = change;
       stabilize.previous = set_->look.detail_history[1u - current].view;
       stabilize.current = detail;
       color_.RecordDetail(buffer, slot, stabilize);
-      Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+      color_.ComputeBarrier(buffer);
     }
     set_->look.current = 1u - current;
     set_->look.history_valid = true;
@@ -765,7 +810,9 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
                       .bands = bands,
                       .settings = config_.look.shape,
                       .sdr = color::IsSdr(encode.encoding)});
-  Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  // C is the shape's storage output and what follows samples it: the change stabiliser, or the decode when it is off.
+  color_.ComputeBarrier(buffer);
+  stabilise_change();
   return after;
 }
 
@@ -942,7 +989,8 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
     color_.RecordFacesShow(buffer, slot, nr_output, set_->faces.twin.view, work.canvas);
     Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
   }
-  const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling, StabilizeMotionOf(inputs), frame_inputs.reset_hint);
+  const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling, StabilizeMotionOf(inputs),
+                                      work.foveation, frame_inputs.reset_hint);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source, .motion_scale_x = frame_inputs.motion_scale_x, .motion_scale_y = frame_inputs.motion_scale_y};
   }
@@ -1182,7 +1230,8 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr
     color_.RecordFacesShow(buffer, slot, nr_output, set_->faces.twin.view, canvas);  // Show the face mask, as after DLSS
     Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
   }
-  const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling, StabilizeMotionOf(inputs), frame_inputs.reset_hint);
+  const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling, StabilizeMotionOf(inputs),
+                                      work.foveation, frame_inputs.reset_hint);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
   }

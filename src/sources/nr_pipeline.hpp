@@ -201,8 +201,13 @@ class NrPipeline final : private nr::PassResolver {
     std::array<Texture, 2> history;         // the stabilised levels, ping-pong
     std::array<Texture, 2> detail_history;  // the stabilised fine band, ping-pong
     Texture state;                          // 1x1 RGBA32F: the scene cut
+    // The change field's own histories, ping-pong (change_stabilize_cs.hlsl): at the work image's size; this frame's result is written into
+    // change_history[change_current] itself.
+    std::array<Texture, 2> change_history;
     uint32_t current = 0u;                  // the history this frame writes
     bool history_valid = false;             // the histories hold a previous frame
+    uint32_t change_current = 0u;           // the change history this frame writes
+    bool change_valid = false;              // it holds a previous frame's
     uint64_t bytes = 0u;
     nr::Mark last_use;
   };
@@ -282,7 +287,7 @@ class NrPipeline final : private nr::PassResolver {
   ID3D12Resource* BoundMask(uint32_t slot);  // the mask copy for this recording, or null
   AfterNr RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
                         ID3D12Resource* nr_output, uint32_t passes_run, bool reduced, bool look_ready, color::Upsampling upsampling,
-                        const color::StabilizeMotion& motion, bool reset);
+                        const color::StabilizeMotion& motion, nr::foveation::Grid foveation, bool reset);
 
   LookConfig config_;
   // Keep faces: this recording's first pass ran its twin, so the later passes keep only their broad change inside the face mask. Split chain: the

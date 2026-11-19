@@ -431,9 +431,15 @@ void NrPipeline::SetLookConfig(const LookConfig& config) {
   // A new Detail radius or Stabilize mode starts the stabiliser afresh. Split chain: in every set.
   const bool restart_stabilizer = (config.look.detail_radius != config_.look.detail_radius || config.look.stabilize != config_.look.stabilize
                                    || config.look.stabilize_detail != config_.look.stabilize_detail);
+  // The change stabiliser's own: its τ may change freely, but switching it or reshaping with it restarts it too.
+  const bool restart_change = (!config.look.stabilize_change || config.look.stabilize_change != config_.look.stabilize_change
+                               || config.look.shape != config_.look.shape);
   for (StageSet& set : sets_) {
     if (restart_stabilizer) {
       set.look.history_valid = false;
+    }
+    if (restart_change) {
+      set.look.change_valid = false;
     }
   }
   config_ = config;
@@ -463,9 +469,13 @@ bool NrPipeline::EnsureLook(const LookPlan& plan) {
     history = make(plan.detail, plan.image, DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, L"Uplift look detail history");
   }
   created.state = make(plan.stabilize, LOOK_STATE_SIZE, DXGI_FORMAT_R32G32B32A32_FLOAT, LOOK_STATE_BYTES_PER_PIXEL, L"Uplift look state");
+  for (Texture& history : created.change_history) {
+    history = make(plan.change, plan.image, DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, L"Uplift change history");
+  }
   const bool complete = (!plan.shape || (created.basis && created.gauss && created.peaks))
                         && (!plan.stabilize || (created.history[0] && created.history[1] && created.state))
-                        && (!plan.detail || (created.detail_history[0] && created.detail_history[1]));
+                        && (!plan.detail || (created.detail_history[0] && created.detail_history[1]))
+                        && (!plan.change || (created.change_history[0] && created.change_history[1]));
   if (!complete) {
     if (!allocation_failure_logged_) {
       nr::Logf(nr::LogLevel::ERR, "could not allocate the {}x{} look surfaces", plan.image.width, plan.image.height);
@@ -643,7 +653,7 @@ void NrPipeline::ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID
 
 NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
                                               ID3D12Resource* nr_output, uint32_t passes_run, bool reduced, bool look_ready,
-                                              color::Upsampling upsampling, const color::StabilizeMotion& motion, bool reset) {
+                                              color::Upsampling upsampling, const color::StabilizeMotion& motion, nr::foveation::Grid foveation, bool reset) {
   if (set_->look.plan != LookPlan{}) {
     set_->look.last_use = slot_marks_[slot];
   }
@@ -663,54 +673,73 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
     Transition(list, basis, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   }
   if (!changed) return {.ok = false};
-  const AfterNr after = {.texture = change, .upsampling = (reduced ? std::optional{upsampling} : std::nullopt)};
-  if (!shape) return after;
-  // 2. The pyramids.
-  const look::Atlas& atlas = set_->look.atlas;
-  const look::Bands bands = look::MakeBands(config_.look.detail_radius, atlas.image.height, atlas.levels);
-  ID3D12Resource* const gauss = set_->look.gauss.Get();
-  ID3D12Resource* const peaks = set_->look.peaks.Get();
-  Transition(list, gauss, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  Transition(list, peaks, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  color_.RecordPyramid(list, slot, {.change = change, .gauss = gauss, .peaks = peaks, .atlas = atlas});
-  Transition(list, gauss, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-  Transition(list, peaks, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-  // 3. The stabiliser: the two levels the low band reads, then the fine band.
-  ID3D12Resource* history = nullptr;
-  ID3D12Resource* detail = nullptr;
-  if (set_->look.plan.stabilize) {
-    const uint32_t current = set_->look.current;
-    ID3D12Resource* const state = set_->look.state.Get();
-    history = set_->look.history[current].Get();
-    color::StabilizePass stabilize = {
-        .gauss = gauss, .previous = set_->look.history[1u - current].Get(), .current = history, .state = state, .atlas = atlas,
-        .bands = bands, .rate = look::StabilizeRate(config_.frame_seconds, config_.look.stabilize_ms),
-        .motion_mode = (config_.look.stabilize == look::StabilizeMode::MOTION), .reset = (reset || !set_->look.history_valid),
-        .motion = motion,
-    };
-    Transition(list, history, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    Transition(list, state, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    color_.RecordStabilize(list, slot, stabilize);
-    Transition(list, history, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    if (set_->look.plan.detail) {
-      detail = set_->look.detail_history[current].Get();
-      stabilize.change = change;
-      stabilize.previous = set_->look.detail_history[1u - current].Get();
-      stabilize.current = detail;
-      Transition(list, detail, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      color_.RecordDetail(list, slot, stabilize);
-      Transition(list, detail, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  AfterNr after = {.texture = change, .upsampling = (reduced ? std::optional{upsampling} : std::nullopt)};
+  if (shape) {
+    // 2. The pyramids.
+    const look::Atlas& atlas = set_->look.atlas;
+    const look::Bands bands = look::MakeBands(config_.look.detail_radius, atlas.image.height, atlas.levels);
+    ID3D12Resource* const gauss = set_->look.gauss.Get();
+    ID3D12Resource* const peaks = set_->look.peaks.Get();
+    Transition(list, gauss, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(list, peaks, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    color_.RecordPyramid(list, slot, {.change = change, .gauss = gauss, .peaks = peaks, .atlas = atlas});
+    Transition(list, gauss, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+    Transition(list, peaks, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+    // 3. The stabiliser: the two levels the low band reads, then the fine band.
+    ID3D12Resource* history = nullptr;
+    ID3D12Resource* detail = nullptr;
+    if (set_->look.plan.stabilize) {
+      const uint32_t current = set_->look.current;
+      ID3D12Resource* const state = set_->look.state.Get();
+      history = set_->look.history[current].Get();
+      color::StabilizePass stabilize = {
+          .gauss = gauss, .previous = set_->look.history[1u - current].Get(), .current = history, .state = state, .atlas = atlas,
+          .bands = bands, .rate = look::StabilizeRate(config_.frame_seconds, config_.look.stabilize_ms),
+          .motion_mode = (config_.look.stabilize == look::StabilizeMode::MOTION), .reset = (reset || !set_->look.history_valid),
+          .motion = motion,
+      };
+      Transition(list, history, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      Transition(list, state, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      color_.RecordStabilize(list, slot, stabilize);
+      Transition(list, history, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+      if (set_->look.plan.detail) {
+        detail = set_->look.detail_history[current].Get();
+        stabilize.change = change;
+        stabilize.previous = set_->look.detail_history[1u - current].Get();
+        stabilize.current = detail;
+        Transition(list, detail, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        color_.RecordDetail(list, slot, stabilize);
+        Transition(list, detail, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+      }
+      Transition(list, state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+      set_->look.current = 1u - current;
+      set_->look.history_valid = true;
     }
-    Transition(list, state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    set_->look.current = 1u - current;
-    set_->look.history_valid = true;
+    // 4. The shape pass rewrites C in place.
+    Transition(list, change, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    color_.RecordShape(list, slot,
+                       {.change = change, .basis = basis, .gauss = gauss, .peaks = peaks, .history = history, .detail = detail,
+                        .atlas = atlas, .bands = bands, .settings = config_.look.shape, .sdr = color::IsSdr(encode.encoding)});
+    Transition(list, change, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   }
-  // 4. The shape pass rewrites C in place.
-  Transition(list, change, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  color_.RecordShape(list, slot,
-                     {.change = change, .basis = basis, .gauss = gauss, .peaks = peaks, .history = history, .detail = detail,
-                      .atlas = atlas, .bands = bands, .settings = config_.look.shape, .sdr = color::IsSdr(encode.encoding)});
-  Transition(list, change, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  // 5. The change field's own stabiliser: the same field, after the shape, averaged along the vectors so NR's
+  //    residual stops shimmering where the network is unsure. It reads and writes the field the decode consumes,
+  //    so the result is simply the other buffer of the pair, and the decode sees a field that has been through the
+  //    same history as the picture it describes.
+  if (look_ready && set_->look.plan.change) {
+    const uint32_t current = set_->look.change_current;
+    ID3D12Resource* const stable = set_->look.change_history[current].Get();
+    Transition(list, stable, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    color_.RecordChangeStabilize(list, slot,
+                                 {.change = change, .previous = set_->look.change_history[1u - current].Get(), .current = stable,
+                                  .image = set_->look.plan.image,
+                                  .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
+                                  .reset = (reset || !set_->look.change_valid), .motion = motion, .foveation = foveation});
+    Transition(list, stable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+    set_->look.change_current = 1u - current;
+    set_->look.change_valid = true;
+    after.texture = stable;
+  }
   return after;
 }
 
@@ -955,7 +984,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   // 4. The change field and optional look stage. The Present
   //    copy is in its own pixels with the full rect: scale (1, 1).
   const AfterNr after = RecordAfterNr(list, slot, encode, evaluated.output, evaluated.passes_run, reduced, look_ready, work.upsampling,
-                                      StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), look_reset);
+                                      StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), work.foveation, look_reset);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source};
   }
@@ -1067,7 +1096,7 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   }
   // 4. The change field and optional look stage.
   const AfterNr after = RecordAfterNr(list, slot, encode, evaluated.output, evaluated.passes_run, reduced, look_ready, work.upsampling,
-                                      StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), look_reset);
+                                      StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), work.foveation, look_reset);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source,
             .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
@@ -1208,7 +1237,7 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
   // 4. The change field and optional look stage. The stabiliser
   // runs on the game's own vectors (`inputs`, not `nr_inputs`), since it acts on the image, not the canvas.
   const AfterNr after = RecordAfterNr(list, slot, encode, evaluated.output, evaluated.passes_run, reduced, look_ready, work.upsampling,
-                                      StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), look_reset);
+                                      StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), work.foveation, look_reset);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source,
             .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};

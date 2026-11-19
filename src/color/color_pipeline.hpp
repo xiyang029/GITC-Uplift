@@ -190,6 +190,18 @@ struct ShapePass {
   bool sdr = false;
 };
 
+// The change field's own stabiliser (shaders/change_stabilize_cs.hlsl), after the shape: NR's output flickers where its input is still.
+struct ChangeStabilizePass {
+  ID3D12Resource* change = nullptr;    // this frame's C, NON_PIXEL_SHADER_RESOURCE
+  ID3D12Resource* previous = nullptr;  // last frame's stabilised C, NON_PIXEL_SHADER_RESOURCE
+  ID3D12Resource* current = nullptr;   // this frame's, UNORDERED_ACCESS, the image size
+  nr::Size image;
+  float rate = 1.f;                    // look::StabilizeRate
+  bool reset = false;
+  StabilizeMotion motion;              // reproject along the game's vectors; null resource: the static sample
+  nr::foveation::Grid foveation;       // map motion-vector endpoints into the nonuniform work grid
+};
+
 // v2 design §3.10: a pass's own strengths between NR passes.
 struct ResolveStrengthsPass {
   ID3D12Resource* given = nullptr;     // the pass's input, NON_PIXEL_SHADER_RESOURCE
@@ -254,6 +266,7 @@ class ColorPipeline {
   bool RecordStabilize(ID3D12GraphicsCommandList* list, uint32_t slot, const StabilizePass& pass);
   bool RecordDetail(ID3D12GraphicsCommandList* list, uint32_t slot, const StabilizePass& pass);
   bool RecordShape(ID3D12GraphicsCommandList* list, uint32_t slot, const ShapePass& pass);
+  bool RecordChangeStabilize(ID3D12GraphicsCommandList* list, uint32_t slot, const ChangeStabilizePass& pass);
   bool RecordResolve(ID3D12GraphicsCommandList* list, uint32_t slot, const ResolveStrengthsPass& pass);
   // Keep faces: the pyramid of the pass's weighted change (one dispatch per level, a UAV barrier on the atlas between them), the combine, and Show the face
   // mask's tint of the mask (NON_PIXEL_SHADER_RESOURCE) into the target (UNORDERED_ACCESS) at `size`. Each: false (logged, nothing recorded) when slot is out
@@ -300,6 +313,7 @@ class ColorPipeline {
   Microsoft::WRL::ComPtr<ID3D12PipelineState> pyramid_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> stabilize_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> shape_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> change_stabilize_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> resolve_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> faces_pipeline_;  // Keep faces
   // A null entry records a format whose pipeline could not be built, so it is not retried every frame.

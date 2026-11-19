@@ -61,6 +61,8 @@ inline constexpr uint32_t KEEP_FACES_HERE = 1u << 12u;
 inline constexpr uint32_t KEEP_FACES_ROW = 1u << 13u;
 // Keep faces' own sliders (Face protection, Lighting scale): hidden while Keep faces is off, and greyed with it where it cannot run.
 inline constexpr uint32_t KEEP_FACES_OWN = 1u << 14u;
+// A UINT row that is a knob rather than a size: it draws a slider whatever its range, instead of a typed field.
+inline constexpr uint32_t SLIDER = 1u << 15u;
 }  // namespace setting_flags
 
 // How far past its slider's end a FLOAT accepts a typed value (Ctrl+click), as a multiple of that end.
