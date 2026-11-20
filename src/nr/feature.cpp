@@ -94,15 +94,13 @@ NVSDK_NGX_Result Feature::Evaluate(ID3D12GraphicsCommandList* list, const Evalua
   parameters_->Set(keys::ENABLED, inputs.bypass ? 0 : 1);
   parameters_->Set(keys::UI_CORRECTION, inputs.ui_correction ? 1 : 0);
   parameters_->Set(keys::DEPTH_INVERTED, inputs.depth_inverted);
-  // The 4-bit kernels borrow the runtime's Model A buffers through the NvAPI hook. Bracket every
-  // evaluation (whatever the model) so the layers capture work counters, then verify our kernels ran.
+  // Bracket each evaluation so the NvAPI layers can verify the requested model ran.
   DlssNr::Nvfp4::BeginEvaluation(requested_preset_);
   const NVSDK_NGX_Result result = snippet_.EvaluateFeature(list, handle_, parameters_);
   DlssNr::Nvfp4::EndEvaluation(list);
   if (DlssNr::Nvfp4::IsNvfp4(requested_preset_) && !DlssNr::Nvfp4::OursRan(true)) {
-    // No fallback: the runtime's own Model A output is never shown for a pass that asked for 4-bit.
-    // Returning a failure reuses Session's EVALUATE_FAILED path (failure count + EnterFailed after 3).
-    Logf(LogLevel::ERR, "NR 4-bit model {} did not run its kernels ({}); refusing this pass, no fallback",
+    // Use the session failure path rather than showing the runtime model as a fallback.
+    Logf(LogLevel::ERR, "NR model {} did not run as requested ({}); refusing this pass, no fallback",
          requested_preset_, DlssNr::Nvfp4::Problem());
     return NVSDK_NGX_Result_FAIL_PlatformError;
   }

@@ -14,20 +14,18 @@ namespace uplift::ui {
 namespace {
 
 constexpr std::array<std::string_view, 3> MODELS = {"Style A", "Style B", "Style C"};
-constexpr std::array<std::string_view, 7> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8",
-                                                         "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one",
-                                                         "NVFP4: B feed-forward"};
-constexpr std::array<std::string_view, 7> PASS_NETWORKS = {"Same as pass 1", "A: Legacy", "B: Small FP8",
-                                                           "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one",
-                                                           "NVFP4: B feed-forward"};
-// A network preset is stored as the NGX preset number (0,1,2 or the four-bit 4/15/16/17), but the UI's
-// CHOICE rows work on a 0-based option index. Map between them in one place. The pass-in-one pair is 16 before
-// 15 because the preset numbers do not follow the option order: 16 is the double model ("the look of two"),
-// 15 the triple one, exactly as OptiScaler's own menu lists them.
-constexpr std::array<uint32_t, 7> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 16u, 15u, 17u};
-// One label and one preset per row: a mismatch would silently map an option to another network.
+constexpr std::array<std::string_view, 11> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8",
+                                                          "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one",
+                                                          "NVFP4: B feed-forward", "FP8: 2x in one", "FP8: 3x in one",
+                                                          "FP8: 2x in one v2", "FP8: 3x in one v2"};
+constexpr auto PASS_NETWORKS = [] {
+  auto choices = NR_NETWORKS;
+  choices[0] = "Same as pass 1";
+  return choices;
+}();
+// Choice order differs from NGX preset order: NVFP4 2x is 16, 3x is 15; FP8 uses 18-21.
+constexpr std::array<uint32_t, 11> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 16u, 15u, 17u, 18u, 19u, 20u, 21u};
 static_assert(NR_NETWORKS.size() == NETWORK_PRESET_VALUES.size());
-static_assert(PASS_NETWORKS.size() == NETWORK_PRESET_VALUES.size());
 
 double NetworkPresetIndex(uint32_t preset) {
   const auto it = std::find(NETWORK_PRESET_VALUES.begin(), NETWORK_PRESET_VALUES.end(), preset);
@@ -1479,7 +1477,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::PLACEMENT,
         .label = "Network preset",
-        .tooltip = "Which NR network runs.",
+        .tooltip = "Which NR network runs. The FP8 models use NVIDIA's own FP8 kernels with our weights (RTX 40/50); the NVFP4 models use our 4-bit kernels.",
         .choices = NR_NETWORKS,
         .flags = RESTARTS_HISTORY | NETWORK_PRESET,
         .get = [](const Settings& s) { return NetworkPresetIndex(s.preset); },
@@ -2069,7 +2067,7 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .kind = SettingKind::CHOICE,
           .section = SettingSection::PASSES,
           .label = "Network preset",
-          .tooltip = "Which NR network this pass runs. Same as pass 1 uses the Setup network.",
+          .tooltip = "Which NR network this pass runs. Same as pass 1 uses the Setup network. The FP8 models use NVIDIA's own FP8 kernels with our weights (RTX 40/50).",
           .choices = PASS_NETWORKS,
           .flags = PASS_SWITCH | NETWORK_PRESET | RESTARTS_HISTORY,
           .get = &PassPresetGet<Index>,

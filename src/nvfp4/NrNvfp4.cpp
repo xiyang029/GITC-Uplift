@@ -7,6 +7,7 @@
 #include <d3d12.h>
 
 #include "NrFfnV2.h"
+#include "NrFp8.h"
 #include "NrNet4.h"
 #include "NrSwin4.h"
 
@@ -36,14 +37,17 @@ std::filesystem::path gAssets;
 bool gAskedDestroy = false;
 std::string gEnableProblem; // a layer that could not be switched on: nothing can run
 std::string gRefused;       // a path that cannot run these models at all
-bool gOurs = false;         // the evaluation in progress asked for a 4-bit model
-bool gPassInOne = false;
+bool gOurs = false;         // the current evaluation requested a local model
 bool gFeedForwardOnly = false; // ... and only its feed-forward is ours (Model B)
 std::string gSetMissing;     // the pass-in-one model asked for has no weight files: nothing else is run in its place
 Work gBefore;
 unsigned gMissed = 0; // evaluations in a row that asked for our kernels and did not get them
 std::string gWhy;     // why the last of them did not
 bool gRunning = false, gToldFailed = false;
+// The FP8 pass-in-one models (NrFp8): loaded beside the 4-bit layers, independent of them (they run on RTX 40 too).
+std::string gFp8Problem;   // the FP8 sets could not be loaded
+bool gFp8 = false;         // the evaluation in progress asked for an FP8 model
+unsigned long long gFp8Faults = 0, gFp8Completed = 0;
 
 void Say(const std::string& line)
 {
@@ -138,16 +142,16 @@ void SetLog(void (*log)(const char* line))
     NrFfnV2::SetLog(log);
     NrSwin4::SetLog(log);
     NrNet4::SetLog(log);
+    NrFp8::SetLog(log);
 }
 
 void* WrapNvapi(unsigned id, void* original)
 {
     if (!original)
         return original;
-    // The rest-of-the-network layer outermost (it recognises Model A by the runtime's own sequence of launches), then
-    // the fused blocks: each of their launches replaces one of the runtime's, so the feed-forward layer below still
-    // counts the launches of an evaluation as the runtime made them.
-    return NrNet4::WrapNvapi(id, NrSwin4::WrapNvapi(id, NrFfnV2::WrapNvapi(id, original)));
+    // FP8 and NrNet4 inspect the original launch sequence; NrSwin4 replaces launches one for one
+    // so NrFfnV2 can still count them.
+    return NrFp8::WrapNvapi(id, NrNet4::WrapNvapi(id, NrSwin4::WrapNvapi(id, NrFfnV2::WrapNvapi(id, original))));
 }
 
 void Configure(bool wanted, const std::filesystem::path& assets)
@@ -213,6 +217,17 @@ void Configure(bool wanted, const std::filesystem::path& assets)
         NrNet4::Disable();
         failed("split blocks and transformer", e);
     }
+    // A missing FP8 package must not disable the 4-bit models.
+    gFp8Problem.clear();
+    try
+    {
+        NrFp8::Enable(assets / L"fp8");
+    }
+    catch (const std::exception& e)
+    {
+        gFp8Problem = std::string("FP8 models: ") + e.what();
+        Say("FAILED to load the FP8 models, so a pass that asks for one is not applied: " + std::string(e.what()));
+    }
     // Idle until an evaluation asks: other users of the same NvAPI calls (DLSS itself) pass straight through.
     PauseForEvaluation(true, false);
     gMissed = 0;
@@ -227,8 +242,22 @@ void BeginEvaluation(unsigned requestedPreset)
 {
     std::lock_guard guard(gMutex);
     gOurs = IsNvfp4(requestedPreset);
-    gPassInOne = IsPassInOne(requestedPreset);
     gFeedForwardOnly = IsModelBFeedForward(requestedPreset);
+    gFp8 = IsFp8(requestedPreset);
+    if (gFp8)
+    {
+        // FP8 uses the runtime's kernels; keep the 4-bit layers paused.
+        PauseForEvaluation(true, false);
+        gSetMissing.clear();
+        const unsigned set = Fp8Set(requestedPreset);
+        if (gOn && gFp8Problem.empty() && !NrFp8::SetComplete(set))
+            gSetMissing = "missing FP8 weights (nvfp4/fp8/fp8_set" + std::to_string(set) + ".txt / .bin)";
+        NrFp8::UseSet(gSetMissing.empty() && gFp8Problem.empty() ? set : 0);
+        gFp8Faults = NrFp8::Faults();
+        gFp8Completed = NrFp8::Completed();
+        return;
+    }
+    NrFp8::UseSet(0);
     // A pass-in-one model is the same kernels with its own set of weights. The set must be chosen first: each
     // family checks the files of the set it will actually use. Model B's feed-forward has its own weights and no set
     // of its own: it runs the one set its folder carries.
@@ -256,6 +285,8 @@ void BeginEvaluation(unsigned requestedPreset)
 
 void EndEvaluation(ID3D12GraphicsCommandList* list)
 {
+    NrFp8::EndEvaluation(list);
+    NrFp8::UseSet(0);
     NrFfnV2::EndEvaluation(list);
     NrSwin4::EndEvaluation(list);
     NrNet4::EndEvaluation(list);
@@ -269,7 +300,20 @@ bool OursRan(bool whole)
         return true;
     gRefused.clear();
     std::string why;
-    if (!gOn)
+    if (gFp8)
+    {
+        if (!gOn)
+            why = "the FP8 models were not loaded";
+        else if (!gFp8Problem.empty())
+            why = gFp8Problem;
+        else if (!gSetMissing.empty())
+            why = gSetMissing;
+        else if (NrFp8::Faults() != gFp8Faults)
+            why = NrFp8::Problem();
+        else if (NrFp8::Completed() == gFp8Completed)
+            why = "the FP8 model did not see this pass's evaluation (" + NrFp8::Status(false) + ")";
+    }
+    else if (!gOn)
         why = "the 4-bit kernels were not loaded";
     else if (!gEnableProblem.empty())
         why = gEnableProblem;
@@ -299,8 +343,10 @@ bool OursRan(bool whole)
     if (why.empty())
     {
         if (!gRunning)
-            Say(gFeedForwardOnly ? "running: this pass is Model B, its feed-forward in our 4-bit kernels | " + NrFfnV2::Status(false)
-                                 : "running: this pass is our 4-bit kernels | " + NrSwin4::Status(false) + " | " + NrNet4::Status(false));
+            Say(gFp8 ? "running: this pass is an FP8 model of ours (NVIDIA's kernels with our weights) | " + NrFp8::Status(false)
+                     : gFeedForwardOnly
+                           ? "running: this pass is Model B, its feed-forward in our 4-bit kernels | " + NrFfnV2::Status(false)
+                           : "running: this pass is our 4-bit kernels | " + NrSwin4::Status(false) + " | " + NrNet4::Status(false));
         gRunning = true;
         gToldFailed = false;
         gMissed = 0;
@@ -309,14 +355,15 @@ bool OursRan(bool whole)
     }
     gRunning = false;
     gWhy = std::move(why);
-    const bool certain = !gEnableProblem.empty() || !gSetMissing.empty();
+    // FP8 does not need the 4-bit recognition grace period.
+    const bool certain = gFp8 || !gEnableProblem.empty() || !gSetMissing.empty();
     if (gMissed < kStarting || certain)
         gMissed = certain ? kStarting : gMissed + 1;
     if (gMissed >= kStarting && !gToldFailed)
     {
         gToldFailed = true;
-        Say("FAILED: the pass asked for a 4-bit model and it did not run, so the pass is not applied (no fallback to "
-            "the original model): " + gWhy);
+        Say(std::string("FAILED: the pass asked for ") + (gFp8 ? "an FP8" : "a 4-bit") +
+            " model and it did not run, so the pass is not applied (no fallback to the original model): " + gWhy);
     }
     return false;
 }
@@ -352,11 +399,12 @@ void Release(ID3D12Device* device)
     NrFfnV2::ReleaseDevice(device);
     NrSwin4::ReleaseDevice(device);
     NrNet4::ReleaseDevice(device);
+    NrFp8::ReleaseDevice(device);
 }
 
 std::string Status()
 {
     return "feed-forward: " + NrFfnV2::Status(true) + " | fused blocks: " + NrSwin4::Status(true) + " | network: " +
-           NrNet4::Status(true);
+           NrNet4::Status(true) + " | FP8 models: " + NrFp8::Status(true);
 }
 } // namespace DlssNr::Nvfp4

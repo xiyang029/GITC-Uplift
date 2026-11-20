@@ -134,6 +134,7 @@ add_library(uplift_nr STATIC
   src/nvfp4/NrFfnV2.cpp
   src/nvfp4/NrSwin4.cpp
   src/nvfp4/NrNet4.cpp
+  src/nvfp4/NrFp8.cpp
   src/nvfp4/NrNvfp4.cpp)
 target_include_directories(uplift_nr PUBLIC "${CMAKE_SOURCE_DIR}/src")
 # The NVFP4 sources use their own short includes and NVIDIA's nvapi.h for the CUDA-on-D3D12 entry points.
