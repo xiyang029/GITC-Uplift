@@ -1,5 +1,4 @@
 #include "../src/color/shader_values.h"
-#include "foveation.hlsli"
 #include "look_common.hlsli"
 #include "vk_common.hlsli"
 
@@ -25,10 +24,6 @@ cbuffer ChangeStabilizeConstants : register(b0) {
   uint motion_height;
   float motion_scale_x;  // the vectors' scale into the pixels of their rect (MV.Scale x MotionScale)
   float motion_scale_y;
-  uint foveation_x;     // map work-grid coordinates to/from the full image
-  uint foveation_y;
-  float foveation_gmax_x;
-  float foveation_gmax_y;
 };
 
 static const uint FLAG_RESET = UPLIFT_CHANGE_STABILIZE_FLAG_RESET;      // this frame starts the history afresh
@@ -55,12 +50,10 @@ Texture2D<float4> previous_texture : register(t1);  // last frame's stabilised C
 Texture2D<float4> motion_texture : register(t2);    // current -> previous
 UPLIFT_IMAGE_FORMAT("rgba16f") RWTexture2D<float4> current_texture : register(u0);  // this frame's stabilised C, next frame's history
 
-// u(p) in full-image UV, current -> previous. NR's vectors are in the source image's space; convert each endpoint
-// through the foveation warp before reading or reprojecting the work-grid history.
-float2 MotionAt(float2 full_uv) {
-  if ((flags & FLAG_VECTORS) == 0u) return float2(0.f, 0.f);
+// current -> previous in work-image UV. The host binds vectors already remapped for foveation.
+float2 MotionAt(float2 work_uv) {
   const uint2 rect = uint2(motion_width, motion_height);
-  const uint2 texel = uint2(motion_x, motion_y) + min(uint2(full_uv * float2(rect)), rect - 1u);
+  const uint2 texel = uint2(motion_x, motion_y) + min(uint2(work_uv * float2(rect)), rect - 1u);
   const float2 motion = motion_texture.Load(int3(texel, 0)).xy * float2(motion_scale_x, motion_scale_y) / float2(rect);
   return (all(isfinite(motion)) ? motion : float2(0.f, 0.f));
 }
@@ -109,22 +102,12 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, uint3 gro
     float confidence = 1.f;
     if ((flags & (FLAG_MOTION | FLAG_VECTORS)) == (FLAG_MOTION | FLAG_VECTORS)) {
       const float2 work_uv = (float2(id.xy) + 0.5f) / float2(image);
-      const uint2 packed = uint2(foveation_x, foveation_y);
-      const float2 gmax = float2(foveation_gmax_x, foveation_gmax_y);
-      const FovAxis fov_x = FovDecode(packed.x, gmax.x);
-      const FovAxis fov_y = FovDecode(packed.y, gmax.y);
-      float2 full_uv = work_uv;
-      if (FovAxisOn(packed.x)) full_uv.x = FovUnwarpAxis1(work_uv.x, fov_x);
-      if (FovAxisOn(packed.y)) full_uv.y = FovUnwarpAxis1(work_uv.y, fov_y);
-      const float2 previous_full_uv = full_uv + MotionAt(full_uv);
-      const bool inside = all(previous_full_uv >= 0.f) && all(previous_full_uv <= 1.f);
+      const float2 work_motion = MotionAt(work_uv);
+      const float2 previous_work_uv = work_uv + work_motion;
+      const bool inside = all(previous_work_uv >= 0.f) && all(previous_work_uv <= 1.f);
       if (!inside) {
         confidence = 0.f;  // off screen: nothing to reproject from
       } else {
-        float2 previous_work_uv = previous_full_uv;
-        if (FovAxisOn(packed.x)) previous_work_uv.x = FovWarpAxis1(previous_full_uv.x, fov_x);
-        if (FovAxisOn(packed.y)) previous_work_uv.y = FovWarpAxis1(previous_full_uv.y, fov_y);
-        const float2 work_motion = previous_work_uv - work_uv;
         if (length(work_motion * float2(image)) >= MIN_MOTION_PIXELS) {
           const float4 reprojected = RegionBilinear(previous_texture, int2(0, 0), int2(image), previous_work_uv * float2(image) - 0.5f);
           const float error_static = PredictionError(history, current);

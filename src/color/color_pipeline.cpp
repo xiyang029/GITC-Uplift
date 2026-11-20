@@ -119,7 +119,6 @@ std::array<uint32_t, PASS_CONSTANTS> ChangeStabilizeConstants(const ChangeStabil
   return {
       pass.image.width, pass.image.height, Bits(pass.rate), flags, motion.vectors.rect.x, motion.vectors.rect.y,
       (vectors ? motion.vectors.rect.width : 1u), (vectors ? motion.vectors.rect.height : 1u), Bits(motion.scale_x), Bits(motion.scale_y),
-      pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
   };
 }
 

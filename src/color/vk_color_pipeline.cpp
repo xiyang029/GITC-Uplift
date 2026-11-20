@@ -223,10 +223,6 @@ std::array<uint32_t, PASS_CONSTANTS> ChangeStabilizeConstants(const VkChangeStab
       (vectors ? motion.rect.height : 1u),
       Bits(motion.scale_x),
       Bits(motion.scale_y),
-      pass.foveation.x.packed,
-      pass.foveation.y.packed,
-      Bits(pass.foveation.x.gmax),
-      Bits(pass.foveation.y.gmax),
   };
 }
 

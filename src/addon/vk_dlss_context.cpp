@@ -1499,7 +1499,8 @@ vk::NrImage VkDlssContext::PresentMotion() {
   // None once the copies stopped. The frame no longer advances then, so the last slot would be bound again at every present.
   if (!CanCopy() || !pipeline_) return {};
   uint64_t age = 0u;
-  const vk::NrImage copy = pipeline_->PresentMotion(completion_->Timeline().CurrentFrame(), &age);
+  const uint64_t max_age = present_layout_.foveation.active() ? 0u : sources::PRESENT_MOTION_MAX_AGE;
+  const vk::NrImage copy = pipeline_->PresentMotion(completion_->Timeline().CurrentFrame(), &age, max_age);
   if (facts_.present_motion_copy) {
     PresentMotionCounters& counters = present_motion_counters_;
     ++counters.presents;
@@ -1539,7 +1540,8 @@ ui::MotionGap VkDlssContext::PresentMotionGap() const {
   if (!CanCopy() || !pipeline_) return ui::MotionGap::NONE;  // Setup greys DLSS's vectors with the fixed reason then
   // The latest evaluate's "no readable vectors" holds while the copies are not asked for, until an evaluate with readable ones.
   if (present_motion_gap_ != ui::MotionGap::NONE) return present_motion_gap_;
-  if (!facts_.present_motion_copy || !dlss_seen_ || pipeline_->HasPresentMotion(completion_->Timeline().CurrentFrame())) return ui::MotionGap::NONE;
+  const uint64_t max_age = present_layout_.foveation.active() ? 0u : sources::PRESENT_MOTION_MAX_AGE;
+  if (!facts_.present_motion_copy || !dlss_seen_ || pipeline_->HasPresentMotion(completion_->Timeline().CurrentFrame(), max_age)) return ui::MotionGap::NONE;
   // No evaluate for a while is the game's DLSS pausing (a menu, a loading screen), not a busy slot or constants ring.
   return (dlss_paused_ ? ui::MotionGap::DLSS_PAUSED : ui::MotionGap::NO_COPY);
 }

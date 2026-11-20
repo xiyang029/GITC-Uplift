@@ -123,6 +123,11 @@ color::StabilizeMotion StabilizeMotionOf(const nr::BoundResource& motion, float 
   return {.vectors = {.resource = motion.resource, .rect = *rect}, .view_format = *view_format, .scale_x = scale_x, .scale_y = scale_y};
 }
 
+static color::StabilizeMotion WorkStabilizeMotionOf(const nr::FrameInputs& inputs, nr::Size image) {
+  // Exclude mirrored padding from stabilization.
+  return StabilizeMotionOf({.resource = inputs.motion.resource, .rect = {0u, 0u, image.width, image.height}}, 1.f, 1.f);
+}
+
 NrPipeline::NrPipeline(ID3D12Device* device, nr::Session& session, nr::Timeline& timeline)
     : device_(device), session_(session), timeline_(timeline) {}
 
@@ -653,7 +658,7 @@ void NrPipeline::ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID
 
 NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
                                               ID3D12Resource* nr_output, uint32_t passes_run, bool reduced, bool look_ready,
-                                              color::Upsampling upsampling, const color::StabilizeMotion& motion, nr::foveation::Grid foveation, bool reset) {
+                                              color::Upsampling upsampling, const color::StabilizeMotion& motion, bool reset) {
   if (set_->look.plan != LookPlan{}) {
     set_->look.last_use = slot_marks_[slot];
   }
@@ -734,7 +739,7 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
                                  {.change = change, .previous = set_->look.change_history[1u - current].Get(), .current = stable,
                                   .image = set_->look.plan.image,
                                   .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
-                                  .reset = (reset || !set_->look.change_valid), .motion = motion, .foveation = foveation});
+                                  .reset = (reset || !set_->look.change_valid), .motion = motion});
     Transition(list, stable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
     set_->look.change_current = 1u - current;
     set_->look.change_valid = true;
@@ -845,11 +850,13 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   if (!timeline_.IsComplete(slot_marks_[slot])) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
   const nr::Size size = {static_cast<uint32_t>(description.Width), description.Height};
   const WorkLayout work = ResolveLayout(layout, size);
+  const bool foveated = work.foveation.active();
   if (const nr::SkipReason problem = EnsureIntermediates({
           .sizes = {.output = size, .image = work.image, .canvas = work.canvas},
           .copy_format = format->copy_format,
           .source_bytes_per_pixel = format->bytes_per_pixel,
           .kind = TargetKind::PRESENT,
+          .canvas_motion = foveated,
           .foveation = work.foveation,
       });
       problem != nr::SkipReason::NONE) {
@@ -870,21 +877,27 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   // there is one, from the slot the frame it was made for selects (PresentMotionSlotOf).
   nr::FrameInputs inputs = {.ui_correction = config_.present_ui_correction, .reset_hint = reset_hint};
   MotionSource motion_source = MotionSource::NONE;
+  bool flip_y = false;
   std::array<uint64_t, MOTION_COPY_SLOTS> copy_frames = {};
   for (size_t index = 0u; index < MOTION_COPY_SLOTS; ++index) {
     copy_frames[index] = (motion_copies_.textures[index] ? motion_copies_.frames[index] : 0u);
   }
-  const PresentMotionPick pick = PickPresentMotion(copy_frames, frame);
+  // Foveation requires current-frame vectors; the uniform grid can reuse a recent copy.
+  const PresentMotionPick pick = PickPresentMotion(copy_frames, frame, foveated ? 0u : PRESENT_MOTION_MAX_AGE);
   if (pick.slot) {
-    // This frame's copy, else the newest at most PRESENT_MOTION_MAX_AGE frames older: still DLSS's vectors, so no provider switch.
     const size_t copy = *pick.slot;
     inputs.motion = {.resource = motion_copies_.textures[copy].Get()};  // full subrect, scale (1, 1)
     motion_copies_.last_use[copy] = slot_marks_[slot];
     motion_source = MotionSource::PRESENT_COPY;
   } else if (target.dlss_motion.resource != nullptr && target.dlss_motion_raw) {
-    // Direct3D 11's ring slot holds DLSS's raw vectors (its rect the evaluate's region, at (0, 0)). They go through the motion
-    // copy here, at the region's size with MV.Scale x MotionScale applied, as the Direct3D 12 copy above was made, so every Present source is filtered.
-    if (const nr::BoundResource converted =
+    // Fold the raw D3D11 scale and flip into the warp rather than copying twice.
+    if (foveated) {
+      inputs.motion = target.dlss_motion;
+      inputs.motion_scale_x = target.dlss_motion_scale_x;
+      inputs.motion_scale_y = target.dlss_motion_scale_y;
+      flip_y = target.dlss_motion_flip;
+      motion_source = MotionSource::PRESENT_COPY;
+    } else if (const nr::BoundResource converted =
             ConvertDlssMotion(list, slot, target.dlss_motion, target.dlss_motion_scale_x, target.dlss_motion_scale_y, target.dlss_motion_flip);
         converted.resource != nullptr) {
       inputs.motion = converted;  // full subrect, scale (1, 1)
@@ -906,10 +919,8 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
       motion_source = MotionSource::LAUNCHPAD;
     }
   }
-  // 2026-11-05 (Depth input): this frame's depth copy, made at the evaluate that closed it (RecordDepthCopy), else -- as with
-  // the motion vectors -- the newest at most PRESENT_MOTION_MAX_AGE frames older: a view a frame or two old still separates what
-  // DLSSNR's motion needs it to, where NR's own estimate without any depth does not.
-  if (depth_copies_.textures[0]) {
+  // Unwarped depth cannot align with the warped colour.
+  if (!foveated && depth_copies_.textures[0]) {
     std::array<uint64_t, MOTION_COPY_SLOTS> depth_frames = {};
     for (size_t index = 0u; index < MOTION_COPY_SLOTS; ++index) {
       depth_frames[index] = (depth_copies_.textures[index] ? depth_copies_.frames[index] : 0u);
@@ -923,6 +934,11 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   if (motion_source != MotionSource::LAUNCHPAD && launchpad_motion_.texture) {
     RetireLaunchpadMotion();  // Launchpad's vectors stopped coming: its copy goes, behind the recordings that used it
   }
+  if (foveated && motion_source == MotionSource::PRESENT_COPY && !ConvertWorkMotion(list, slot, inputs, work, flip_y)) {
+    motion_source = MotionSource::NONE;
+  }
+  // Without current vectors, restart foveated history rather than treating it as stationary.
+  if (foveated && inputs.motion.resource == nullptr) inputs.reset_hint = true;
   if (motion_copies_.textures[0] || present_motion_counters_.evaluates != 0u) {
     PresentMotionCounters& counters = present_motion_counters_;
     ++counters.presents;
@@ -981,10 +997,10 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
     return {.recorded = true, .reason = evaluated.reason, .from_session = nr::SessionWroteMessage(evaluated.reason),
             .motion_source = motion_source};
   }
-  // 4. The change field and optional look stage. The Present
-  //    copy is in its own pixels with the full rect: scale (1, 1).
+  // 4. The change field and optional look stage.
   const AfterNr after = RecordAfterNr(list, slot, encode, evaluated.output, evaluated.passes_run, reduced, look_ready, work.upsampling,
-                                      StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), work.foveation, look_reset);
+                                      foveated ? WorkStabilizeMotionOf(inputs, work.image)
+                                               : StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), look_reset);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source};
   }
@@ -1031,12 +1047,14 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   const uint32_t slot = next_slot_;
   if (!timeline_.IsComplete(slot_marks_[slot])) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
   const WorkLayout work = ResolveLayout(layout, size);
+  const bool foveated = work.foveation.active();
   if (const nr::SkipReason problem = EnsureIntermediates({
           .sizes = {.output = size, .image = work.image, .canvas = work.canvas},
           .copy_format = format->copy_format,
           .source_bytes_per_pixel = format->bytes_per_pixel,
           .kind = TargetKind::UAV,
-                    .foveation = work.foveation,
+          .canvas_motion = foveated,
+          .foveation = work.foveation,
       });
       problem != nr::SkipReason::NONE) {
     return {.reason = problem};
@@ -1050,7 +1068,13 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   NoteMeterBasis(part.slice.stage, target.encoding, input_scale);
   const ExposureChoice exposure = ChooseExposure(target.encoding, target.exposure, target.exposure_factor);
   ID3D12Resource* const source_copy = set_->intermediates.source_copy.Get();
-  const MotionSource motion_source = (inputs.motion.resource != nullptr ? MotionSource::DIRECT : MotionSource::NONE);
+  nr::FrameInputs nr_inputs = inputs;
+  if (foveated) {
+    ConvertWorkMotion(list, slot, nr_inputs, work);
+    nr_inputs.depth = {};  // unwarped depth edges do not match the encoded colour
+    nr_inputs.reset_hint |= nr_inputs.motion.resource == nullptr;
+  }
+  const MotionSource motion_source = (nr_inputs.motion.resource != nullptr ? MotionSource::DIRECT : MotionSource::NONE);
 
   // 1. Source copy ← the region. DLSS leaves its Output in UNORDERED_ACCESS, and so does Uplift.
   Transition(list, target.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1087,16 +1111,17 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
       .foveation = work.foveation,
   };
   if (!Encode(list, slot, encode)) return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source};
-  // 3. The NR passes, with the game's motion vectors bound in place.
-  const bool look_reset = (inputs.reset_hint || set_->intermediates.reset_pending);  // Evaluate pays the owed reset off
-  const nr::EvaluateResult evaluated = Evaluate(list, slot, inputs, controls, part.slice);
+  // 3. NR uses the motion in the same coordinates as the encoded input.
+  const bool look_reset = (nr_inputs.reset_hint || set_->intermediates.reset_pending);  // Evaluate pays the owed reset off
+  const nr::EvaluateResult evaluated = Evaluate(list, slot, nr_inputs, controls, part.slice);
   if (evaluated.output == nullptr) {
     return {.recorded = true, .reason = evaluated.reason, .from_session = nr::SessionWroteMessage(evaluated.reason),
             .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
   }
   // 4. The change field and optional look stage.
   const AfterNr after = RecordAfterNr(list, slot, encode, evaluated.output, evaluated.passes_run, reduced, look_ready, work.upsampling,
-                                      StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), work.foveation, look_reset);
+                                      foveated ? WorkStabilizeMotionOf(nr_inputs, work.image)
+                                               : StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), look_reset);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source,
             .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
@@ -1145,10 +1170,8 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
   const uint32_t slot = next_slot_;
   if (!timeline_.IsComplete(slot_marks_[slot])) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
   const WorkLayout work = ResolveLayout(layout, size);
-  // In a canvas, readable motion vectors are copied into it; unconverted ones cannot be bound there (tools/nrspike's e9).
-  const std::optional<DXGI_FORMAT> motion_format =
-      ((work.canvas != work.image && inputs.motion.resource != nullptr) ? MotionViewFormat(inputs.motion.resource->GetDesc().Format)
-                                                                        : std::nullopt);
+  const bool foveated = work.foveation.active();
+  const bool remap_motion = foveated || work.canvas != work.image;
   // Keyed on the settled work image, never the per-frame render region --
   // a game with dynamic resolution sets `size` on almost every evaluate, and the old `.output = size`
   // reallocated (and restarted NR's history on) the whole set for each step. EnsureIntermediates always
@@ -1158,8 +1181,8 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
           .sizes = {.output = work.image, .image = work.image, .canvas = work.canvas,
                     .private_color = {static_cast<uint32_t>(description.Width), description.Height}},
           .kind = TargetKind::PRE_SR,
-          .canvas_motion = motion_format.has_value(),
-                    .foveation = work.foveation,
+          .canvas_motion = foveated || (remap_motion && StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y).vectors.resource != nullptr),
+          .foveation = work.foveation,
       });
       problem != nr::SkipReason::NONE) {
     return {.reason = problem};
@@ -1194,50 +1217,27 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
       .foveation = work.foveation,
   };
   if (!Encode(list, slot, encode)) return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED};
-  // 2. In a canvas the motion vectors move into canvas pixels, mirrored like the
-  //    image, bound with the canvas as their subrect and a scale of (1, 1).
+  // 2. Remap motion into the work grid and mirror any padding.
   nr::FrameInputs nr_inputs = inputs;
-  if (motion_format) {
-    nr::Rect motion_region = inputs.motion.rect;
-    if (motion_region.width == 0u || motion_region.height == 0u) {
-      const D3D12_RESOURCE_DESC motion = inputs.motion.resource->GetDesc();
-      motion_region = {.x = 0u, .y = 0u, .width = static_cast<uint32_t>(motion.Width), .height = motion.Height};
-    }
-    ID3D12Resource* const canvas_motion = set_->intermediates.canvas_motion.Get();
-    Transition(list, canvas_motion, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    color_.RecordMotion(list, slot,
-                        {
-                            .source = inputs.motion.resource,
-                            .source_view_format = *motion_format,
-                            .region = motion_region,
-                            .target = canvas_motion,
-                            .image = work.image,
-                            .canvas = work.canvas,
-                            .scale_x = inputs.motion_scale_x * static_cast<float>(work.image.width) / static_cast<float>(motion_region.width),
-                            .scale_y = inputs.motion_scale_y * static_cast<float>(work.image.height) / static_cast<float>(motion_region.height),
-                            .foveation = work.foveation,
-                        });
-    Transition(list, canvas_motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    nr_inputs.motion = {.resource = canvas_motion};
-    nr_inputs.motion_scale_x = 1.f;
-    nr_inputs.motion_scale_y = 1.f;
-  } else if (work.canvas != work.image) {
-    nr_inputs.motion = {};  // an unreadable format in a canvas: the zero texture
+  if (remap_motion) ConvertWorkMotion(list, slot, nr_inputs, work);
+  if (foveated) {
+    nr_inputs.depth = {};
+    nr_inputs.reset_hint |= nr_inputs.motion.resource == nullptr;
   }
   // Reported as bound in place either way: a canvas copy still carries the game's own motion vectors,
   // scaled by what the caller asked for (inputs.motion_scale_x/y), not nr_inputs' own post-copy (1, 1).
   const MotionSource motion_source = (nr_inputs.motion.resource != nullptr ? MotionSource::DIRECT : MotionSource::NONE);
   // 3. NR on the canvas (or the image).
-  const bool look_reset = (inputs.reset_hint || set_->intermediates.reset_pending);  // Evaluate pays the owed reset off
+  const bool look_reset = (nr_inputs.reset_hint || set_->intermediates.reset_pending);  // Evaluate pays the owed reset off
   const nr::EvaluateResult evaluated = Evaluate(list, slot, nr_inputs, controls, part.slice);
   if (evaluated.output == nullptr) {
     return {.recorded = true, .reason = evaluated.reason, .from_session = nr::SessionWroteMessage(evaluated.reason),
             .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
   }
-  // 4. The change field and optional look stage. The stabiliser
-  // runs on the game's own vectors (`inputs`, not `nr_inputs`), since it acts on the image, not the canvas.
+  // 4. The change field and optional look stage, at the size of the unpadded work image.
   const AfterNr after = RecordAfterNr(list, slot, encode, evaluated.output, evaluated.passes_run, reduced, look_ready, work.upsampling,
-                                      StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), work.foveation, look_reset);
+                                      foveated ? WorkStabilizeMotionOf(nr_inputs, work.image)
+                                               : StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), look_reset);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source,
             .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
@@ -1284,6 +1284,27 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
   return {.recorded = true, .nr_applied = true, .passes_run = evaluated.passes_run, .reason = evaluated.reason,
           .from_session = nr::SessionWroteMessage(evaluated.reason), .motion_source = motion_source,
           .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
+}
+
+bool NrPipeline::ConvertWorkMotion(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs& inputs, const WorkLayout& work, bool flip_y) {
+  const color::StabilizeMotion source = StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y);
+  inputs.motion = {};  // do not bind the unwarped source if conversion fails
+  const nr::Rect region = source.vectors.rect;
+  ID3D12Resource* const target = set_->intermediates.canvas_motion.Get();
+  if (source.vectors.resource == nullptr || target == nullptr) return false;
+  Transition(list, target, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  const bool recorded = color_.RecordMotion(list, slot,
+      {.source = source.vectors.resource, .source_view_format = source.view_format, .region = region, .target = target,
+       .image = work.image, .canvas = work.canvas,
+       .scale_x = source.scale_x * static_cast<float>(work.image.width) / static_cast<float>(region.width),
+       .scale_y = source.scale_y * static_cast<float>(work.image.height) / static_cast<float>(region.height),
+       .flip_y = flip_y, .foveation = work.foveation});
+  Transition(list, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  if (!recorded) return false;
+  inputs.motion = {.resource = target};
+  inputs.motion_scale_x = 1.f;
+  inputs.motion_scale_y = 1.f;
+  return true;
 }
 
 bool NrPipeline::RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& motion, float scale_x, float scale_y, bool flip_y, float offset_x, float offset_y) {

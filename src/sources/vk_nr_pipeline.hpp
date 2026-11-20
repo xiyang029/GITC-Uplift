@@ -106,7 +106,7 @@ class VkNrPipeline final : private nr::PassResolver {
   // Split chain: each recording below runs `part` of the chain (its Session slice, on its stage group's set); the default is the whole chain on
   // set 0, the single chain of before the split.
   PipelineResult RecordAfterDlss(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
-                                 const WorkLayout& layout = {}, const ChainPart& part = {});
+                                 const WorkLayout& layout = {}, const ChainPart& part = {}, bool motion_is_canvas = false);
   // Before upscaling: NR on the region of the game's Color (`color.resource`: a sampled image view in
   // SHADER_READ_ONLY_OPTIMAL, only read) before DLSS-SR upscales it, inside the game's command buffer right before DLSS's evaluate. The region is resampled
   // into the SETTLED work image of `layout` (the set is keyed on it, never on the per-frame render region), mirror-padded into the floor
@@ -164,10 +164,9 @@ class VkNrPipeline final : private nr::PassResolver {
   // Says why no copy was made (the per-second counters).
   PresentMotionWrite RecordPresentMotion(VkCommandBuffer buffer, const color::VkSampledView& motion, nr::Rect region, float scale_x, float scale_y,
                                          uint64_t frame, bool flip_y = false, float offset_x = 0.f, float offset_y = 0.f);
-  // The copy for `frame` (PickPresentMotion: its own, else the newest at most PRESENT_MOTION_MAX_AGE frames older, whose age goes to `age`), or an empty one;
-  // stamps its last use with the current mark (NR or the bridge reads it in this frame).
-  [[nodiscard]] vk::NrImage PresentMotion(uint64_t frame, uint64_t* age = nullptr);
-  [[nodiscard]] bool HasPresentMotion(uint64_t frame) const;  // PresentMotion without the stamp
+  // Pick the newest copy within `max_age` and mark it in use. Zero allows only this frame.
+  [[nodiscard]] vk::NrImage PresentMotion(uint64_t frame, uint64_t* age, uint64_t max_age);
+  [[nodiscard]] bool HasPresentMotion(uint64_t frame, uint64_t max_age) const;  // PresentMotion without the stamp
   // The motion copy's pipeline, built now so its first compile stays out of the hooked evaluate. False when it could not be built.
   bool PreparePresentMotion() { return color_.PrepareMotion(); }
   // The slots, freed now when the GPU has passed them, else at their marks (FreeFinished); the ring returns to PRESENT_MOTION_MIN_SLOTS.
@@ -193,7 +192,7 @@ class VkNrPipeline final : private nr::PassResolver {
     vk::NrImage b;
     // RG16F at the canvas. Made at the first frame that needs one, and freed with the set.
     vk::NrImage zero_motion;    // MotionVectors = None (or Before upscaling's canvas without readable vectors)
-    vk::NrImage canvas_motion;  // Before upscaling in a canvas: the game's vectors copied in, mirrored like the image
+    vk::NrImage canvas_motion;  // vectors remapped into a warped image or a padded canvas
     vk::NrImage private_color;  // Before upscaling: RGBA16F at the game's Color dimensions, what DLSS reads as Color
     vk::NrImage change;         // required RGBA16F change field at the work image
     SetSizes sizes;             // the canvas is the work image, padded before upscaling below the floor
@@ -391,11 +390,14 @@ class VkNrPipeline final : private nr::PassResolver {
   // The stabiliser's motion vectors (the game's own, current -> previous) with a resolved rect and their scale, or none: absent or unreadable vectors make
   // Motion change-gated static, as Direct3D 12's StabilizeMotionOf.
   [[nodiscard]] static color::VkStabilizeMotion StabilizeMotionOf(const nr::FrameInputs& inputs);
+  [[nodiscard]] static color::VkStabilizeMotion WorkStabilizeMotionOf(const nr::FrameInputs& inputs, nr::Size image);
+  bool ConvertWorkMotion(VkCommandBuffer buffer, uint32_t slot, nr::FrameInputs& inputs, const color::VkStabilizeMotion& source,
+                         const WorkLayout& work);
   // The target's input scale, and NR's history restarting when the encoding or the scale changed.
   float NoteEncoding(const VkDlssTarget& target);
   // Generate the required change field, optionally shape it, and make the writes visible to composition.
   AfterNr RecordAfterNr(VkCommandBuffer buffer, uint32_t slot, const color::VkEncodePass& encode, VkImageView nr_output, uint32_t passes_run, bool reduced, bool look_ready,
-                        color::Upsampling upsampling, const color::VkStabilizeMotion& motion, nr::foveation::Grid foveation, bool reset);
+                        color::Upsampling upsampling, const color::VkStabilizeMotion& motion, bool reset);
   void LogAllocationFailure(nr::Size size);  // once until an allocation works again
 
   vk::NrFunctions functions_;

@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "addon/reshade_api.hpp"
 #include "memory_units.hpp"
@@ -68,9 +69,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       ((descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM)
        || (descriptor.key == "ResolutionScaleAfterDlss" && settings->resolution_mode_after_dlss != ResolutionMode::CUSTOM)
        || (descriptor.key == "ResolutionScalePresent" && settings->resolution_mode_present != ResolutionMode::CUSTOM));
-  // Custom's two axes can be apart (anamorphic): then the height is reduced on its own, and a width-only test called a
-  // 100 % x 50 % frame "not reduced" -- which hid Upsampling (and Edge-aware's rows) while upsampling really runs.
-  // The pipeline decides by size (nr_pipeline.cpp: `reduced = work.image != size`), so both axes belong here.
+  // Either Custom axis or foveation can require reconstruction.
   const auto reduced = [](ResolutionMode mode, float percent, float percent_y) {
     return mode != ResolutionMode::FULL && (mode != ResolutionMode::CUSTOM || percent < 100.f || percent_y < 100.f);
   };
@@ -81,11 +80,10 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                || (row.runs == SourcePick::PRESENT && reduced(settings->resolution_mode_present, settings->resolution_scale_present, settings->resolution_scale_present)));
   };
   const bool reduced_any =
-      reduced(settings->resolution_mode, settings->resolution_scale,
-              AsymmetricAxes(*settings) ? settings->resolution_scale_y : settings->resolution_scale)
+      settings->foveation || reduced(settings->resolution_mode, settings->resolution_scale,
+                                     AsymmetricAxes(*settings) ? settings->resolution_scale_y : settings->resolution_scale)
       || std::ranges::any_of(view.setup.pass_stages, later_group_scaled);
   const bool upsampling_hidden = (descriptor.key == "Upsampling" && !reduced_any);
-  // Edge-aware's own rows matter only while Edge-aware itself does (below Full); Classic has no bands.
   const bool edge_aware_off = (!reduced_any || settings->upsampling != color::Upsampling::EDGE_AWARE);
   const bool guided_gains_hidden = (descriptor.key == "GuidedBaseGain" && edge_aware_off);
   // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
@@ -371,14 +369,13 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
             changed = true;
           }
         } else {
-          // Eight short choices fit a row: a longer set would lose its tail here (the longest today, QUALITY_MODES, has seven).
-          std::array<const char*, 8> labels = {};
-          const size_t count = std::min(descriptor.choices.size(), labels.size());
-          for (size_t index = 0u; index < count; ++index) {
-            labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
-          }
-          if (const int clicked = widgets::Segmented(label.c_str(), labels.data(), static_cast<int>(count), value);
-              clicked >= 0 && clicked != value) {
+          std::vector<const char*> labels;
+          labels.reserve(descriptor.choices.size());
+          for (const std::string_view choice : descriptor.choices) labels.push_back(choice.data());  // literals
+          const std::vector<std::string_view> why(disabled_reason.empty() ? 0u : labels.size(), disabled_reason);
+          const int clicked = widgets::Segmented(label.c_str(), labels.data(), static_cast<int>(labels.size()), value,
+                                                  why.empty() ? nullptr : why.data());
+          if (clicked >= 0 && clicked != value) {
             descriptor.set(*settings, static_cast<double>(clicked));
             changed = true;
           }

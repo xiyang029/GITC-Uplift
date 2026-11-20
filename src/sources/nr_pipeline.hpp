@@ -287,7 +287,7 @@ class NrPipeline final : private nr::PassResolver {
   ID3D12Resource* BoundMask(uint32_t slot);  // the mask copy for this recording, or null
   AfterNr RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
                         ID3D12Resource* nr_output, uint32_t passes_run, bool reduced, bool look_ready, color::Upsampling upsampling,
-                        const color::StabilizeMotion& motion, nr::foveation::Grid foveation, bool reset);
+                        const color::StabilizeMotion& motion, bool reset);
 
   LookConfig config_;
   // Keep faces: this recording's first pass ran its twin, so the later passes keep only their broad change inside the face mask. Split chain: the
@@ -303,7 +303,7 @@ class NrPipeline final : private nr::PassResolver {
     DXGI_FORMAT copy_format = DXGI_FORMAT_UNKNOWN;  // the source copy's; UNKNOWN: none (pre-SR reads Color in place)
     uint32_t source_bytes_per_pixel = 0u;
     TargetKind kind = TargetKind::PRESENT;
-    bool canvas_motion = false;                     // pre-SR in a canvas, with motion vectors to copy into it
+    bool canvas_motion = false;                     // motion to remap into a warped image or a padded canvas
     // The warped work grid the set was made for (nr/foveation.hpp). A grid that moves while the surfaces still fit restarts
     // the histories instead of reallocating: see EnsureIntermediates.
     nr::foveation::Grid foveation;
@@ -411,6 +411,7 @@ class NrPipeline final : private nr::PassResolver {
   // the zero motion, never with the raw vectors.
   nr::BoundResource ConvertLaunchpadMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const nr::BoundResource& motion, float scale_x, float scale_y,
                                            const WorkLayout& work);
+  bool ConvertWorkMotion(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs& inputs, const WorkLayout& work, bool flip_y = false);
   void NoteEncoding(color::Encoding encoding, float input_scale);
   void CommitSlot(uint32_t slot);
   bool Encode(ID3D12GraphicsCommandList* list, uint32_t slot, color::EncodePass pass);

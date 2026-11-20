@@ -661,39 +661,22 @@ inline void SegmentTip(const std::string_view& why, const std::string_view& tip)
   }
 }
 
-// A dropdown of long or many choices, where a segment row would clip its words: the Resolution modes, a later
-// pass's Runs at. The preview is the choice that runs, which is the caller's to pick and need not be the
-// stored one. Each choice carries its own reason it cannot be picked (greyed, unclickable, the reason on
-// hover after "Unavailable here: ", below its own text). The width is the row's control column, which
-// RowLabel sets. Returns the index picked this frame, or -1. A row of at most three choices that fit draws as
-// Segmented instead (this is the same fallback Segmented itself takes, one way round).
+// A dropdown for long or numerous choices. `why` and `tips` are optional per-item text.
 inline int Combo(const char* id, const char* const* english, int count, int preview,
-                 const std::string_view* why = nullptr) {
-  constexpr int kMaxItems = 8;  // the longest choice set today (QUALITY_MODES) is seven
-  count = (std::min)(count, kMaxItems);
-  std::string shown[kMaxItems];
-  const char* labels[kMaxItems] = {};
-  for (int i = 0; i < count; ++i) {
-    shown[i] = gui::Display(english[i]);
-    labels[i] = shown[i].c_str();
-  }
-  // ImGui draws a combo's label to the right of the box, so a caller passing a visible id leaks that text
-  // beside the frame; pass only the part ImGui does not draw. Same rule as Segmented's fallback.
+                 const std::string_view* why = nullptr, const std::string_view* tips = nullptr,
+                 const char* missing_preview = nullptr) {
   const std::string combo_id = (id[0] == '#' && id[1] == '#') ? std::string(id) : std::string("##") + id;
-  const auto reason = [why](int i) -> const std::string_view& {
-    static const std::string_view none;
-    return (why != nullptr) ? why[i] : none;
-  };
   int picked = -1;
-  if (gui::BeginCombo(combo_id.c_str(), preview >= 0 && preview < count ? labels[preview] : nullptr)) {
+  if (gui::BeginCombo(combo_id.c_str(), preview >= 0 && preview < count ? english[preview] : missing_preview)) {
     for (int i = 0; i < count; ++i) {
-      gui::BeginDisabled(!reason(i).empty());
-      if (gui::Selectable(labels[i], i == preview)) {
+      const std::string_view reason = why ? why[i] : std::string_view{};
+      gui::BeginDisabled(!reason.empty());
+      if (gui::Selectable(english[i], i == preview)) {
         picked = i;
       }
       gui::EndDisabled();
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        SegmentTip(reason(i), {});
+        SegmentTip(reason, tips ? tips[i] : std::string_view{});
       }
     }
     gui::EndCombo();
@@ -711,15 +694,14 @@ inline int Segmented(const char* id, const char* const* english, int count, int 
                      const std::string_view* why = nullptr, const std::string_view* tips = nullptr) {
   const float kGap = LabelGap() * 0.5f;
   constexpr int kMaxSegments = 8;
-  count = (std::min)(count, kMaxSegments);
   if (count <= 0) return -1;
+  if (count > kMaxSegments) return Combo(id, english, count, current, why, tips, "Custom");
   std::string shown[kMaxSegments];  // the local text owns the pointers labels[] hands out
   const char* labels[kMaxSegments] = {};
   for (int i = 0; i < count; ++i) {
     shown[i] = gui::Display(english[i]);
     labels[i] = shown[i].c_str();
   }
-  const std::string custom = gui::Display("Custom");  // outlives the combo call below
   const auto reason = [why](int i) -> const std::string_view& {
     static const std::string_view none;
     return (why != nullptr) ? why[i] : none;
@@ -738,24 +720,8 @@ inline int Segmented(const char* id, const char* const* english, int count, int 
     widest = (std::max)(widest, ImGui::CalcTextSize(labels[i]).x);
   }
   if (widest + ImGui::GetStyle().FramePadding.x * 2.f > width) {
-    // ImGui draws a combo label to the right of the box, so a caller passing a visible id ("NR stage")
-    // leaks that text beside the frame; pass only the part of the id ImGui does not draw.
-    const std::string combo_id = (id[0] == '#' && id[1] == '#') ? std::string(id) : std::string("##") + id;
-    ImGui::SetNextItemWidth(item_width);  // the same width the segments would have taken
-    if (gui::BeginCombo(combo_id.c_str(), current >= 0 && current < count ? labels[current] : custom.c_str())) {
-      for (int i = 0; i < count; ++i) {
-        gui::BeginDisabled(!reason(i).empty());
-        if (gui::Selectable(labels[i], i == current)) {
-          clicked = i;
-        }
-        gui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-          SegmentTip(reason(i), tip(i));
-        }
-      }
-      gui::EndCombo();
-    }
-    return clicked;
+    ImGui::SetNextItemWidth(item_width);
+    return Combo(id, english, count, current, why, tips, "Custom");
   }
   gui::PushID(id);
   // Hit-test every segment first and draw nothing until they have all been laid out: the surfaces below are

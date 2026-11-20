@@ -125,6 +125,7 @@ inline Decoded Decode(uint32_t packed) {
 struct Axis {
   uint32_t packed = 0;
   float gmax = 1.f;
+  friend bool operator==(const Axis&, const Axis&) = default;
 };
 
 inline Axis MakeAxis(uint32_t full, uint32_t center, uint32_t falloff, float edge) {
@@ -154,8 +155,7 @@ struct Grid {
   bool active() const { return x.packed != 0u || y.packed != 0u; }
   // NR pixels over the uniform grid's.
   double PixelFactor() const { return static_cast<double>(x.gmax) * y.gmax; }
-  bool operator==(const Grid& o) const { return x.packed == o.x.packed && y.packed == o.y.packed; }
-  bool operator!=(const Grid& o) const { return !(*this == o); }
+  friend bool operator==(const Grid&, const Grid&) = default;
 };
 
 // The grid for a working grid of full_width x full_height, whose parameters are

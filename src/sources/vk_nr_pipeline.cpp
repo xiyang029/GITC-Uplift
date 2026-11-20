@@ -693,6 +693,16 @@ void VkNrPipeline::ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, 
   }
 }
 
+static color::VkStabilizeMotion SampleMotion(const NVSDK_NGX_ImageViewInfo_VK& image, nr::Rect rect,
+                                             const nr::FrameInputs& inputs) {
+  return {
+      .vectors = {.view = image.ImageView, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+      .rect = rect,
+      .scale_x = inputs.motion_scale_x,
+      .scale_y = inputs.motion_scale_y,
+  };
+}
+
 color::VkStabilizeMotion VkNrPipeline::StabilizeMotionOf(const nr::FrameInputs& inputs) {
   if (inputs.motion.resource == nullptr) return {};
   const NVSDK_NGX_Resource_VK& motion = *nr::VkResourceOf(inputs.motion.resource);
@@ -700,12 +710,29 @@ color::VkStabilizeMotion VkNrPipeline::StabilizeMotionOf(const nr::FrameInputs& 
   const NVSDK_NGX_ImageViewInfo_VK& image = motion.Resource.ImageViewInfo;
   const std::optional<nr::Rect> rect = MotionRectOf(inputs.motion.rect, {image.Width, image.Height});
   if (!MotionFormatReadable(image.Format) || !rect) return {};
-  return {
-      .vectors = {.view = image.ImageView, .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-      .rect = *rect,
-      .scale_x = inputs.motion_scale_x,
-      .scale_y = inputs.motion_scale_y,
-  };
+  return SampleMotion(image, *rect, inputs);
+}
+
+color::VkStabilizeMotion VkNrPipeline::WorkStabilizeMotionOf(const nr::FrameInputs& inputs, nr::Size image) {
+  color::VkStabilizeMotion motion = StabilizeMotionOf(inputs);
+  if (motion.vectors.view != VK_NULL_HANDLE) motion.rect = {0u, 0u, image.width, image.height};
+  return motion;
+}
+
+bool VkNrPipeline::ConvertWorkMotion(VkCommandBuffer buffer, uint32_t slot, nr::FrameInputs& inputs,
+                                     const color::VkStabilizeMotion& source, const WorkLayout& work) {
+  const vk::NrImage& motion = set_->intermediates.canvas_motion;
+  if (source.vectors.view == VK_NULL_HANDLE || motion.view == VK_NULL_HANDLE || source.rect.width == 0u || source.rect.height == 0u) return false;
+  if (!color_.RecordMotion(buffer, slot,
+      {.source = source.vectors, .region = source.rect, .target = motion.view, .image = work.image, .canvas = work.canvas,
+       .scale_x = source.scale_x * static_cast<float>(work.image.width) / static_cast<float>(source.rect.width),
+       .scale_y = source.scale_y * static_cast<float>(work.image.height) / static_cast<float>(source.rect.height),
+       .foveation = work.foveation})) return false;
+  HandToNgx(buffer, motion);
+  inputs.motion = {.resource = nr::AsResource(&motion.ngx)};
+  inputs.motion_scale_x = 1.f;
+  inputs.motion_scale_y = 1.f;
+  return true;
 }
 
 float VkNrPipeline::NoteEncoding(const VkDlssTarget& target) {
@@ -721,7 +748,7 @@ float VkNrPipeline::NoteEncoding(const VkDlssTarget& target) {
 
 VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32_t slot, const color::VkEncodePass& encode, VkImageView nr_output, uint32_t passes_run,
                                                   bool reduced, bool look_ready, color::Upsampling upsampling, const color::VkStabilizeMotion& motion,
-                                                  nr::foveation::Grid foveation, bool reset) {
+                                                  bool reset) {
   if (set_->look.plan != LookPlan{}) {
     set_->look.last_use = slot_marks_[slot];
   }
@@ -738,7 +765,7 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
   // 5. The change field's own stabiliser: the field the decode consumes, averaged along the vectors, into the other buffer
   //    of the pair. It is not part of the look - a look that shapes nothing still has a change field to steady - so it is
   //    its own step, taken whether or not the look's passes below run.
-  const auto stabilise_change = [&after, this, buffer, slot, change, look_ready, motion, foveation, reset]() {
+  const auto stabilise_change = [&after, this, buffer, slot, change, look_ready, motion, reset]() {
     if (!look_ready || !set_->look.plan.change) {
       return;
     }
@@ -751,8 +778,7 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
                                   .image = set_->look.plan.image,
                                   .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
                                   .reset = (reset || !set_->look.change_valid),
-                                  .motion = motion,
-                                  .foveation = foveation});
+                                  .motion = motion});
     color_.ComputeBarrier(buffer);
     set_->look.change_current = 1u - current;
     set_->look.change_valid = true;
@@ -817,7 +843,7 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
 }
 
 PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
-                                             const WorkLayout& layout, const ChainPart& part) {
+                                             const WorkLayout& layout, const ChainPart& part, bool motion_is_canvas) {
   if (session_.State() != nr::SessionState::ACTIVE) return {.reason = nr::SkipReason::INACTIVE};
   // The union is read only for an image view (NGX's resource can also be a buffer).
   if (buffer == VK_NULL_HANDLE || target.resource == nullptr || target.resource->Type != NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW || part.set >= STAGE_SETS) {
@@ -844,7 +870,12 @@ PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDls
 
   const uint32_t slot = next_slot_;
   if (!timeline_.IsComplete(slot_marks_[slot])) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
-  const bool game_motion = (inputs.motion.resource != nullptr);
+  const bool foveated = work.foveation.active();
+  const bool remap_motion = foveated && !motion_is_canvas;
+  const color::VkStabilizeMotion source_motion = StabilizeMotionOf(inputs);
+  const bool copy_motion = remap_motion && source_motion.vectors.view != VK_NULL_HANDLE;
+  const bool game_motion = copy_motion || (!remap_motion && inputs.motion.resource != nullptr);
+  if (copy_motion && !color_.PrepareMotion()) return {.reason = nr::SkipReason::PIPELINE_FAILED};
   const bool reduced = (work.image != size);
   // The set: A and B at the canvas, and the required change field at the work image. A different layout (or the other placement's set)
   // reallocates it (the old one retires at its mark).
@@ -880,10 +911,12 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
     allocation_failure_logged_ = false;
     set_->intermediates = std::move(created);
   }
-  // The zero motion only once a frame has no game motion (a DLSS game nearly always passes its own).
-  if (!game_motion && set_->intermediates.zero_motion.image == VK_NULL_HANDLE
+  // Allocate either the remap target or fallback lazily; a frame that binds the source in place needs neither.
+  vk::NrImage* const motion_target = copy_motion ? &set_->intermediates.canvas_motion
+                                    : !game_motion ? &set_->intermediates.zero_motion : nullptr;
+  if (motion_target != nullptr && motion_target->image == VK_NULL_HANDLE
       && !vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16_SFLOAT, work.canvas.width, work.canvas.height, MOTION_USAGE, false,
-                            &set_->intermediates.zero_motion)) {
+                            motion_target)) {
     LogAllocationFailure(work.canvas);
     return {.reason = nr::SkipReason::OUT_OF_MEMORY};
   }
@@ -911,7 +944,8 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
 
   // 1. The opening barrier: DLSS's write of the Output (and whatever else the game recorded before) is visible to Uplift's reads and writes, and A, B, the
   // change field, the zero motion and the look's surfaces move UNDEFINED -> GENERAL (their contents are rewritten in full every recording).
-  const std::array<const vk::NrImage*, 8> opened = {&set_->intermediates.a, &set_->intermediates.b, &set_->intermediates.zero_motion, &set_->intermediates.change, &set_->faces.twin,
+  const std::array<const vk::NrImage*, 9> opened = {&set_->intermediates.a, &set_->intermediates.b, &set_->intermediates.zero_motion, &set_->intermediates.change,
+                                                    &set_->intermediates.canvas_motion, &set_->faces.twin,
                                                     &set_->faces.detail, &set_->faces.atlas, &set_->faces.fill};
   OpenRecording(buffer, opened, true);
 
@@ -952,21 +986,25 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source};
   }
 
-  // 3. The NR passes, with the game's motion vectors bound in place (the zero motion otherwise), the per-pass model controls, and each later pass's own
-  // Transfer/Colour strength (the resolver, between the passes).
-  if (game_motion) {
+  // 3. NR reads the vectors in the same coordinates as the encoded colour.
+  if (copy_motion) {
+    if (!ConvertWorkMotion(buffer, slot, frame_inputs, source_motion, work)) {
+      set_->intermediates.reset_pending = true;
+      return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED};
+    }
+  } else if (game_motion) {
     Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
   } else {
-    // NGX reads the zero motion as an input (ReadWrite false), so it is handed over in SHADER_READ_ONLY_OPTIMAL, as a game's own
-    // motion vectors are; the next recording starts it from UNDEFINED again.
     HandToNgx(buffer, set_->intermediates.zero_motion);
-  }
-  if (!game_motion) {
     frame_inputs.motion = {.resource = nr::AsResource(&set_->intermediates.zero_motion.ngx)};
     frame_inputs.motion_scale_x = 1.f;
     frame_inputs.motion_scale_y = 1.f;
   }
   frame_inputs.reset_hint = (inputs.reset_hint || set_->intermediates.reset_pending);
+  if (foveated) {
+    frame_inputs.depth = {};
+    frame_inputs.reset_hint |= !game_motion;
+  }
   frame_inputs.later_passes = config_.later_controls;
   frame_inputs.resolver = this;
   resolve_slot_ = slot;
@@ -989,8 +1027,8 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
     color_.RecordFacesShow(buffer, slot, nr_output, set_->faces.twin.view, work.canvas);
     Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
   }
-  const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling, StabilizeMotionOf(inputs),
-                                      work.foveation, frame_inputs.reset_hint);
+  const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling,
+                                      foveated ? WorkStabilizeMotionOf(frame_inputs, work.image) : source_motion, frame_inputs.reset_hint);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source, .motion_scale_x = frame_inputs.motion_scale_x, .motion_scale_y = frame_inputs.motion_scale_y};
   }
@@ -1049,27 +1087,22 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
   const nr::Size canvas = work.canvas;
   if (canvas.width < image.width || canvas.height < image.height) return {.reason = nr::SkipReason::INVALID_INPUT};
   if (!nr::MeetsNrFloor(canvas)) return {.reason = nr::SkipReason::FRAME_TOO_SMALL};  // the floor holds for the canvas, never below it
-  // The game's motion vectors: bound in place at the image's own size, copied into a canvas texture in a canvas (tools/nrspike's e9: only float formats can be copied; the
-  // rest bind the zero texture there). Their region lies inside their texture.
+  // Remapping requires readable float vectors. Otherwise use zero motion when a copy is needed.
   const bool game_motion = (inputs.motion.resource != nullptr);
-  const bool in_canvas = (canvas != image);
-  nr::Rect motion_region = inputs.motion.rect;
-  bool motion_readable = false;
+  const bool foveated = work.foveation.active();
+  const bool remap_motion = foveated || canvas != image;
+  std::optional<color::VkStabilizeMotion> source_motion;
   if (game_motion) {
     const NVSDK_NGX_Resource_VK& motion = *nr::VkResourceOf(inputs.motion.resource);
     if (motion.Type != NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW) return {.reason = nr::SkipReason::INVALID_INPUT};
     const NVSDK_NGX_ImageViewInfo_VK& motion_image = motion.Resource.ImageViewInfo;
-    if (motion_region.width == 0u || motion_region.height == 0u) {
-      motion_region = {.x = 0u, .y = 0u, .width = motion_image.Width, .height = motion_image.Height};
-    }
-    if (uint64_t{motion_region.x} + motion_region.width > motion_image.Width || uint64_t{motion_region.y} + motion_region.height > motion_image.Height) {
-      return {.reason = nr::SkipReason::MOTION_OUTSIDE_TEXTURE};
-    }
-    motion_readable = MotionFormatReadable(motion_image.Format);
+    const auto rect = MotionRectOf(inputs.motion.rect, {motion_image.Width, motion_image.Height});
+    if (!rect) return {.reason = nr::SkipReason::MOTION_OUTSIDE_TEXTURE};
+    if (MotionFormatReadable(motion_image.Format)) source_motion = SampleMotion(motion_image, *rect, inputs);
   }
-  const bool copy_motion = (in_canvas && game_motion && motion_readable);
-  const bool use_zero_motion = (!game_motion || (in_canvas && !motion_readable));
-  if (!color_.PreparePreSr()) return {.reason = nr::SkipReason::PIPELINE_FAILED};
+  const bool copy_motion = remap_motion && source_motion.has_value();
+  const bool use_zero_motion = !game_motion || (remap_motion && !copy_motion);
+  if (!color_.PreparePreSr() || (copy_motion && !color_.PrepareMotion())) return {.reason = nr::SkipReason::PIPELINE_FAILED};
 
   const uint32_t slot = next_slot_;
   if (!timeline_.IsComplete(slot_marks_[slot])) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
@@ -1148,7 +1181,7 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr
 
   // 2. Encode the region straight from the game's Color, resampled to the work image and mirror-padded into the canvas; no Uplift copy of it, and no
   // transition of it.
-  const MotionSource motion_source = ((game_motion && (!in_canvas || motion_readable)) ? MotionSource::DIRECT : MotionSource::NONE);
+  const MotionSource motion_source = (use_zero_motion ? MotionSource::NONE : MotionSource::DIRECT);
   const color::VkEncodePass encode = {
       .source = game.ImageView,
       .source_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1181,23 +1214,12 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED};
   }
 
-  // 3. In a canvas the game's motion vectors move into canvas pixels, mirrored like the image (negating the mirrored axis), bound with the canvas as their
-  // subrect and a scale of (1, 1). The motion image NGX reads is handed over in SHADER_READ_ONLY_OPTIMAL, as a game's own vectors are.
+  // 3. Remap motion into the work grid and mirror any padding.
   if (copy_motion) {
-    color_.RecordMotion(buffer, slot,
-                        {.source = {.view = nr::VkResourceOf(inputs.motion.resource)->Resource.ImageViewInfo.ImageView,
-                                    .layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-                         .region = motion_region,
-                         .target = set_->intermediates.canvas_motion.view,
-                         .image = image,
-                         .canvas = canvas,
-                         .scale_x = inputs.motion_scale_x * static_cast<float>(image.width) / static_cast<float>(motion_region.width),
-                         .scale_y = inputs.motion_scale_y * static_cast<float>(image.height) / static_cast<float>(motion_region.height),
-                         .foveation = work.foveation});
-    HandToNgx(buffer, set_->intermediates.canvas_motion);
-    frame_inputs.motion = {.resource = nr::AsResource(&set_->intermediates.canvas_motion.ngx)};
-    frame_inputs.motion_scale_x = 1.f;
-    frame_inputs.motion_scale_y = 1.f;
+    if (!ConvertWorkMotion(buffer, slot, frame_inputs, *source_motion, work)) {
+      set_->intermediates.reset_pending = true;
+      return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED};
+    }
   } else if (use_zero_motion) {
     HandToNgx(buffer, set_->intermediates.zero_motion);
     frame_inputs.motion = {.resource = nr::AsResource(&set_->intermediates.zero_motion.ngx)};
@@ -1207,6 +1229,10 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr
     Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);  // the game's own vectors, bound in place
   }
   frame_inputs.reset_hint = (inputs.reset_hint || set_->intermediates.reset_pending);
+  if (foveated) {
+    frame_inputs.depth = {};
+    frame_inputs.reset_hint |= use_zero_motion;
+  }
   frame_inputs.later_passes = config_.later_controls;
   frame_inputs.resolver = this;
   resolve_slot_ = slot;
@@ -1222,16 +1248,17 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr
   }
   set_->intermediates.reset_pending = false;  // only a frame that ran NR pays off the owed reset
 
-  // 5. The required change field and optional look stage. The stabiliser runs on the game's own vectors (`inputs`, not
-  // the canvas copy), since it acts on the image, as on Direct3D 12.
+  // 5. The required change field and optional look stage, at the size of the unpadded work image.
   Barrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
   const VkImageView nr_output = (evaluated.output == nr::AsResource(&set_->intermediates.a.ngx) ? set_->intermediates.a.view : set_->intermediates.b.view);
   if (faces_ran_ && config_.keep_faces.show_mask) {
     color_.RecordFacesShow(buffer, slot, nr_output, set_->faces.twin.view, canvas);  // Show the face mask, as after DLSS
     Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
   }
-  const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling, StabilizeMotionOf(inputs),
-                                      work.foveation, frame_inputs.reset_hint);
+  const color::VkStabilizeMotion stabilize_motion = foveated ? WorkStabilizeMotionOf(frame_inputs, image)
+                                                            : source_motion.value_or(color::VkStabilizeMotion{});
+  const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling,
+                                      stabilize_motion, frame_inputs.reset_hint);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
   }
@@ -1320,9 +1347,9 @@ std::array<uint64_t, VkNrPipeline::PRESENT_MOTION_SLOTS> VkNrPipeline::PresentMo
   return frames;
 }
 
-vk::NrImage VkNrPipeline::PresentMotion(uint64_t frame, uint64_t* age) {
+vk::NrImage VkNrPipeline::PresentMotion(uint64_t frame, uint64_t* age, uint64_t max_age) {
   const std::array<uint64_t, PRESENT_MOTION_SLOTS> frames = PresentMotionFrames();
-  const PresentMotionPick pick = PickPresentMotion(frames, frame);
+  const PresentMotionPick pick = PickPresentMotion(frames, frame, max_age);
   if (!pick.slot) return {};
   PresentMotionSlot& copy = present_motion_[*pick.slot];
   copy.last_use = timeline_.MarkNow();  // NR or the bridge's copy-in reads it in this frame
@@ -1332,9 +1359,9 @@ vk::NrImage VkNrPipeline::PresentMotion(uint64_t frame, uint64_t* age) {
   return copy.image;
 }
 
-bool VkNrPipeline::HasPresentMotion(uint64_t frame) const {
+bool VkNrPipeline::HasPresentMotion(uint64_t frame, uint64_t max_age) const {
   const std::array<uint64_t, PRESENT_MOTION_SLOTS> frames = PresentMotionFrames();
-  return PickPresentMotion(frames, frame).slot.has_value();
+  return PickPresentMotion(frames, frame, max_age).slot.has_value();
 }
 
 bool VkNrPipeline::MakePresentMotionSlots(size_t first, size_t end, nr::Size size) {
@@ -1497,15 +1524,15 @@ PipelineResult VkNrPipeline::RecordPresent(VkCommandBuffer buffer, const VkPrese
                       VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
   functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &into_nr);
 
-  // 2. The motion vectors, as Direct3D 12's Present path chooses them: DLSS's copy for this present, else Launchpad's UPLIFT_MV, else none. A stand-in
-  // that cannot be made leaves the motion empty, and RecordAfterDlss binds the set's zero motion as Direct3D 12's Evaluate does: NR runs, and the
-  // provider's change to none restarts its history.
+  // 2. Prefer DLSS, then Launchpad. Only the uniform grid reuses history on a zero stand-in.
   nr::FrameInputs inputs = {.ui_correction = config_.present_ui_correction, .reset_hint = reset_hint};
+  const bool foveated = work.foveation.active();
+  bool motion_is_canvas = false;
   MotionSource motion_source = MotionSource::NONE;
   if (target.dlss_motion != nullptr) {
     inputs.motion = {.resource = nr::AsResource(target.dlss_motion)};  // the full subrect, a scale of (1, 1)
     motion_source = MotionSource::PRESENT_COPY;
-  } else if (!target.dlss_motion_gap_size.Empty()) {
+  } else if (!foveated && !target.dlss_motion_gap_size.Empty()) {
     // DLSS's copy is this load's input but missed this present: zeros of the copies' own shape, so NR runs (no skip, no reload).
     if (const NVSDK_NGX_Resource_VK* stand_in = ZeroStandIn(buffer, target.dlss_motion_gap_size); stand_in != nullptr) {
       inputs.motion = {.resource = nr::AsResource(stand_in)};
@@ -1514,11 +1541,13 @@ PipelineResult VkNrPipeline::RecordPresent(VkCommandBuffer buffer, const VkPrese
   } else if (target.launchpad_motion.view != VK_NULL_HANDLE) {
     if (ConvertLaunchpadMotion(buffer, target, work)) {
       inputs.motion = {.resource = nr::AsResource(&present_.launchpad.ngx)};
+      motion_is_canvas = true;
       motion_source = MotionSource::LAUNCHPAD;
-    } else if (const NVSDK_NGX_Resource_VK* stand_in = ZeroStandIn(buffer, work.canvas); stand_in != nullptr) {
-      // A conversion that missed this present (a busy slot) runs on zeros of the conversion's own shape instead of skipping.
-      inputs.motion = {.resource = nr::AsResource(stand_in)};
-      motion_source = MotionSource::LAUNCHPAD;
+    } else if (!foveated) {
+      if (const NVSDK_NGX_Resource_VK* stand_in = ZeroStandIn(buffer, work.canvas); stand_in != nullptr) {
+        inputs.motion = {.resource = nr::AsResource(stand_in)};
+        motion_source = MotionSource::LAUNCHPAD;
+      }
     }
   }
   if (motion_source != MotionSource::LAUNCHPAD && present_.launchpad.image != VK_NULL_HANDLE) {
@@ -1534,7 +1563,7 @@ PipelineResult VkNrPipeline::RecordPresent(VkCommandBuffer buffer, const VkPrese
                                            .diffuse_white_nits = target.diffuse_white_nits,
                                            .transfer_strength = target.transfer_strength,
                                            .color_strength = target.color_strength},
-                                          inputs, controls, layout, part);
+                                          inputs, controls, layout, part, motion_is_canvas);
   result.recorded = true;
   result.motion_source = motion_source;
 

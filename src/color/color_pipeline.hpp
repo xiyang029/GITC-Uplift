@@ -199,7 +199,6 @@ struct ChangeStabilizePass {
   float rate = 1.f;                    // look::StabilizeRate
   bool reset = false;
   StabilizeMotion motion;              // reproject along the game's vectors; null resource: the static sample
-  nr::foveation::Grid foveation;       // map motion-vector endpoints into the nonuniform work grid
 };
 
 // v2 design §3.10: a pass's own strengths between NR passes.
