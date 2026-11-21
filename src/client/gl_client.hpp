@@ -154,7 +154,6 @@ class GlClient {
   std::string latch_;
   bool in_flight_ = false;  // a request has no reply yet: no share is touched until a FRAME reply
   bool run_sent_ = false;
-  bool floor_probed_ = false;  // SHARED_CPU: a frame below NR's floor already sent its one RUN
   uint32_t cpu_timeouts_ = 0u;  // consecutive 2 s timeouts of SHARED_CPU's copy-in wait
   uint64_t busy_skips_ = 0u;
 };

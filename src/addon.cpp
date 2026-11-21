@@ -1582,6 +1582,7 @@ void OnResetCommandList(api::command_list* cmd_list) {
       DropTokens(list_state->device, list_state->tokens);  // recorded, never submitted
       list_state->tokens.clear();
     }
+    list_state->nr_timing.clear();
     list_state->first_token = 0u;
     list_state->executed = false;
     list_state->shadow.OnReset(addon::TrackingEpoch());  // 0 while tracking is off: unknown until the next Reset
@@ -1626,6 +1627,9 @@ void OnExecuteCommandList(api::command_queue* queue, api::command_list* cmd_list
     if (addon::DeviceContext* const context = ContextOf(list_state->device)) {
       auto* const native_queue = reinterpret_cast<ID3D12CommandQueue*>(queue->get_native());
       const auto now = std::chrono::steady_clock::now();
+      if (!list_state->nr_timing.empty()) {
+        uplift::sources::NrGpuTiming::SetSubmissionQueue(list_state->nr_timing, executed_again ? nullptr : native_queue);
+      }
       if (executed_again) {
         context->ResubmitTokens(list_state->first_token, native_queue, GetCurrentThreadId(), now);
       } else {
@@ -3650,6 +3654,15 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
         const auto fg_mode = addon::streamline::Mode();
         const bool early_fg = entry.before_fg.early_confirmed && addon::streamline::FrameGenerationActive(fg_mode, status.frame_generation.active);
         if (state.settings.enabled && status.session.state == nr::SessionState::ACTIVE) {
+          const uplift::sources::NrGpuTiming* timing = nullptr;
+          if (!native_view && !status.device_lost && !status.abandoned) {
+            std::bitset<nr::SESSION_STAGES> timing_stages;
+            for (uint32_t i = 0; i < status.group_count; ++i) {
+              const auto& group = status.groups[i];
+              if (group.count) timing_stages.set(static_cast<size_t>(group.stage));
+            }
+            timing = &entry.context->WatchNrTiming(now, timing_stages);
+          }
           for (uint32_t i = 0; i < status.group_count; ++i) {
             const auto& group = status.groups[i];
             uint32_t count = group.nr_applied ? group.passes_run : 0u;
@@ -3659,8 +3672,11 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
               if (entry.before_fg.outer_owns_frame) count = entry.before_fg.outer_present_passes;
             }
             auto& row = view.stage_runs[node];
-            row = {group.first, std::min(group.count, count), group.canvas.Empty() ? group.work : group.canvas, group.motion_source, group.count, std::string(nr::SkipReasonText(group.skip_reason))};
+            row = {group.first, std::min(group.count, count), group.work, group.motion_source, group.count, std::string(nr::SkipReasonText(group.skip_reason))};
             if (!row.count && group.stage == addon::Stage::PRESENT && entry.before_fg.note.id != BeforeFgNote::NONE) row.skip = entry.before_fg.note.Text();
+            if (timing && row.count && row.count == group.passes_run) {
+              row.gpu_ms = timing->Latest(static_cast<uint8_t>(group.stage), row.count, now);
+            }
           }
         }
         if (status.abandoned || (status.device_lost && !Bridged(entry))) {

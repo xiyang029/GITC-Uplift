@@ -168,7 +168,7 @@ class VkDlssContext {
   // before recording and left open on `list`; the caller calls EndEvaluate on every path (an exception included). `frame` points at `copies`.
   sources::PipelineResult OnDlssEvaluate(VkCommandBuffer buffer, const ngx_hooks::DlssFrame& frame, const ngx_hooks::VkDlssResources& copies,
                                          VkListState& list, std::chrono::steady_clock::time_point now);
-  // Before the hooked evaluate (Before upscaling): NR on the region of the game's Color, padded into the floor canvas, right before DLSS reads it. With NR
+  // Before the hooked evaluate (Before upscaling): NR on the region of the game's Color at the clamped work size, right before DLSS reads it. With NR
   // applied it returns the pipeline's private colour, which the NGX detour swaps in as DLSS's Color for this one call (the game's own pointer goes back
   // after); null when nothing changed (DLSS reads the game's Color). The token is issued before recording and left open on `list`, like OnDlssEvaluate's:
   // EndEvaluate sets its event after DLSS has read the private colour, on every path.
@@ -349,7 +349,6 @@ class VkDlssContext {
   // canvas NR runs at (pass 1's group's).
   nr::Size frame_size_;
   nr::Size work_size_;
-  nr::Size canvas_size_;
   // Split chain: what each stage (Stage order) keeps of its own: its settled work size, its latest recording's result (Status's
   // groups), its owed reset (a frame that did not apply NR: the next that does starts NR's history afresh), and
   // the motion input its features were first evaluated with in this load and the different ones in a row since.

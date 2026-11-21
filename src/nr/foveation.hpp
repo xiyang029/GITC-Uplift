@@ -153,24 +153,8 @@ struct Grid {
   Axis x;
   Axis y;
   bool active() const { return x.packed != 0u || y.packed != 0u; }
-  // NR pixels over the uniform grid's.
-  double PixelFactor() const { return static_cast<double>(x.gmax) * y.gmax; }
   friend bool operator==(const Grid&, const Grid&) = default;
 };
-
-// The grid for a working grid of full_width x full_height, whose parameters are
-// in that grid's pixels (MapToWork).  An axis whose centre covers it, or whose
-// saving cannot pay for the guide resample, stands down to uniform.
-inline Grid MakeGrid(bool enabled, const Params& params, uint32_t full_width, uint32_t full_height) {
-  Grid grid;
-  if (!enabled) return grid;
-  grid.x = MakeAxis(full_width, params.center_width, params.falloff_x, params.edge_x);
-  grid.y = MakeAxis(full_height, params.center_height, params.falloff_y, params.edge_y);
-  if (grid.active() && grid.PixelFactor() > 1.0 - kMinSaving) {
-    grid = Grid{};
-  }
-  return grid;
-}
 
 // Working extent on one axis: the uniform extent times the mean density, so the
 // centre keeps the uniform density exactly.
@@ -189,6 +173,29 @@ inline uint32_t WarpedExtent(uint32_t uniform, const Axis& axis) {
   return extent;
 }
 
+// Raise only the edge density until the realized extent reaches the floor. Keep the centre,
+// fall-off, packed format and parity unchanged; an axis that needs its full extent becomes identity.
+inline Axis LimitCompression(Axis axis, uint32_t uniform, uint32_t minimum) {
+  if (WarpedExtent(uniform, axis) >= minimum) return axis;
+  if (minimum >= uniform) return {};
+  const auto with_edge = [axis](uint32_t edge) {
+    if (edge > kEdgeMax) return Axis{};
+    Axis candidate = axis;
+    candidate.packed = (axis.packed & ~(0x7Fu << 24)) | (edge << 24);
+    candidate.gmax = static_cast<float>(G(1.0, Decode(candidate.packed)));
+    return candidate;
+  };
+  uint32_t low = ((axis.packed >> 24) & 0x7Fu) + 1u;
+  uint32_t high = kEdgeMax + 1u;
+  while (low < high) {
+    const uint32_t middle = low + (high - low) / 2u;
+    if (WarpedExtent(uniform, with_edge(middle)) < minimum) low = middle + 1u;
+    else high = middle;
+  }
+  const Axis limited = with_edge(low);
+  return (WarpedExtent(uniform, limited) >= uniform ? Axis{} : limited);
+}
+
 // The frame's grid and working extent together, with `gmax` in both axes replaced by the realized
 // extent / uniform: the axis dword is already packed from the ideal value, and only the normalizer the shaders
 // divide by needs the realized one, so this is the last step that may touch `gmax`.
@@ -202,17 +209,20 @@ struct Plan {
   uint32_t height = 0;
 };
 
-inline Plan MakePlan(bool enabled, const Params& params, uint32_t uniform_width, uint32_t uniform_height) {
+inline Plan MakePlan(const Params& params, uint32_t uniform_width, uint32_t uniform_height,
+                     uint32_t minimum_width = 0u, uint32_t minimum_height = 0u) {
   Plan plan;
-  plan.grid = MakeGrid(enabled, params, uniform_width, uniform_height);
+  plan.grid.x = LimitCompression(MakeAxis(uniform_width, params.center_width, params.falloff_x, params.edge_x), uniform_width, minimum_width);
+  plan.grid.y = LimitCompression(MakeAxis(uniform_height, params.center_height, params.falloff_y, params.edge_y), uniform_height, minimum_height);
   plan.width = WarpedExtent(uniform_width, plan.grid.x);
   plan.height = WarpedExtent(uniform_height, plan.grid.y);
   // Judge the guide-resample trade-off by the dimensions that will actually be allocated. Rounding, parity
   // alignment and the 16-texel minimum can make the realized saving smaller than the ideal density integral.
   const uint64_t uniform_pixels = uint64_t{uniform_width} * uniform_height;
   const uint64_t warped_pixels = uint64_t{plan.width} * plan.height;
-  if (plan.grid.active() && uniform_pixels != 0u
-      && static_cast<double>(warped_pixels) / static_cast<double>(uniform_pixels) > 1.0 - kMinSaving) {
+  const double ideal_factor = static_cast<double>(plan.grid.x.gmax) * plan.grid.y.gmax;
+  if (plan.grid.active() && (ideal_factor > 1.0 - kMinSaving
+      || (uniform_pixels != 0u && static_cast<double>(warped_pixels) / static_cast<double>(uniform_pixels) > 1.0 - kMinSaving))) {
     plan.grid = Grid{};
     plan.width = uniform_width;
     plan.height = uniform_height;
@@ -238,10 +248,11 @@ struct Shares {
 
 // FromPercent, MapToWork and MakePlan in one call: the plan for a working grid of work_width x work_height.
 inline Plan MakePlanFromShares(bool enabled, const Shares& shares, uint32_t out_width, uint32_t out_height, uint32_t work_width,
-                               uint32_t work_height) {
+                               uint32_t work_height, uint32_t minimum_width = 0u, uint32_t minimum_height = 0u) {
+  if (!enabled) return {.width = work_width, .height = work_height};
   const Params output = FromPercent(shares.width_pct, shares.height_pct, shares.falloff_x_pct, shares.falloff_y_pct, shares.edge_x_pct,
                                    shares.edge_y_pct, out_width, out_height);
-  return MakePlan(enabled, MapToWork(output, out_width, out_height, work_width, work_height), work_width, work_height);
+  return MakePlan(MapToWork(output, out_width, out_height, work_width, work_height), work_width, work_height, minimum_width, minimum_height);
 }
 
 }  // namespace uplift::nr::foveation

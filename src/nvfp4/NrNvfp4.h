@@ -35,15 +35,20 @@ inline constexpr unsigned ModelANvfp4 = 4,
                           ModelFp8Triple = 19, // FP8: one pass with the look of three
                           ModelFp8Double2 = 20, // the same, v2 weights
                           ModelFp8Triple2 = 21;
+// Model B with the transformer's feed-forward exchanged for the 4-bit one: the runtime asks for 2, and only that layer
+// is ours, so its 4-bit weights live in nvfp4/modelB.
+inline constexpr unsigned ModelBFeedForward = 22;
 constexpr bool IsPassInOne(unsigned preset) { return preset == ModelTwoTriple || preset == ModelTwoDouble; }
 constexpr bool IsFp8(unsigned preset) { return preset >= ModelFp8Double && preset <= ModelFp8Triple2; }
 constexpr unsigned Fp8Set(unsigned preset) { return IsFp8(preset) ? preset - ModelFp8Double + 1 : 0; } // nvfp4/fp8/fp8_set<n>
-constexpr bool IsKnown(unsigned preset) { return preset == ModelANvfp4 || IsPassInOne(preset) || IsFp8(preset); }
+constexpr bool IsModelB(unsigned preset) { return preset == ModelBFeedForward; }
+constexpr bool IsKnown(unsigned preset) { return preset == ModelANvfp4 || IsPassInOne(preset) || IsFp8(preset) || IsModelB(preset); }
 // Unknown custom presets are refused by BeginEvaluation.
 constexpr bool IsNvfp4(unsigned preset) { return preset >= ModelANvfp4; }
 constexpr unsigned WeightSet(unsigned preset) { return IsPassInOne(preset) ? preset - 3 : 0; } // 0: the trained 4-bit codes
-// What the runtime is asked for: the model our kernels have the weights of.
+// What the runtime is asked for: the model our kernels have the weights of. Model B asks for its own preset 2.
 constexpr unsigned RuntimePreset(unsigned preset) {
+    if (IsModelB(preset)) return 2u;
     return IsNvfp4(preset) ? 1u : preset;
 }
 
@@ -54,6 +59,9 @@ void* WrapNvapi(unsigned id, void* original);
 // Before a pass's feature is created and before a frame's evaluations: whether any pass wants a 4-bit model. Loads the
 // layers the first time one does; they stay loaded (and idle) afterwards.
 void Configure(bool wanted, const std::filesystem::path& assets);
+// After a drained session reloads its runtime, retry layer setup at the existing asset path.
+// Keeps loaded GPU allocations and the feed-forward layer's unrecoverable-failure guard.
+void Retry();
 // Around every evaluation of the NR model recorded on `list`, whatever the pass's model is.
 void BeginEvaluation(unsigned requestedPreset);
 void EndEvaluation(ID3D12GraphicsCommandList* list);

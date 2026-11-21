@@ -39,6 +39,24 @@ bool DrawReset(const SettingDescriptor& descriptor, Settings& settings, OverlayS
   return reset;
 }
 
+// Only these two rows need to scan the stage groups for a reduced working grid.
+bool UpsamplingRowHidden(std::string_view key, const SetupView& setup, const Settings& settings) {
+  if (key != "Upsampling" && key != "GuidedBaseGain") return false;
+  const auto reduced = [](ResolutionMode mode, float percent, float percent_y) {
+    return mode != ResolutionMode::FULL && (mode != ResolutionMode::CUSTOM || percent < 100.f || percent_y < 100.f);
+  };
+  const auto later_group_scaled = [&](const PassStageRow& row) {
+    return row.starts_group
+           && ((row.runs == SourcePick::AFTER_DLSS && reduced(settings.resolution_mode_after_dlss, settings.resolution_scale_after_dlss, settings.resolution_scale_after_dlss))
+               || (row.runs == SourcePick::PRESENT && reduced(settings.resolution_mode_present, settings.resolution_scale_present, settings.resolution_scale_present)));
+  };
+  const bool reduced_any =
+      settings.foveation || reduced(settings.resolution_mode, settings.resolution_scale,
+                                     AsymmetricAxes(settings) ? settings.resolution_scale_y : settings.resolution_scale)
+      || std::ranges::any_of(setup.pass_stages, later_group_scaled);
+  return !reduced_any || (key == "GuidedBaseGain" && settings.upsampling != color::Upsampling::EDGE_AWARE);
+}
+
 // Draw a settings-schema row with its normal availability, reset and commit rules.
 bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state, bool grouped = false) {
   if (descriptor.key == "BeforeFGMotion" && (settings->fg_present != Settings::FgPresent::BEFORE
@@ -64,28 +82,11 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                               && settings->look.stabilize == look::StabilizeMode::OFF);
   // The Adaptation rows only where the meter can be used; Auto's own rows only under Auto.
   const bool exposure_hidden = ExposureRowHidden(descriptor, *settings);
-  // Split chain: a later stage group's Custom scale as Setup's, and Upsampling also while a later group works below Full.
+  // Split chain: a later stage group's Custom scale as Setup's.
   const bool resolution_scale_hidden =
       ((descriptor.key == "ResolutionScale" && settings->resolution_mode != ResolutionMode::CUSTOM)
        || (descriptor.key == "ResolutionScaleAfterDlss" && settings->resolution_mode_after_dlss != ResolutionMode::CUSTOM)
        || (descriptor.key == "ResolutionScalePresent" && settings->resolution_mode_present != ResolutionMode::CUSTOM));
-  // Either Custom axis or foveation can require reconstruction.
-  const auto reduced = [](ResolutionMode mode, float percent, float percent_y) {
-    return mode != ResolutionMode::FULL && (mode != ResolutionMode::CUSTOM || percent < 100.f || percent_y < 100.f);
-  };
-  const auto later_group_scaled = [&](const PassStageRow& row) {
-    // A later group's Custom scale is uniform (FrameSettings::StageResolution has one scale), so both axes share it.
-    return row.starts_group
-           && ((row.runs == SourcePick::AFTER_DLSS && reduced(settings->resolution_mode_after_dlss, settings->resolution_scale_after_dlss, settings->resolution_scale_after_dlss))
-               || (row.runs == SourcePick::PRESENT && reduced(settings->resolution_mode_present, settings->resolution_scale_present, settings->resolution_scale_present)));
-  };
-  const bool reduced_any =
-      settings->foveation || reduced(settings->resolution_mode, settings->resolution_scale,
-                                     AsymmetricAxes(*settings) ? settings->resolution_scale_y : settings->resolution_scale)
-      || std::ranges::any_of(view.setup.pass_stages, later_group_scaled);
-  const bool upsampling_hidden = (descriptor.key == "Upsampling" && !reduced_any);
-  const bool edge_aware_off = (!reduced_any || settings->upsampling != color::Upsampling::EDGE_AWARE);
-  const bool guided_gains_hidden = (descriptor.key == "GuidedBaseGain" && edge_aware_off);
   // Keep faces' own rows, and (fix round 1 addendum) its mask's tuning in Advanced, only while it is on.
   const bool keep_faces_tuning = descriptor.key.starts_with("FaceMask") || descriptor.key.starts_with("FaceFill") || descriptor.key == "FaceEdgeFalloff"
                                  || descriptor.key == "FaceLightingDensity" || descriptor.key == "FaceSpeckSize";
@@ -97,7 +98,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   const bool fill_off = ((descriptor.key == "FaceFillRadius" || descriptor.key == "FaceFillTolerance") && !settings->face_tuning.fill_skin);
   // These rows matter only after a choice in the row just above them, so they
   // are hidden -- not merely greyed -- until that choice is made.
-  if (pass_follows || shaping_off || stabilize_off || exposure_hidden || resolution_scale_hidden || upsampling_hidden || guided_gains_hidden
+  if (pass_follows || shaping_off || stabilize_off || exposure_hidden || resolution_scale_hidden || UpsamplingRowHidden(descriptor.key, view.setup, *settings)
       || keep_faces_off || fill_off) {
     return false;
   }
@@ -262,9 +263,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         break;
       }
       case SettingKind::FLOAT: {
-        // AutoExposureBlend is stored 0..1 and shown as 0-100 %.
-        const float shown_scale = (descriptor.key == "AutoExposureBlend" ? 100.f : 1.f);
-        float value = static_cast<float>(descriptor.get(*settings)) * shown_scale;
+        // Slider converts the stored value; its bounds are in display units.
+        const float shown_scale = static_cast<float>(descriptor.display_scale);
+        float value = static_cast<float>(descriptor.get(*settings));
         const float high = static_cast<float>(SliderMax(descriptor)) * shown_scale;  // Ctrl+click may type past it (DescriptorMax)
         const char* const format = (descriptor.key == "GraceSeconds" ? "%.1f"
                                     : FloatPercentSetting(descriptor.key)   ? "%.0f %%"
@@ -275,7 +276,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         const bool edited =
             widgets::Slider(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format, &active, shown_scale);
         if (edited) {
-          descriptor.set(*settings, static_cast<double>(value / shown_scale));
+          descriptor.set(*settings, static_cast<double>(value));
           changed = true;
         }
         if (descriptor.key == "LocalStructure") {
@@ -546,10 +547,10 @@ nr::Size FovAdjustedSize(nr::Size uniform, const OverlayView& view, const Settin
   if (!settings.foveation || uniform.Empty()) return uniform;
   const nr::Size out = view.output_size.Empty() ? view.first_stage_input : view.output_size;
   if (out.Empty()) return uniform;
-  const nr::foveation::Plan plan = nr::foveation::MakePlanFromShares(
+  const nr::foveation::Plan plan = sources::FoveatedWorkPlan(
       settings.foveation,
       {settings.foveation_width, settings.foveation_height, settings.foveation_falloff_x, settings.foveation_falloff_y, settings.foveation_edge_x, settings.foveation_edge_y},
-      out.width, out.height, uniform.width, uniform.height);
+      out, uniform);
   return {plan.width, plan.height};
 }
 
@@ -562,10 +563,9 @@ void DrawWorkingSize(const OverlayView& view, const Settings& settings) {
     // scales), so it belongs in the first two arguments unscaled; scaling it here too made a 50 % Custom read as the
     // NR floor instead of the size that runs.
     const double scale = settings.resolution_scale / 100.0;
-    const double scale_y = (AsymmetricAxes(settings) ? settings.resolution_scale_y / 100.0 : scale);
+    const double scale_y = (settings.resolution_asymmetric ? settings.resolution_scale_y / 100.0 : scale);
     size = sources::WorkSize(input.width * scale, input.height * scale_y, input);
     size = FovAdjustedSize(size, view, settings);
-    if (view.setup.stage == SourcePick::BEFORE_UPSCALING) size = sources::CanvasSize(size);
   } else if (size.Empty() && settings.resolution_mode == ResolutionMode::FULL && view.setup.stage == SourcePick::PRESENT) {
     size = input;
     size = FovAdjustedSize(size, view, settings);
@@ -574,7 +574,7 @@ void DrawWorkingSize(const OverlayView& view, const Settings& settings) {
   widgets::NextGap(style::BlockGap());
   gui::TextUnformatted(pending ? "Target NR size" : "NR working size");
   const std::string dimensions = size.Empty() ? gui::Display("Unknown") : std::format("{} × {}", size.width, size.height);
-  const float remaining = gui::GetContentRegionAvail().x - gui::CalcTextSize(dimensions.c_str()).x;
+  const float remaining = style::SnapDown(gui::GetContentRegionAvail().x) - style::SnapUp(gui::CalcTextSize(dimensions.c_str()).x);
   const float x = gui::GetCursorPosX() + remaining;
   if (remaining >= gui::CalcTextSize(pending ? "Target NR size" : "NR working size").x + gui::GetStyle().ItemSpacing.x) {
     gui::SameLine(); gui::SetCursorPosX(x);
@@ -602,16 +602,18 @@ constexpr const char* DlssReflexGroup(std::string_view key) {
 
 // The live DLSS, frame-generation and Reflex overrides: the switches players come to the panel for, not the
 // diagnostics and tuning that stay in Advanced.
-bool DrawDlssReflexSection(const OverlayView& view, Settings* settings, OverlayState* state, bool& changed) {
+void DrawDlssReflexSection(const OverlayView& view, Settings* settings, OverlayState* state, bool& changed) {
   const bool section_changed = SectionChanged(*settings, SettingSection::DLSS_REFLEX);
-  bool reset = false;
-  const bool open = widgets::SectionHeader("DLSS / Reflex", "Presets · Frame generation · Reflex", "Reset",
+  widgets::Panel("##dlss_body", [&] {
+    bool reset = false;
+    const bool open = widgets::SectionHeader("DLSS / Reflex", "Presets · Frame generation · Reflex", "Reset",
                                              section_changed && !state->defaults_view, &reset);
-  if (reset) {
-    ResetSection(settings, SettingSection::DLSS_REFLEX);
-    changed = true;
-  }
-  if (open) widgets::Panel("##dlss_body", [&] {
+    if (reset) {
+      ResetSection(settings, SettingSection::DLSS_REFLEX);
+      changed = true;
+    }
+    if (!open) return;
+    widgets::NextGap(style::BlockGap());
     const char* group = nullptr;
     for (const SettingDescriptor& descriptor : SettingsSchema()) {
       if (descriptor.section != SettingSection::DLSS_REFLEX || descriptor.kind == SettingKind::KEY) continue;
@@ -635,7 +637,6 @@ bool DrawDlssReflexSection(const OverlayView& view, Settings* settings, OverlayS
       }
     }
   });
-  return open;
 }
 
 bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
@@ -760,8 +761,9 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
     gui::TableSetColumnIndex(1); widgets::Wrapped("%s", value.c_str());
   };
   widgets::Table("##runtime_facts", 2, ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_SizingStretchProp,
-                 {0.f, style::LabelGap() * 0.5f}, [&] {
-    gui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthFixed, std::max({gui::CalcTextSize("Backend").x, gui::CalcTextSize("Display output").x, gui::CalcTextSize("Frame generation").x}) + style::BlockGap());
+                 {0.f, style::LabelGap()}, [&] {
+    const float label_width = std::max({gui::CalcTextSize("Backend").x, gui::CalcTextSize("Display output").x, gui::CalcTextSize("Frame generation").x});
+    gui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthFixed, style::SnapUp(label_width) + style::BlockGap());
     gui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
     if (!view.details_backend.empty()) fact("Backend", gui::Display(view.details_backend));
     if (!view.output_size.Empty()) {
@@ -884,8 +886,11 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   const gui::LanguageScope language_scope(settings->language);
   bool changed = false;
 
+  const float toolbar_left = gui::GetCursorPosX();
+  const float toolbar_right = toolbar_left + style::SnapDown(gui::GetContentRegionAvail().x);
   changed |= DrawRow(*FindSetting(ENABLED_KEY), view, settings, state);
   gui::SameLine();
+  gui::SetCursorPosX(toolbar_left + style::SnapUp(gui::GetCursorPosX() - toolbar_left));
 
   // 1.1.0 (a player's report): Esc also closes ReShade's overlay, so it cannot be the way to clear the hotkey. A right-click on the button clears it
   // (capturing or not); Esc only cancels a capture. A capture whose overlay closed ends by itself (ExpireKeyCapture), so the hotkey never stays off.
@@ -935,10 +940,11 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
   }
 
   gui::SameLine();
-  const float min_language_width = gui::CalcTextSize(settings->language == Language::ENGLISH ? "English" : "简体中文 / Chinese").x + gui::GetFrameHeight() + gui::GetStyle().ItemSpacing.x;
-  if (gui::GetContentRegionAvail().x < min_language_width) gui::NewLine();
-  const float language_width = std::min(gui::GetContentRegionAvail().x, std::max(min_language_width, 12.f * gui::GetFontSize()));
-  gui::SetCursorPosX(gui::GetCursorPosX() + gui::GetContentRegionAvail().x - language_width);
+  const float min_language_width = style::SnapUp(gui::CalcTextSize(settings->language == Language::ENGLISH ? "English" : "简体中文 / Chinese").x + gui::GetFrameHeight()) + style::RowGap();
+  if (toolbar_right - gui::GetCursorPosX() < min_language_width) gui::NewLine();
+  const float available = std::max(1.f, toolbar_right - toolbar_left - style::SnapUp(gui::GetCursorPosX() - toolbar_left));
+  const float language_width = std::min(available, std::max(min_language_width, style::SnapUp(12.f * gui::GetFontSize())));
+  gui::SetCursorPosX(toolbar_right - language_width);
   gui::SetNextItemWidth(language_width);
   int selected_language = static_cast<int>(settings->language);
   const char* languages[] = {"English", "简体中文 / Chinese"};
@@ -951,7 +957,6 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     widgets::ItemTooltip("English / Simplified Chinese. If Chinese appears as boxes, choose a Chinese-capable Global font in ReShade Settings (for example C:\\Windows\\Fonts\\msyh.ttc). No extra Uplift files are needed.");
   }
 
-  widgets::NextGap(style::BlockGap());
   if (!view.safety_locks.empty()) {
     widgets::Panel("##safety_locks", [&] {
       widgets::Heading("SAFETY LATCH ACTIVE", style::tokens::kBad);
@@ -963,31 +968,40 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
         if (lock.setting != nullptr) {
           if (settings->*(lock.setting) == lock.restore_value) {
             widgets::Wrapped("Latch cleared for next launch. Restart the game to retry.");
-          } else if (gui::Button("Clear latch for next launch")) {
+          } else if (widgets::QuietAction("Clear latch for next launch")) {
             settings->*(lock.setting) = lock.restore_value;
             changed = true;
           }
         } else if (lock.retry_now) {
-          if (gui::Button("Retry now")) state->retry_now = true;
+          if (widgets::QuietAction("Retry now")) state->retry_now = true;
         } else {
           widgets::Wrapped("Restart the game to retry this feature.");
         }
         gui::PopID();
       }
     });
-    widgets::NextGap(style::BlockGap());
   }
 
   const StatusCard& card = view.card;
-  gui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {style::RowGap(), style::LabelGap()});
   widgets::Panel("##status_card", [&] {
     widgets::Heading(card.title.c_str());
     widgets::NextGap(style::RowGap());
     if (card.working) {
-      const float key_width = std::max({gui::CalcTextSize("Running at").x, gui::CalcTextSize("Motion vectors").x,
+      const bool split = std::count_if(view.stage_runs.begin(), view.stage_runs.end(), [](const auto& run) { return run.planned != 0; }) > 1;
+      std::string nr_time;
+      for (size_t i = 0; i < view.stage_runs.size(); ++i) {
+        const auto gpu_ms = view.stage_runs[i].gpu_ms;
+        if (!gpu_ms) continue;
+        if (!nr_time.empty()) nr_time += " · ";
+        if (split) nr_time += gui::Display(NR_STAGE_NAMES[i]) + " ";
+        nr_time += std::format("{:.2f} ms", *gpu_ms);
+      }
+      const float timing_width = nr_time.empty() ? 0.f : gui::CalcTextSize("NR GPU time").x;
+      const float key_width = std::max({timing_width, gui::CalcTextSize("Running at").x, gui::CalcTextSize("Motion vectors").x,
                                        gui::CalcTextSize("Backend").x, gui::CalcTextSize("Resolution").x});
-      const float value_x = gui::GetCursorPosX() + key_width + style::BlockGap();
-      const bool inline_values = key_width <= gui::GetContentRegionAvail().x * 0.40f;
+      const float value_offset = style::SnapUp(key_width) + style::BlockGap();
+      const float value_x = gui::GetCursorPosX() + value_offset;
+      const bool inline_values = value_offset <= gui::GetContentRegionAvail().x * 0.40f;
       const auto row = [inline_values, value_x](const char* key, const std::string& value) {
         widgets::SecondaryWrapped(key);
         if (inline_values) gui::SameLine(value_x);
@@ -1003,6 +1017,12 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       row("Motion vectors", view.live.motion);
       if (!view.details_backend.empty()) row("Backend", view.details_backend);
       row("Resolution", view.live.resolution);
+      if (!nr_time.empty()) {
+        row("NR GPU time", nr_time);
+        if (gui::IsItemHovered()) {
+          widgets::ItemTooltip("%s", gui::Display("Latest GPU time for NR evaluation at each stage. Includes all passes and the extra Keep faces evaluation when active.").c_str());
+        }
+      }
       if (!view.setup.why.empty()) {
         const std::string why = "Why: " + view.setup.why;
         widgets::SecondaryWrapped(why.c_str());
@@ -1026,44 +1046,39 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     switch (card.button) {
       case CardButton::NONE: break;
       case CardButton::RETRY_NOW:
-        if (gui::Button("Retry now")) state->retry_now = true;
+        widgets::NextGap(style::BlockGap());
+        if (widgets::PrimaryButton("Retry now")) state->retry_now = true;
         break;
       case CardButton::CLEAR_LATCH:  // Each blocked feature has its own explicit recovery action above the card.
         break;
     }
   });
-  gui::PopStyleVar();
 
   const auto rows = [&](std::initializer_list<std::string_view> keys) {
     for (const auto key : keys) changed |= DrawRow(*FindSetting(key), view, settings, state, true);
   };
   // The NR stage and Motion vectors toggles, in pipeline order, at the top
   // of the panel -- the decisions that shape everything else, because they determine which later controls apply.
-  widgets::NextGap(style::SectionGap());
-  const bool placement_changed = SectionChanged(*settings, SettingSection::PLACEMENT);
-  if (widgets::SectionCaption("Setup", "Reset", placement_changed && !state->defaults_view)) {
-    ResetSection(settings, SettingSection::PLACEMENT);
-    const Settings defaults = DefaultSettings();  // the three highlights follow at once, each to the best option that can run (the stage first)
-    state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(SourcePickOf(defaults, view.dlss_explicit)), view.setup);
-    state->setup_settle.ClickedBest(SetupRow::MOTION, static_cast<uint32_t>(MotionPickOf(defaults)), view.setup, true);
-    state->setup_settle.ClickedBest(SetupRow::RESOLUTION, static_cast<uint32_t>(defaults.resolution_mode), view.setup);
-    changed = true;
-  }
-  widgets::Panel("##stage_picker", [&] { changed |= DrawStagePicker(view, settings, state); });
-  widgets::NextGap(style::BlockGap());
+  widgets::Panel("##stage_picker", [&] {
+    const bool placement_changed = SectionChanged(*settings, SettingSection::PLACEMENT);
+    if (widgets::SectionCaption("Setup", "Reset", placement_changed && !state->defaults_view)) {
+      ResetSection(settings, SettingSection::PLACEMENT);
+      const Settings defaults = DefaultSettings();
+      state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(SourcePickOf(defaults, view.dlss_explicit)), view.setup);
+      state->setup_settle.ClickedBest(SetupRow::MOTION, static_cast<uint32_t>(MotionPickOf(defaults)), view.setup, true);
+      state->setup_settle.ClickedBest(SetupRow::RESOLUTION, static_cast<uint32_t>(defaults.resolution_mode), view.setup);
+      changed = true;
+    }
+    widgets::NextGap(style::BlockGap());
+    changed |= DrawStagePicker(view, settings, state);
+  });
   changed |= DrawSetupGroups(view, settings, state);
 
   // ui-review.md §2 finding 7: Compare (Mine/Built-in) moves here, the first row of Look. The section's own
   // title lives in its card now (2026-11-06), drawn inside DrawLookGroups, so nothing sits bare on the panel.
-  widgets::NextGap(style::SectionGap());
   changed |= DrawLookGroups(view, settings, state);
-  widgets::NextGap(style::SectionGap());
   DrawDlssReflexSection(view, settings, state, changed);
 
-  if (settings->pass_count > 1u) {
-    widgets::NextGap(style::SectionGap());
-    widgets::SectionCaption("Passes");
-  }
   // Pass 2..pass_count, each its own collapsible tree, so the per-pass rows do not
   // flood the panel for the common one-pass case. The tree's own label shows its state.
   // Split chain: Runs at first; on the first pass of a later stage group, that stage's Resolution (and Custom scale) and, while Keep
@@ -1074,9 +1089,11 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     const char* stage = view.RecordedStageName(pass - 1u);
     if (!stage) stage = stage_row.runs == SourcePick::PRESENT ? view.SharedPresentName(*settings) : StageLabel(stage_row.runs);
     const std::string summary = gui::Display(stage) + " · " + gui::Display(follows ? "Same look as pass 1" : "Own look");
-    if (widgets::SectionHeader(gui::Display(std::format("Pass {}", pass)).c_str(), summary.c_str(), nullptr, false, nullptr)) {
-      gui::PushID(static_cast<int>(pass));
-      widgets::Panel("##pass_body", [&] {
+    gui::PushID(static_cast<int>(pass));
+    widgets::Panel("##pass_body", [&] {
+      const auto title = std::format("Pass {}", pass);
+      if (widgets::SectionHeader(title.c_str(), summary.c_str(), nullptr, false, nullptr)) {
+        widgets::NextGap(style::BlockGap());
         widgets::PairedGroups("##pass_groups", [&] {
           widgets::GroupHeading("Placement and network");
           changed |= DrawPassStageRow(*FindSetting(std::format("Pass{}Stage", pass)), view, settings, state);
@@ -1092,25 +1109,26 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
               changed |= DrawRow(descriptor, view, settings, state, true);
           }
         });
-      });
-      gui::PopID();
-    }
+      }
+    });
+    gui::PopID();
   }
 
-  widgets::NextGap(style::SectionGap());
-  bool reset = false;
   const bool shaping_changed = SectionChanged(*settings, SettingSection::RESULT) || SectionChanged(*settings, SettingSection::LIMITS);
   const bool shaping_enabled = state->defaults_view ? DefaultSettings().look.enabled : settings->look.enabled;
   const bool change_enabled = state->defaults_view ? DefaultSettings().look.stabilize_change : settings->look.stabilize_change;
-  gui::SetNextItemOpen(shaping_enabled || change_enabled, ImGuiCond_Once);
-  const bool shaping = widgets::SectionHeader("Result shaping", shaping_enabled ? "On" : "Off", "Reset",
+  widgets::Panel("##shaping_body", [&] {
+    bool reset = false;
+    gui::SetNextItemOpen(shaping_enabled || change_enabled, ImGuiCond_Once);
+    const bool shaping = widgets::SectionHeader("Result shaping", shaping_enabled ? "On" : "Off", "Reset",
                                                 shaping_changed && !state->defaults_view, &reset);
-  if (reset) {
-    ResetSection(settings, SettingSection::RESULT);
-    ResetSection(settings, SettingSection::LIMITS);
-    changed = true;
-  }
-  if (shaping) widgets::Panel("##shaping_body", [&] {
+    if (reset) {
+      ResetSection(settings, SettingSection::RESULT);
+      ResetSection(settings, SettingSection::LIMITS);
+      changed = true;
+    }
+    if (!shaping) return;
+    widgets::NextGap(style::BlockGap());
     rows({"ShapeResult"});
     if (shaping_enabled) {
       widgets::NextGap(style::BlockGap());
@@ -1136,26 +1154,31 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     rows({"StabilizeChange", "StabilizeChangeMs"});
   });
 
-  reset = false;
   const bool mask_changed = SectionChanged(*settings, SettingSection::MASK);
-  const bool mask = widgets::SectionHeader("Mask and HUD", nullptr, "Reset", mask_changed && !state->defaults_view, &reset);
-  if (reset) { ResetSection(settings, SettingSection::MASK); changed = true; }
-  if (mask) widgets::Panel("##mask_body", [&] {
+  widgets::Panel("##mask_body", [&] {
+    bool reset = false;
+    const bool mask = widgets::SectionHeader("Mask and HUD", nullptr, "Reset", mask_changed && !state->defaults_view, &reset);
+    if (reset) { ResetSection(settings, SettingSection::MASK); changed = true; }
+    if (!mask) return;
+    widgets::NextGap(style::BlockGap());
     widgets::PairedGroups("##mask_groups", [&] { widgets::GroupHeading("Mask"); rows({"Mask"}); },
                                          [&] { widgets::GroupHeading("HUD"); rows({"UICorrection"}); });
   });
 
-  reset = false;
   const bool fixes_changed = SectionChanged(*settings, SettingSection::FIXES_COLOR) || SectionChanged(*settings, SettingSection::FIXES_GUIDES);
-  const bool fixes = widgets::SectionHeader("Fixes", "Colour · Exposure · Motion", "Reset",
-                                              fixes_changed && !state->defaults_view, &reset);
-  if (reset) {
-    ResetSection(settings, SettingSection::FIXES_COLOR);
-    ResetSection(settings, SettingSection::FIXES_GUIDES);
-    changed = true;
-  }
-  if (fixes) widgets::Panel("##fixes_body", [&] {
+  widgets::Panel("##fixes_body", [&] {
+    bool reset = false;
+    const bool fixes = widgets::SectionHeader("Fixes", "Colour · Exposure · Motion", "Reset",
+                                             fixes_changed && !state->defaults_view, &reset);
+    if (reset) {
+      ResetSection(settings, SettingSection::FIXES_COLOR);
+      ResetSection(settings, SettingSection::FIXES_GUIDES);
+      changed = true;
+    }
+    if (!fixes) return;
+    widgets::NextGap(style::BlockGap());
     widgets::SecondaryText("Only change these if you know what you are doing.");
+    widgets::NextGap(style::BlockGap());
     // Manual exposure is Diffuse white alone: its row moves under Input exposure then (DiffuseWhiteInExposureGroup), so the control sits with the choice.
     widgets::PairedGroups("##colour_groups", [&] {
       widgets::GroupHeading("Colour");
@@ -1177,7 +1200,9 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     });
   });
 
-  if (widgets::SectionHeader("Advanced", "Routing · Runtime · Diagnostics", nullptr, false, nullptr)) widgets::Panel("##advanced_body", [&] {
+  widgets::Panel("##advanced_body", [&] {
+    if (!widgets::SectionHeader("Advanced", "Routing · Runtime · Diagnostics", nullptr, false, nullptr)) return;
+    widgets::NextGap(style::BlockGap());
     widgets::PairedGroups("##advanced_groups", [&] {
       widgets::GroupHeading("Routing");
       rows({"PresentWithFrameGen", "BeforeFGMotion", "VulkanNr", "AllowCrossQueuePasses", "UseD3D9Ex"});
@@ -1191,16 +1216,22 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     if (settings->keep_faces) {
       widgets::NextGap(style::BlockGap());
       if (widgets::SectionHeader("Face mask tuning", "Keep faces", nullptr, false, nullptr)) {
+        widgets::NextGap(style::BlockGap());
         rows({"ShowFaceMask", "FaceMaskThreshold", "FaceMaskFull", "FaceMaskStrength", "FaceMaskSoftness", "FaceEdgeFalloff",
               "FaceLightingDensity", "FaceSpeckSize", "FaceFillSkin", "FaceFillRadius", "FaceFillTolerance"});
       }
     }
   });
-  if (widgets::SectionHeader("Details", "Recorded passes", nullptr, false, nullptr)) widgets::Panel("##details_body", [&] { DrawDetails(view, *settings, *state); });
-  widgets::NextGap(style::SectionGap());
+  widgets::Panel("##details_body", [&] {
+    if (widgets::SectionHeader("Details", "Recorded passes", nullptr, false, nullptr)) {
+      widgets::NextGap(style::BlockGap());
+      DrawDetails(view, *settings, *state);
+    }
+  });
+  widgets::NextGap(style::CardGap());
 
   // Restore all defaults, confirmed once before it takes effect.
-  if (gui::Button("Restore all defaults")) {
+  if (widgets::QuietAction("Restore all defaults")) {
     state->confirm_restore = true;
   }
   if (widgets::ConfirmDialog("Restore all defaults###restore_defaults",

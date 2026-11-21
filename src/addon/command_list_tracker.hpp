@@ -22,6 +22,7 @@ struct __declspec(uuid("3f2a9c64-8b0e-4f1d-9e57-c1a2b3d4e5f6")) ListState {
   reshade::api::command_list* list = nullptr;
   reshade::api::device* device = nullptr;
   state::ComputeShadow shadow;
+  std::vector<std::shared_ptr<sources::NrTimingSlot>> nr_timing;  // retained while the closed list may execute again
   std::vector<uint64_t> tokens;  // completion tokens recorded on this list and not yet submitted
   uint64_t first_token = 0u;     // the first Uplift token since the last Reset; 0 = none
   bool executed = false;         // submitted at least once since the last Reset
@@ -71,6 +72,7 @@ class ReshadeDlssFrameHost final : public sources::DlssFrameHost {
   bool StateKnown() override;
   void ReplayState(state::RestoreMode mode) override;
   void AttachToken(uint64_t token) override;
+  void HoldTiming(const std::shared_ptr<sources::NrTimingSlot>& slot) override { state_->nr_timing.push_back(slot); }
 
  private:
   ListState* state_;

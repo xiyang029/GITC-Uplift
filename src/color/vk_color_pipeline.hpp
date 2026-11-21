@@ -41,7 +41,7 @@ struct VkEncodePass {
   VkSampledView exposure;       // optional 1x1 exposure texture
   float exposure_factor = 1.f;  // DLSS.Exposure.Scale / DLSS.Pre.Exposure
   nr::Rect region;              // the part of `source` resampled to the image; all zero = width x height at (0, 0)
-  nr::Size canvas;              // the model texture: the image plus mirrored padding; empty = the image
+  nr::Size canvas;              // the model texture, matching the image; empty = automatic
   uint32_t options = 0u;        // shader_options (the primaries, the near-black guard)
   nr::foveation::Grid foveation;
 };
@@ -82,7 +82,7 @@ struct VkMotionPass {
   nr::Rect region;                      // their region in `source`
   VkImageView target = VK_NULL_HANDLE;  // RG16F storage, GENERAL
   nr::Size image;                       // the region resampled to this size, at the target's origin
-  nr::Size canvas;                      // the target's size: the image plus mirrored padding
+  nr::Size canvas;                      // the target's size, matching the image
   float scale_x = 1.f;                  // multiplies the vectors into target pixels
   float scale_y = 1.f;
   float offset_x = 0.f;  // added in destination pixels, before any vertical flip

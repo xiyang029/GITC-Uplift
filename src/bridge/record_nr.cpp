@@ -19,8 +19,10 @@ class BridgeDlssHost final : public sources::DlssFrameHost {
   bool StateKnown() override { return true; }
   void ReplayState(state::RestoreMode /*mode*/) override {}
   void AttachToken(uint64_t token) override { tokens.push_back(token); }
+  void HoldTiming(const std::shared_ptr<sources::NrTimingSlot>& slot) override { timing = slot; }
   ID3D12GraphicsCommandList* list = nullptr;
   std::vector<uint64_t> tokens;
+  std::shared_ptr<sources::NrTimingSlot> timing;
 };
 
 // One DLSS stage's recording on the private list: a fresh UPLIFT_MASK into NR's own copy (RecordNr's step), the frame NR reads moved onto the shared copies,
@@ -122,6 +124,7 @@ DlssHandoff RunDlssStage(D3D11Bridge& bridge, addon::DeviceContext& context, add
       now);
   if (!host.tokens.empty()) {
     if (handoff.executed) {
+      if (host.timing) sources::NrGpuTiming::SetSubmissionQueue({&host.timing, 1u}, bridge.Queue());
       context.SubmitTokens(host.tokens, bridge.Queue(), GetCurrentThreadId(), now);  // after the native submit: stamped at once
       context.StampThread(GetCurrentThreadId());
     } else {

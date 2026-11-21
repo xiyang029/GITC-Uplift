@@ -62,7 +62,6 @@ void GlClient::ReleaseShared(gl::GameHost& host) {
   Retire(host, &mask_);
   Retire(host, &motion_);
   mask_fresh_ = false;
-  floor_probed_ = false;
 }
 
 void GlClient::ReleaseMask(gl::GameHost& host) {
@@ -318,18 +317,6 @@ bool GlClient::Run(gl::GameHost& host, const gl::ImageInfo& frame, const gl::Ima
   if (!latch_.empty() || in_flight_ || frame.handle == 0u || frame.samples != 1u || !host.Valid()) return false;
   if (color_.gl.texture == 0u || color_.size != frame.size || color_.format != gl::SharedFormatOf(frame.format)) return false;
   ipc::Run run = {.point = static_cast<uint32_t>(point)};
-  if (!fenced_ && !nr::MeetsNrFloor(frame.size)) {
-    // SHARED_CPU: below NR's floor nothing can come back, and a RUN costs a CPU wait. After the first RUN at this size (whose reply's status says why) no RUN
-    // at all.
-    if (floor_probed_) return false;
-    const bool replied = link.Run(run).has_value();
-    run_sent_ = link.RunSent();
-    floor_probed_ = run_sent_;  // a RUN that was refused (another request outstanding) is tried again
-    if (!replied) {
-      in_flight_ = true;
-    }
-    return false;
-  }
   return fenced_ ? RunFenced(host, frame, motion, run, link) : RunCpuOrdered(host, frame, motion, run, link);
 }
 

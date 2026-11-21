@@ -66,7 +66,7 @@ PipelineResult AfterDlssSource::Run(DlssFrameHost& host, const ngx_hooks::DlssFr
   if (config.controls.intensity <= 0.f) return {.reason = nr::SkipReason::INTENSITY_ZERO};
   const GameFrame game = ReadGameFrame(frame, frame.output, region, (reset_hint || reset_was_owed), config);
   const PipelineResult result = RecordOnGameList(host, timeline_, config.restore, [&] {
-    return pipeline_.RecordUav(list, game.target, game.inputs, config.controls, config.layout, config.part);
+    return pipeline_.RecordUav(list, game.target, game.inputs, config.controls, config.layout, config.part, &host);
   });
   if (result.nr_applied) {
     reset_owed_ = false;

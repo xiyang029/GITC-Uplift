@@ -368,8 +368,8 @@ void Helper::FillStatus(ipc::Status* out) const {
   out->upsampling = static_cast<uint32_t>(status.upsampling);
   out->work_width = status.work.width;
   out->work_height = status.work.height;
-  out->canvas_width = status.canvas.width;
-  out->canvas_height = status.canvas.height;
+  out->canvas_width = status.work.width;
+  out->canvas_height = status.work.height;
   out->frame_width = status.frame.width;
   out->frame_height = status.frame.height;
   ipc::CopyText(out->session_message, session.message);

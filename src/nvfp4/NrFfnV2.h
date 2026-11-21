@@ -17,8 +17,8 @@ struct ID3D12GraphicsCommandList;
 namespace NrFfnV2 {
 struct Options {
     // modelFolders false: the folder with ffn_v2.cubin, ffn_v2.bin and ffn_v2.txt of the model in use (probes).
-    // modelFolders true: the folder with ffn_v2.cubin and the modelA weight subfolder. Only evaluations that
-    // match Model A's launch sequence are replaced.
+    // modelFolders true: the folder with ffn_v2.cubin and the modelA/modelB weight subfolders. Only evaluations
+    // matching the selected model's launch sequence are replaced.
     std::filesystem::path assets;
     bool modelFolders = false;
     unsigned expandGroups = 8, expandHalves = 2;    // CTA shape of the expand kernel: 16-token groups (2, 4, 8) x 64-output halves (1, 2)
@@ -45,7 +45,7 @@ void Enable(const Options& options);        // throws on an unsupported kernel s
 void Disable();                             // takes effect at the next evaluation; a pair in progress is completed
 // true: the evaluations that follow keep the runtime's kernels, with everything loaded kept; false again: as Enable()
 // left it. For hosts that choose per evaluation; it takes effect at an evaluation's first feed-forward layer.
-void Pause(bool paused);
+void Pause(bool paused, bool modelB = false);
 // Destroy everything created on `device`: kernels, weights and buffers. Call only when the GPU can no longer be
 // running command lists recorded with them (the host's queue has drained) or once the device is lost. Without it
 // these objects keep the device alive.
@@ -69,6 +69,7 @@ constexpr unsigned kDefaultSet = ~0u;
 void UseSet(unsigned set);
 // Are this set's weight files all there? Reports the missing file relative to the asset directory.
 bool SetComplete(unsigned set, std::string* missing);
-unsigned long long Faults();                          // pairs left to the runtime or run with another set's weights
+struct Work { unsigned long long pairs, faults; };
+Work CompletedWork();  // pairs replaced and pairs left to the runtime or run with another set's weights
 void SkipPair(ID3D12GraphicsCommandList* commands);
 }

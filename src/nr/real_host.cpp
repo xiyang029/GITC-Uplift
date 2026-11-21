@@ -9,6 +9,7 @@
 
 #include "nr/feature.hpp"
 #include "nr/log.hpp"
+#include "nvfp4/NrNvfp4.h"
 
 namespace uplift::nr {
 
@@ -39,6 +40,9 @@ NVSDK_NGX_Result RealHost::LoadRuntime() {
     snippet_.Unload();
     return bind_result;
   }
+  // Session only reloads after its failed work has drained. Retry now, before new features evaluate,
+  // so a transient NVFP4 failure does not survive Retry now or the automatic retry backoff.
+  DlssNr::Nvfp4::Retry();
   SetEnvironmentVariableW(UPLIFT_NR_RUNTIME_MARKER, L"1");
   return bind_result;
 }

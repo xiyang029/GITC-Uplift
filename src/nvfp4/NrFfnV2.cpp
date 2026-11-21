@@ -50,9 +50,11 @@ constexpr uint64_t kMaxTokens = 1u << 15;   // four times an 8K frame's; our buf
 constexpr size_t kMaxSessions = 6;          // frame sizes per device whose buffers are held (about 50 MB each at 4K)
 // Kernels of the runtime we recognise by name.
 enum Kind : unsigned { ExpandPublish, ExpandChained, Contract, Clear, Other };
-// Position of Model A's first feed-forward expand, counted in launches from its cc_cb_clear.
-constexpr unsigned kFirstExpand = 58;
-constexpr const wchar_t* kModelFolder = L"modelA";
+// Position of an evaluation's first feed-forward expand, counted in launches from its cc_cb_clear, in every audited
+// layout: Model A 58, Model B 20. Each model's 4-bit files sit in a folder of their own, named for the status line.
+constexpr unsigned kFirstExpand[2] = {58, 20};
+constexpr const wchar_t* kModelFolder[2] = {L"modelA", L"modelB"};
+constexpr const char* kModelName[2] = {"Model A", "Model B"};
 
 void Check(HRESULT result, const char* what) {
     if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed: D3D12 status " + std::to_string(unsigned(result)));
@@ -118,7 +120,7 @@ struct Device {
     bool kernels = false;
     std::string failure;
     NVDX_ObjectHandle module = nullptr, pack = nullptr, expand = nullptr, contract = nullptr;
-    ModelWeights weights;
+    std::array<ModelWeights, 2> models;     // Model A, Model B: loaded when a pass of that model is first replaced
 };
 // Our buffers for one token count. Each block has its own activations and flags, so nothing of ours is ever
 // rewritten while an earlier block's kernels may still be reading it.
@@ -144,7 +146,7 @@ struct ListState {
     unsigned told = 0;          // RuntimeLaunches(): the runtime's own count, when a layer above left launches out
     unsigned sourceTokens = 0;  // Before optional ViT pooling: retain the original resolution's family selection.
     bool dropping = false;      // a pair failed half-way: nothing more of this evaluation is launched
-    bool replacing = false;     // decided at the evaluation's first expand
+    int model = -1;             // selected at the first expand (0: Model A, 1: Model B); -1 passes through
     unsigned nextBlock = 0;
     Pending pending;
 };
@@ -155,8 +157,9 @@ struct State {
     std::recursive_mutex mutex;
     bool enabled = false, broken = false, failed = false;
     bool paused = false;                        // Pause(): this evaluation is the runtime's
+    bool modelB = false;                        // expected layout for the current evaluation
     Options options;
-    bool modelFiles = true;                    // Model A's manifest is present in a packaged layout
+    std::array<bool, 2> modelFiles{true, true}; // a model's folder is in the asset folder (a package may leave Model B's out)
     std::string status = "off";
     std::string notice;                         // why an evaluation was last left to the runtime; logged when it changes
     uint64_t evaluations = 1, lastReplaced = 0; // cc_cb_clear launches seen (+1); the evaluation that last had a pair replaced
@@ -445,7 +448,8 @@ unsigned SharedBytes(unsigned groups, unsigned halves) {
 
 // The set of weights this pair will use. There is no numbered set file for the requested one, or trained weights
 // were asked for but there is no such file: record a fault and fall back to the first set.
-uint64_t SetAt(State& s, const ModelWeights& weights, const Options& opt) {
+uint64_t SetAt(State& s, const ModelWeights& weights, const Options& opt, int model) {
+    if (model == 1) return 0;   // Model B uses only the base set from its own folder.
     if (s.passSet < weights.setAt.size() && weights.setAt[s.passSet]) return weights.setAt[s.passSet];
     if (s.passSet < weights.setAt.size() || (opt.trained && !weights.trained && !weights.trainedIsFirst)) ++s.faults;
     return opt.trained ? weights.trained : 0;
@@ -453,12 +457,14 @@ uint64_t SetAt(State& s, const ModelWeights& weights, const Options& opt) {
 
 // chainedInput: x comes with the runtime's producer flags (o.p[6]); otherwise x is complete once the work recorded
 // before us has run, which a barrier ensures. Everything that can fail here fails before the first launch of ours.
-int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, const Original& o, unsigned block, bool chainedInput) {
+int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, const Original& o, unsigned model, unsigned block, bool chainedInput) {
     auto& s = S();
     auto& d = s.devices[device];
     LoadKernels(d, device);
-    auto& weights = d.weights;
-    LoadWeights(weights, device, s.options.modelFolders ? s.options.assets / kModelFolder : s.options.assets);
+    auto& weights = d.models[model];
+    if (!weights.ready) {
+        LoadWeights(weights, device, s.options.modelFolders ? s.options.assets / kModelFolder[model] : s.options.assets);
+    }
     const uint32_t tokens = o.dims[0] * o.dims[1], tiles = (tokens + 127) / 128;
     auto& session = SessionFor(device, tokens);
     auto& buffers = session.blocks[block];
@@ -478,7 +484,7 @@ int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, cons
                           tokens, w.tx, generation};
     LaunchKernel(commands, d.pack, &pack, sizeof pack, tiles * 8, 16, 0);
     if ((opt.barriers & 2) || !chained) Barrier(commands);
-    const uint64_t set = SetAt(s, weights, opt);
+    const uint64_t set = SetAt(s, weights, opt, int(model));
     const ExpandParams expand{buffers.xq.Address(), weights.weights.Address() + set + w.w1, buffers.hq.Address(), session.FlagAddress(block, tiles, true),
                               chained ? session.FlagAddress(block, tiles, false) : 0, tokens, w.out1, w.th,
                               opt.expandGroups, opt.expandHalves, generation};
@@ -488,15 +494,15 @@ int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, cons
     return generation;
 }
 
-void RecordContract(ID3D12GraphicsCommandList* commands, ID3D12Device* device, const Original& o, unsigned block, int generation) {
+void RecordContract(ID3D12GraphicsCommandList* commands, ID3D12Device* device, const Original& o, unsigned model, unsigned block, int generation) {
     auto& s = S();
     auto& d = s.devices.at(device);
     const uint32_t tokens = o.dims[0] * o.dims[1], tiles = (tokens + 127) / 128;
     auto& session = SessionFor(device, tokens);
-    const auto& weights = d.weights;
+    const auto& weights = d.models[model];
     const auto& w = weights.blocks[block];
     const auto& opt = s.options;
-    const uint64_t set = SetAt(s, weights, opt);
+    const uint64_t set = SetAt(s, weights, opt, int(model));
     const ContractParams contract{session.blocks[block].hq.Address(), weights.weights.Address() + set + w.w2, o.p[1], weights.weights.Address() + set + w.gain, o.p[2],
                                   o.p[7], o.p[4], opt.chained ? session.FlagAddress(block, tiles, true) : 0, tokens, w.out2,
                                   opt.contractGroups, opt.contractHalves, generation};
@@ -548,19 +554,25 @@ NvAPI_Status __cdecl CreateFunction(ID3D12Device* device, NVDX_ObjectHandle modu
     return result;
 }
 
-// In the packaged layout, take over only a recognised Model A evaluation.
-bool CanReplace(State& s, const ListState& list) {
-    if (!s.enabled || s.paused) return false;
-    if (!s.options.modelFolders) return true;
+// Which model the evaluation that has just reached its first expand belongs to (0: Model A, 1: Model B); -1 leaves it
+// to the runtime. In the packaged layout only a recognised evaluation is taken over: an unknown launch sequence, or a
+// model whose 4-bit folder the package does not carry, keeps the runtime's own kernels.
+int ChooseModel(State& s, const ListState& list) {
+    if (!s.enabled || s.paused) return -1;
+    if (!s.options.modelFolders) return 0;
     const unsigned launches = list.told ? list.told : list.launches;
-    if (!list.counting || launches != kFirstExpand) {
-        Notice(s, "off: the model's launch sequence is not a known one (" + std::to_string(launches) + " launches up to the transformer's feed-forward)");
-        return false;
+    const int model = s.modelB ? 1 : 0;
+    if (!s.modelFiles[model]) {
+        Notice(s, model == 1 ? "off: modelB/ffn_v2.txt is missing" : "off: modelA/ffn_v2.txt is missing");
+        return -1;
     }
-    if (!s.modelFiles) return false;
-    if (GetModuleHandleW(L"nvngx_dlssnr.dll")) return true;
+    if (!list.counting || launches != kFirstExpand[model]) {
+        Notice(s, "off: the launch sequence does not match the requested model (" + std::to_string(launches) + " launches up to the transformer's feed-forward)");
+        return -1;
+    }
+    if (GetModuleHandleW(L"nvngx_dlssnr.dll")) return model;
     Notice(s, "off: no NR runtime is loaded");
-    return false;
+    return -1;
 }
 
 // Something went wrong while a feed-forward launch was being replaced. The state is settled before anything is
@@ -570,7 +582,7 @@ NvAPI_Status Fail(State& s, ListState& list, ID3D12GraphicsCommandList* commands
     const bool half = list.pending.active;
     ++s.faults;
     s.enabled = false;
-    list.replacing = false;
+    list.model = -1;
     list.pending.active = false;
     if (!half) {
         // Nothing of this pair was replaced (our pack alone is harmless): the runtime's own kernels carry on.
@@ -612,15 +624,15 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
     auto& pending = list.pending;
     try {
         if (kind == Contract && !pending.active) {      // its expand ran as the runtime's own
-            if (list.replacing) ++s.passedThrough;
+            if (list.model >= 0) ++s.passedThrough;
             return s.launch(commands, kernels, count);
         }
         if (kind != Contract) {
             if (pending.active) throw std::runtime_error("a second expand arrived before the contract of the first");
             if (kind == ExpandPublish) {
                 list.nextBlock = 0;
-                list.replacing = CanReplace(s, list);
-                if (list.replacing && kernels->paramSize == 72 && kernels->pParams) {
+                list.model = ChooseModel(s, list);
+                if (list.model >= 0 && kernels->paramSize == 72 && kernels->pParams) {
                     uint32_t dims[2];
                     memcpy(dims, static_cast<const char*>(kernels->pParams) + 64, 8);
                     const uint64_t size = uint64_t(dims[0]) * dims[1];
@@ -639,12 +651,12 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                         if (held >= kMaxSessions) text = "off at this resolution: too many frame sizes since the session started";
                     }
                     if (!text.empty()) {
-                        list.replacing = false;
+                        list.model = -1;
                         Notice(s, text);
                     }
                 }
             }
-            if (!list.replacing) return s.launch(commands, kernels, count);
+            if (list.model < 0) return s.launch(commands, kernels, count);
         }
         if (kernels->paramSize != 72 || !kernels->pParams) throw std::runtime_error("the runtime's feed-forward parameter block is not 72 bytes");
         Original o;
@@ -658,7 +670,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
             if (kernels->gridDim.x != 32 * tiles || kernels->gridDim.y != 1 || kernels->gridDim.z != 1 || kernels->blockDim.x != 32 ||
                 kernels->blockDim.y != 4 || kernels->blockDim.z != 1 || kernels->dynSharedMemBytes)
                 throw std::runtime_error("the runtime's expand launch has an unexpected shape");
-            const int generation = RecordExpand(commands, target->device, o, list.nextBlock, kind == ExpandChained);
+            const int generation = RecordExpand(commands, target->device, o, unsigned(list.model), list.nextBlock, kind == ExpandChained);
             pending = {true, target->device, o.p[0], o.p[2], o.p[7], {o.dims[0], o.dims[1]}, list.nextBlock, generation};
             return NVAPI_OK;
         }
@@ -668,14 +680,14 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
             kernels->blockDim.y != 4 || kernels->blockDim.z != 1)
             throw std::runtime_error("the contract launch does not match the expand we replaced");
         if (s.testFailAt && s.pairs + 1 == s.testFailAt) throw std::runtime_error("injected test failure (NR_NVFP4_TEST_FAIL)");
-        RecordContract(commands, target->device, o, pending.block, pending.generation);
+        RecordContract(commands, target->device, o, unsigned(list.model), pending.block, pending.generation);
         // The pair is complete: nothing from here on may throw, or the handler below would take it for unreplaced.
         pending.active = false;
         ++s.pairs;
         s.lastReplaced = s.evaluations;
         if (!list.nextBlock++) {
             try {
-                s.status = std::string("active, ") + (s.options.modelFolders ? "Model A" : "the given model") + ", " +
+                s.status = std::string("active, ") + (s.options.modelFolders ? kModelName[list.model] : "the given model") + ", " +
                            std::to_string(tokens) + " tokens" + (s.options.chained ? "" : ", barriers");
             } catch (...) {
             }
@@ -739,12 +751,11 @@ void Enable(const Options& options) {
     // Our flags cover a whole 128-token tile, the runtime's a tile x 128 output channels.
     if (options.chained && (options.expandGroups != 8 || options.contractGroups != 8 || options.contractHalves != 2))
         throw std::runtime_error("Flag-chained NVFP4 kernels need 8-group CTAs and a 2-half contract");
-    if (options.assets != s.options.assets || options.modelFolders != s.options.modelFolders) {
-        // Another asset folder: forget earlier load failures. What is already loaded stays in use.
-        for (auto& [device, d] : s.devices) {
-            if (!d.kernels) d.failure.clear();
-            if (!d.weights.ready) d.weights.failure.clear();
-        }
+    // An explicit enable also retries transient load failures at the same asset path.
+    // Keep loaded and parked allocations: recorded command lists may still refer to them.
+    for (auto& [device, d] : s.devices) {
+        if (!d.kernels) d.failure.clear();
+        for (auto& m : d.models) if (!m.ready) m.failure.clear();
     }
     // Development: NR_NVFP4_TEST_FAIL=n fails the n-th replaced pair between its two halves, to exercise the path
     // that drops the rest of an evaluation.
@@ -752,9 +763,10 @@ void Enable(const Options& options) {
     const DWORD length = GetEnvironmentVariableA("NR_NVFP4_TEST_FAIL", text, sizeof text);
     s.testFailAt = length && length < sizeof text ? strtoull(text, nullptr, 10) : 0;
     s.options = options;
-    const fs::path root = options.modelFolders ? options.assets / kModelFolder : options.assets;
     std::error_code absent;
-    s.modelFiles = !options.modelFolders || fs::exists(root / "ffn_v2.txt", absent);
+    for (int model = 0; model < 2; ++model) // a package may leave a model's folder out
+        s.modelFiles[model] = !options.modelFolders || fs::exists(options.assets / kModelFolder[model] / "ffn_v2.txt", absent);
+    const fs::path root = options.modelFolders ? options.assets / kModelFolder[0] : options.assets;
     s.trainedFile = fs::exists(root / "ffn_v2_trained.bin", absent);
     for (unsigned n = 0; n < s.setFile.size(); ++n)
         s.setFile[n] = n >= 2 && fs::exists(root / ("ffn_v2_set" + std::to_string(n) + ".bin"), absent);
@@ -768,10 +780,11 @@ void Enable(const Options& options) {
     s.lastReplaced = 0;
 }
 
-void Pause(bool paused) {
+void Pause(bool paused, bool modelB) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
     s.paused = paused;
+    s.modelB = modelB;
 }
 
 void Disable() {
@@ -817,10 +830,10 @@ bool SetComplete(unsigned set, std::string* missing) {
     return complete;
 }
 
-unsigned long long Faults() {
+Work CompletedWork() {
     auto& s = S();
     std::lock_guard guard(s.mutex);
-    return s.faults + s.passedThrough;
+    return {s.pairs, s.faults + s.passedThrough};
 }
 
 void SkipPair(ID3D12GraphicsCommandList* commands) {
@@ -842,9 +855,10 @@ void ReleaseDevice(ID3D12Device* device) {
         if (s.destroyFunction)
             for (auto function : {d.pack, d.expand, d.contract}) if (function) s.destroyFunction(device, function);
         if (s.destroyModule && d.module) s.destroyModule(device, d.module);
-        const auto& m = d.weights;
-        if (s.destroyFunction) for (auto f : {m.partial, m.reduce, m.direct}) if (f) s.destroyFunction(device, f);
-        if (s.destroyModule && m.smallModule) s.destroyModule(device, m.smallModule);
+        for (auto& m : d.models) {
+            if (s.destroyFunction) for (auto f : {m.partial, m.reduce, m.direct}) if (f) s.destroyFunction(device, f);
+            if (s.destroyModule && m.smallModule) s.destroyModule(device, m.smallModule);
+        }
         s.devices.erase(found);
     }
     for (auto i = s.sessions.begin(); i != s.sessions.end();) i = i->first.first == device ? s.sessions.erase(i) : std::next(i);
@@ -858,10 +872,8 @@ std::string Status(bool counters) {
     std::string status = s.status;
     if (s.enabled && s.options.trained) {
         bool loaded = false, found = false;
-        for (const auto& [device, d] : s.devices) {
-            const auto& m = d.weights;
-            if (m.ready) { loaded = true; found = found || m.trained != 0 || m.trainedIsFirst; }
-        }
+        for (const auto& [device, d] : s.devices)
+            if (const auto& m = d.models[0]; m.ready) { loaded = true; found = found || m.trained != 0 || m.trainedIsFirst; }
         if (loaded) status += found ? ", trained weights" : ", trained weights not found (the first set is in use)";
     }
     if (s.smallContracts) status += ", small-map contracts " + std::to_string(s.smallContracts);

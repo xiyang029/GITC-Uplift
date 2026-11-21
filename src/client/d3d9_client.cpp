@@ -147,7 +147,6 @@ void D3D9Client::ReleaseGameObjects() {
   twin_format_ = D3DFMT_UNKNOWN;
   bytes_per_pixel_ = 0u;
   vram_bytes_ = 0u;
-  floor_probed_ = false;
 }
 
 void D3D9Client::ReleaseAll() {
@@ -425,19 +424,6 @@ bool D3D9Client::Run(IDirect3DSurface9* source, IDirect3DTexture9* motion, addon
     return false;
   }
   ipc::Run run = {.point = static_cast<uint32_t>(point)};
-  if (!nr::MeetsNrFloor({width_, height_})) {
-    // Below NR's floor nothing can come back: no copy, and after the first RUN at this size (whose reply's status says why) no RUN at all,
-    // so the frame costs the game nothing.
-    if (floor_probed_) return false;
-    ReleaseImage(&motion_);  // this RUN carries `motion` = 0, which retires the helper's copy: keep none here either
-    const bool replied = link.Run(run).has_value();
-    run_sent_ = link.RunSent();
-    floor_probed_ = run_sent_;  // a RUN that was refused (another request outstanding) is tried again
-    if (!replied) {
-      in_flight_ = true;
-    }
-    return false;
-  }
   if (gpu_pending_) {
     // An earlier frame's 2 s wait ran out, so its copy may still be queued on the game's GPU. No RUN is out for it (the helper is
     // not using the block or the texture), and this frame sends and touches nothing until the query shows the GPU passed it.

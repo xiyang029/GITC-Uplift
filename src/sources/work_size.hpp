@@ -3,6 +3,7 @@
 #include <chrono>
 #include <optional>
 
+#include "nr/foveation.hpp"
 #include "nr/types.hpp"
 
 namespace uplift::sources {
@@ -17,11 +18,13 @@ inline constexpr double PERFORMANCE_SCALE = 0.5;
 // - each side is rounded to the nearest even number;
 // - below the NR floor, both sides are scaled up by one factor until it is met, rounded up to even;
 // - the result is capped at `output`.
+// - if that cap lost the floor under asymmetric scaling, each side is clamped to the output's oriented floor.
+// An output below the floor is returned unchanged: callers skip it rather than padding or enlarging it.
 // A target that reaches `output` in both sides returns `output` itself (Full), odd sides included.
 [[nodiscard]] nr::Size WorkSize(double target_width, double target_height, nr::Size output);
-// The floor-sized canvas an image below the floor is padded into, landscape or
-// portrait; `image` itself when it meets the floor.
-[[nodiscard]] nr::Size CanvasSize(nr::Size image);
+// Every NR stage and the UI use the same floor-limited FOV plan. The uniform image must already meet the floor.
+// A smaller image remains unwarped and will be skipped by the recording.
+[[nodiscard]] nr::foveation::Plan FoveatedWorkPlan(bool enabled, const nr::foveation::Shares& shares, nr::Size output, nr::Size uniform);
 
 // The applied size moves to the target:
 // - once the target has differed from it by more than SETTLE_PERCENT in either side for SETTLE_TIME;

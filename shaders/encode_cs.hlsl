@@ -14,7 +14,7 @@ cbuffer EncodeConstants : register(b0) {
   uint source_y;
   uint source_width;
   uint source_height;
-  uint canvas_width;   // the model texture: the image plus mirrored padding
+  uint canvas_width;   // the model texture, matching the work image
   uint canvas_height;
   uint change_mode;    // 0: encode; 1: extract changes with recomputed input; 2: extract changes with preserved FP16 input
   uint options;        // OPTION_* (the primaries, the near-black guard)
@@ -132,7 +132,7 @@ void main(uint3 id : SV_DispatchThreadID) {
   if (change_mode == 2u) {
     model_value = model_input_texture.Load(int3(id.xy, 0)).rgb;
   } else {
-    model_value = ModelAt(uint2(Mirror(id.x, width), Mirror(id.y, height)), scale);
+    model_value = ModelAt(id.xy, scale);
   }
   if (change_mode != 0u) {
     output_texture[id.xy] =

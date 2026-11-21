@@ -147,7 +147,6 @@ class D3D9Client {
   uint64_t view_bytes_ = 0u;
   uint32_t view_pitch_ = 0u;
   uint64_t vram_bytes_ = 0u;
-  bool floor_probed_ = false;  // a frame below NR's floor already sent its one RUN (the status then says why)
   bool in_flight_ = false;     // a RUN has no reply yet: nothing touches the block (or the shared texture) until a FRAME reply
   bool gpu_pending_ = false;   // a WaitForGpu ran out its 2 s: this side's copy may still run on the GPU, so frames skip until it is done
   bool run_sent_ = false;

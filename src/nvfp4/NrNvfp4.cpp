@@ -26,8 +26,9 @@ constexpr unsigned kStarting = 30;
 
 struct Work
 {
-    unsigned long long swin = 0, net = 0, ffn = 0;
-    unsigned long long swinFaults = 0, netFaults = 0, ffnFaults = 0;
+    unsigned long long swin = 0, net = 0;
+    unsigned long long swinFaults = 0, netFaults = 0;
+    NrFfnV2::Work ffn{};
 };
 
 void (*gLog)(const char*) = nullptr;
@@ -38,6 +39,7 @@ bool gAskedDestroy = false;
 std::string gEnableProblem; // a layer that could not be switched on: nothing can run
 std::string gRefused;       // a path that cannot run these models at all
 bool gOurs = false;         // the current evaluation requested a local model
+bool gModelB = false;       // ... or Model B's 4-bit feed-forward alone: only that layer is ours
 std::string gSetMissing;     // the pass-in-one model asked for has no weight files: nothing else is run in its place
 Work gBefore;
 unsigned gMissed = 0; // evaluations in a row that asked for our kernels and did not get them
@@ -117,10 +119,9 @@ Work Read()
     Work work;
     work.swin = SwinWork(NrSwin4::Status(true));
     work.net = After(NrNet4::Status(true), " replaced ");
-    work.ffn = After(NrFfnV2::Status(true), "feed-forward pairs replaced: ");
+    work.ffn = NrFfnV2::CompletedWork();
     work.swinFaults = NrSwin4::Faults();
     work.netFaults = NrNet4::Faults();
-    work.ffnFaults = NrFfnV2::Faults();
     return work;
 }
 
@@ -151,11 +152,11 @@ void* WrapNvapi(unsigned id, void* original)
     return NrFp8::WrapNvapi(id, NrNet4::WrapNvapi(id, NrSwin4::WrapNvapi(id, NrFfnV2::WrapNvapi(id, original))));
 }
 
-void Configure(bool wanted, const std::filesystem::path& assets)
+namespace
 {
-    std::lock_guard guard(gMutex);
-    if (!wanted || (gOn && assets == gAssets))
-        return;
+// Called under gMutex. Re-enabling retains GPU allocations that recorded lists may still reference.
+void ConfigureLayers(const std::filesystem::path& assets)
+{
     gOn = true;
     gAssets = assets;
     gEnableProblem.clear();
@@ -235,10 +236,28 @@ void Configure(bool wanted, const std::filesystem::path& assets)
         Say("FAILED to load, so a pass that asks for a 4-bit model is not applied: " + gEnableProblem);
 }
 
+} // namespace
+
+void Configure(bool wanted, const std::filesystem::path& assets)
+{
+    std::lock_guard guard(gMutex);
+    if (!wanted || (gOn && assets == gAssets))
+        return;
+    ConfigureLayers(assets);
+}
+
+void Retry()
+{
+    std::lock_guard guard(gMutex);
+    if (gOn)
+        ConfigureLayers(gAssets);
+}
+
 void BeginEvaluation(unsigned requestedPreset)
 {
     std::lock_guard guard(gMutex);
-    gOurs = IsNvfp4(requestedPreset);
+    gModelB = IsModelB(requestedPreset);
+    gOurs = IsNvfp4(requestedPreset) && !gModelB; // Model B: only its feed-forward is ours
     gFp8 = IsFp8(requestedPreset);
     if (gFp8)
     {
@@ -254,16 +273,28 @@ void BeginEvaluation(unsigned requestedPreset)
         return;
     }
     NrFp8::UseSet(0);
+    gSetMissing.clear();
+    if (gModelB) {
+        NrSwin4::Pause(true);
+        NrNet4::Pause(true);
+        NrFfnV2::UseSet(NrFfnV2::kDefaultSet);
+        NrFfnV2::Pause(!gOn, true);
+        if (gOn) gBefore.ffn = NrFfnV2::CompletedWork();
+        return;
+    }
+    if (!gOurs) {
+        PauseForEvaluation(true);
+        return;
+    }
     // A pass-in-one model is the same kernels with its own set of weights. The set must be chosen first: each
     // family checks the files of the set it will actually use.
     const unsigned set = WeightSet(requestedPreset);
     const unsigned taken = NrSwin4::UseSet(set ? set : NrSwin4::kDefaultSet);
     NrNet4::UseSet(taken);
     NrFfnV2::UseSet(taken);
-    gSetMissing.clear();
-    if (gOurs && !IsKnown(requestedPreset))
+    if (!IsKnown(requestedPreset))
         gSetMissing = "model " + std::to_string(requestedPreset) + " was removed from this build; choose another NR model";
-    else if (gOurs && gOn && gEnableProblem.empty())
+    else if (gOn && gEnableProblem.empty())
     {
         std::string file;
         const bool complete = NrSwin4::SetComplete(taken, &file) && NrNet4::SetComplete(taken, &file) &&
@@ -271,8 +302,8 @@ void BeginEvaluation(unsigned requestedPreset)
         if (!complete)
             gSetMissing = "a weight file of this model is missing or incomplete (OptiScaler/nvfp4/" + file + ")";
     }
-    PauseForEvaluation(!gOurs || !gSetMissing.empty());
-    if (gOurs && gOn)
+    PauseForEvaluation(!gOn || !gSetMissing.empty() || !gEnableProblem.empty());
+    if (gOn && gSetMissing.empty() && gEnableProblem.empty())
         gBefore = Read();
 }
 
@@ -289,7 +320,7 @@ void EndEvaluation(ID3D12GraphicsCommandList* list)
 bool OursRan(bool whole)
 {
     std::lock_guard guard(gMutex);
-    if (!gOurs)
+    if (!gOurs && !gModelB)
         return true;
     gRefused.clear();
     std::string why;
@@ -306,6 +337,16 @@ bool OursRan(bool whole)
         else if (NrFp8::Completed() == gFp8Completed)
             why = "the FP8 model did not see this pass's evaluation (" + NrFp8::Status(false) + ")";
     }
+    else if (gModelB)
+    {
+        const auto now = NrFfnV2::CompletedWork();
+        if (!gOn)
+            why = "the 4-bit feed-forward was not loaded";
+        else if (now.pairs <= gBefore.ffn.pairs)
+            why = "feed-forward: " + NrFfnV2::Status(false);
+        else if (now.faults > gBefore.ffn.faults)
+            why = "part of this pass ran without our kernels or weights (feed-forward: " + NrFfnV2::Status(false) + ")";
+    }
     else if (!gOn)
         why = "the 4-bit kernels were not loaded";
     else if (!gEnableProblem.empty())
@@ -320,7 +361,7 @@ bool OursRan(bool whole)
             why = "fused blocks: " + swin;
         else if (whole && now.net <= gBefore.net)
             why = "split blocks and transformer: " + NrNet4::Status(false);
-        else if (whole && now.ffn <= gBefore.ffn)
+        else if (whole && now.ffn.pairs <= gBefore.ffn.pairs)
             why = "feed-forward: " + NrFfnV2::Status(false);
         else if (NrFfnV2::Failed())
             why = "a feed-forward pair failed half-way";
@@ -328,14 +369,15 @@ bool OursRan(bool whole)
             why = "part of this pass ran with the runtime's own weights (fused blocks: " + NrSwin4::Status(false) + ")";
         else if (now.netFaults > gBefore.netFaults)
             why = "part of this pass ran without our kernels or weights (split blocks and transformer: " + NrNet4::Status(false) + ")";
-        else if (now.ffnFaults > gBefore.ffnFaults)
+        else if (now.ffn.faults > gBefore.ffn.faults)
             why = "part of this pass ran without our kernels or weights (feed-forward: " + NrFfnV2::Status(false) + ")";
     }
     if (why.empty())
     {
         if (!gRunning)
             Say(gFp8 ? "running: this pass is an FP8 model of ours (NVIDIA's kernels with our weights) | " + NrFp8::Status(false)
-                     : "running: this pass is our 4-bit kernels | " + NrSwin4::Status(false) + " | " + NrNet4::Status(false));
+                     : gModelB ? "running: this pass is Model B with our 4-bit feed-forward | " + NrFfnV2::Status(false)
+                               : "running: this pass is our 4-bit kernels | " + NrSwin4::Status(false) + " | " + NrNet4::Status(false));
         gRunning = true;
         gToldFailed = false;
         gMissed = 0;
@@ -345,7 +387,7 @@ bool OursRan(bool whole)
     gRunning = false;
     gWhy = std::move(why);
     // FP8 does not need the 4-bit recognition grace period.
-    const bool certain = gFp8 || !gEnableProblem.empty() || !gSetMissing.empty();
+    const bool certain = gFp8 || (!gModelB && !gEnableProblem.empty()) || !gSetMissing.empty();
     if (gMissed < kStarting || certain)
         gMissed = certain ? kStarting : gMissed + 1;
     if (gMissed >= kStarting && !gToldFailed)
@@ -372,7 +414,7 @@ std::string Problem()
     std::lock_guard guard(gMutex);
     if (!gRefused.empty())
         return gRefused;
-    if (!gEnableProblem.empty())
+    if (!gFp8 && !gModelB && !gEnableProblem.empty())
         return gEnableProblem;
     return gMissed >= kStarting ? gWhy : std::string();
 }

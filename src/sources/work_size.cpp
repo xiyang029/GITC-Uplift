@@ -14,6 +14,7 @@ constexpr uint64_t SETTLE_PERCENT = 2u;  // a side must differ by more than this
 }  // namespace
 
 nr::Size WorkSize(double target_width, double target_height, nr::Size output) {
+  if (!nr::MeetsNrFloor(output)) return output;
   const auto round_even = [](double side) { return static_cast<uint32_t>(std::max(2.0 * std::round(side / 2.0), 2.0)); };
   nr::Size work = {round_even(target_width), round_even(target_height)};
   if (work.width >= output.width && work.height >= output.height) return output;
@@ -30,14 +31,26 @@ nr::Size WorkSize(double target_width, double target_height, nr::Size output) {
     };
     work = {scale_up(work.width), scale_up(work.height)};
   }
-  return {std::min(work.width, output.width), std::min(work.height, output.height)};
+  work = {std::min(work.width, output.width), std::min(work.height, output.height)};
+  if (!nr::MeetsNrFloor(work)) {
+    const bool landscape = output.width >= output.height;
+    work.width = std::max(work.width, landscape ? nr::MIN_NR_LONG_SIDE : nr::MIN_NR_SHORT_SIDE);
+    work.height = std::max(work.height, landscape ? nr::MIN_NR_SHORT_SIDE : nr::MIN_NR_LONG_SIDE);
+  }
+  return work;
 }
 
-nr::Size CanvasSize(nr::Size image) {
-  if (image.width >= image.height) {
-    return {std::max(image.width, nr::MIN_NR_LONG_SIDE), std::max(image.height, nr::MIN_NR_SHORT_SIDE)};
-  }
-  return {std::max(image.width, nr::MIN_NR_SHORT_SIDE), std::max(image.height, nr::MIN_NR_LONG_SIDE)};
+nr::foveation::Plan FoveatedWorkPlan(bool enabled, const nr::foveation::Shares& shares, nr::Size output, nr::Size uniform) {
+  if (!nr::MeetsNrFloor(uniform)) return {.width = uniform.width, .height = uniform.height};
+  const auto requested = nr::foveation::MakePlanFromShares(enabled, shares, output.width, output.height, uniform.width, uniform.height);
+  if (nr::MeetsNrFloor({requested.width, requested.height})) return requested;
+  // Preserve any already-eligible warp, including one whose aspect changes. Otherwise choose a floor
+  // orientation the uniform grid can contain, preferring the requested image's orientation when both fit.
+  const bool landscape = uniform.height < nr::MIN_NR_LONG_SIDE
+                         || (uniform.width >= nr::MIN_NR_LONG_SIDE && requested.width >= requested.height);
+  return nr::foveation::MakePlanFromShares(enabled, shares, output.width, output.height, uniform.width, uniform.height,
+                                         landscape ? nr::MIN_NR_LONG_SIDE : nr::MIN_NR_SHORT_SIDE,
+                                         landscape ? nr::MIN_NR_SHORT_SIDE : nr::MIN_NR_LONG_SIDE);
 }
 
 nr::Size WorkSizeSettle::Update(nr::Size target, std::chrono::steady_clock::time_point now, bool held) {

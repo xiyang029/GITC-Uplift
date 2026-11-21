@@ -15,6 +15,7 @@
 #include "look/look_math.hpp"
 #include "nr/foveation.hpp"
 #include "nr/session.hpp"
+#include "sources/nr_gpu_timing.hpp"
 #include "nr/skip_reason.hpp"
 #include "nr/timeline.hpp"
 #include "nr/types.hpp"
@@ -77,9 +78,8 @@ struct PipelineResult {
 // The size NR works at for one recording.
 struct WorkLayout {
   nr::Size image;   // the output region resampled to this size; empty = the output size (Full)
-  nr::Size canvas;  // NR's network size: `image` plus mirrored padding (pre-SR below the floor); empty = `image`
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;  // how NR's change returns to the output size
-  // Foveated edge scaling (2026-10-21): `image` and `canvas` above are already the warped grid's sizes (WorkSize times each axis' gmax), so the shaders only need
+  // Foveated edge scaling (2026-10-21): `image` is already the warped grid's size (WorkSize times each axis' gmax), so the shaders only need
   // the grid to map between them and the output. Identity axes (a default Grid) leave every mapping exactly as it was.
   nr::foveation::Grid foveation;
 };
@@ -126,24 +126,25 @@ class NrPipeline final : private nr::PassResolver {
   NrPipeline& operator=(const NrPipeline&) = delete;
 
   bool Initialize(std::string* error);
+  NrGpuTiming& Timing() { return timing_; }
   // Once per presented frame: the whole back buffer at `layout`. Binds the copy of the game's motion
   // vectors made for this frame (RecordMotionCopy), else the zero texture; a switch between the two
   // restarts NR's history for one frame.
   // Split chain: each recording runs `part` of the chain (every recording below takes one).
   PipelineResult RecordPresent(ID3D12GraphicsCommandList* list, const PresentTarget& target, const nr::Controls& controls,
-                               bool reset_hint, const WorkLayout& layout = {}, const ChainPart& part = {});
+                               bool reset_hint, const WorkLayout& layout = {}, const ChainPart& part = {}, ID3D12CommandQueue* timing_queue = nullptr);
   // Any number of times per frame (every evaluate of the main handle): a region copy,
   // encode with the game's exposure, NR with `inputs` (a null inputs.motion.resource binds the
   // all-zero texture), a compute decode into the region, then a UAV barrier on the target. Only
   // compute-legal states. The caller issues its completion token before calling.
   PipelineResult RecordUav(ID3D12GraphicsCommandList* list, const UavTarget& target, const nr::FrameInputs& inputs,
-                           const nr::Controls& controls, const WorkLayout& layout = {}, const ChainPart& part = {});
+                           const nr::Controls& controls, const WorkLayout& layout = {}, const ChainPart& part = {}, DlssFrameHost* timing_host = nullptr);
   // NR on the region of the game's Color (`color.resource`, only read) before DLSS
-  // upscales it. With a canvas in `layout` the image is mirror-padded into it, and the game's motion
-  // vectors are copied into a canvas texture. NR's result is composed into PrivateColor() at the same
+  // upscales it. The image is resampled to `layout`'s work size; foveated motion
+  // vectors are copied into the work grid. NR's result is composed into PrivateColor() at the same
   // region, left in NON_PIXEL_SHADER_RESOURCE for DLSS.
   PipelineResult RecordPreSr(ID3D12GraphicsCommandList* list, const UavTarget& color, const nr::FrameInputs& inputs,
-                             const nr::Controls& controls, const WorkLayout& layout, const ChainPart& part = {});
+                             const nr::Controls& controls, const WorkLayout& layout, const ChainPart& part = {}, DlssFrameHost* timing_host = nullptr);
   // After RecordPreSr applied NR and until the next recording: what DLSS reads as Color. Before upscaling is always pass 1's group: set 0.
   [[nodiscard]] ID3D12Resource* PrivateColor() const { return sets_[0].intermediates.private_color.Get(); }
   // Split chain: the sets of the groups from `first` on, a chain that has fewer, go behind their last use, as a placement switch's set did.
@@ -306,7 +307,7 @@ class NrPipeline final : private nr::PassResolver {
     DXGI_FORMAT copy_format = DXGI_FORMAT_UNKNOWN;  // the source copy's; UNKNOWN: none (pre-SR reads Color in place)
     uint32_t source_bytes_per_pixel = 0u;
     TargetKind kind = TargetKind::PRESENT;
-    bool canvas_motion = false;                     // motion to remap into a warped image or a padded canvas
+    bool canvas_motion = false;                     // motion to remap into a warped work image
     // The warped work grid the set was made for (nr/foveation.hpp). A grid that moves while the surfaces still fit restarts
     // the histories instead of reallocating: see EnsureIntermediates.
     nr::foveation::Grid foveation;
@@ -420,11 +421,12 @@ class NrPipeline final : private nr::PassResolver {
   void CommitSlot(uint32_t slot);
   bool Encode(ID3D12GraphicsCommandList* list, uint32_t slot, color::EncodePass pass);
   nr::EvaluateResult Evaluate(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs inputs, const nr::Controls& controls,
-                              const nr::StageSlice& slice);
+                              const nr::StageSlice& slice, ID3D12CommandQueue* timing_queue, DlssFrameHost* timing_host);
 
   Microsoft::WRL::ComPtr<ID3D12Device> device_;
   nr::Session& session_;
   nr::Timeline& timeline_;
+  NrGpuTiming timing_;
   color::ColorPipeline color_;
   std::array<StageSet, STAGE_SETS> sets_;
   StageSet* set_ = &sets_[0];  // the recording's (ChainPart::set)

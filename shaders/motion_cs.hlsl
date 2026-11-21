@@ -9,7 +9,7 @@ cbuffer MotionConstants : register(b0) {
   uint region_height;
   uint image_width;    // the destination image, at the destination's origin
   uint image_height;
-  uint canvas_width;   // the destination: the image plus mirrored padding
+  uint canvas_width;   // the destination, matching the work image
   uint canvas_height;
   float scale_x;       // MV.Scale × MotionScale × image / region: vectors land in destination pixels
   float scale_y;
@@ -35,21 +35,19 @@ UPLIFT_IMAGE_FORMAT("rg16f") RWTexture2D<float2> motion_target : register(u1);
 static const float MOTION_LIMIT_CANVASES = 2.f;
 
 // The game's motion vectors copied into an Uplift texture in destination pixels, resampled to the
-// image and mirror-padded to the canvas, with the mirrored axis's component negated. Uplift binds the
+// work image. Uplift binds the
 // result with its full size as the subrect and a scale of (1, 1). A non-finite vector (Inf, NaN)
 // becomes no motion; a finite one is clamped to MOTION_LIMIT_CANVASES.
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
   if (id.x >= canvas_width || id.y >= canvas_height) return;
   const uint2 image = uint2(image_width, image_height);
-  const bool2 mirrored = ((id.xy % (2u * image)) >= image);
-  const uint2 pixel = uint2(Mirror(id.x, image_width), Mirror(id.y, image_height));
   const uint2 region = uint2(region_width, region_height);
   const uint2 packed = uint2(foveation_x, foveation_y);
   const float2 gmax = float2(foveation_gmax_x, foveation_gmax_y);
   // Foveated grid: this destination texel's centre, unwarped, is the full-frame position its vector is
   // about. Under the warp the vector's length is carried through the warp, not scaled by it (foveation.hlsli).
-  const float2 v_now = (float2(pixel) + 0.5f) / float2(image);
+  const float2 v_now = (float2(id.xy) + 0.5f) / float2(image);
   const float2 n = FovUnwarp(v_now, packed, gmax);
   uint2 read = min(uint2(n * float2(region)), region - 1u);
   if (flip_y != 0u) {
@@ -69,7 +67,6 @@ void main(uint3 id : SV_DispatchThreadID) {
     const float2 v_prev = FovWarp(n + motion / float2(image), packed, gmax);
     motion = (v_prev - v_now) * float2(image);
   }
-  motion = select(mirrored, -motion, motion);
   // Non-finite first: clamp's result for a NaN is the hardware's choice.
   motion = (all(isfinite(motion)) ? motion : float2(0.f, 0.f));
   const float2 limit = MOTION_LIMIT_CANVASES * float2(canvas_width, canvas_height);

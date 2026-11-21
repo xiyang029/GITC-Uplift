@@ -148,8 +148,8 @@ struct MessageInputs {
   std::string_view placement;    // why no placement runs, or DLSS idle
   nr::SkipReason skip_reason = nr::SkipReason::NONE;  // this frame's skip reason
   // Whether `skip_reason` is Session::Evaluate's own (PipelineResult::from_session),
-  // not a guess from the reason -- a pipeline-level reason such as AfterDlssSource's own FRAME_TOO_SMALL
-  // can collide with one of Session's, and a stale session_message must not stand in for it then.
+  // not a guess from the reason: a pipeline can return a reason also used by Session,
+  // and a stale session_message must not stand in for it then.
   bool skip_from_session = false;
   std::string_view session_message;  // the Session's own message
 };

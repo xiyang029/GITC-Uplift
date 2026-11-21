@@ -34,8 +34,7 @@ void* __cdecl QueryInterfaceDetour(uint32_t id) {
 }
 
 void InstallNvfp4Hook() {
-  uint32_t state = g_install.load(std::memory_order_relaxed);
-  if (state == 1u || state == 2u) return;
+  uint32_t state = 0u;  // Only the idle -> installing transition owns installation.
   if (!g_install.compare_exchange_strong(state, 3u, std::memory_order_acq_rel)) return;
 
   const HMODULE nvapi = GetModuleHandleW(L"nvapi64.dll");

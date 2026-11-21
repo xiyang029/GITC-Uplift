@@ -16,6 +16,7 @@ PipelineResult PreSrSource::Run(DlssFrameHost& host, const ngx_hooks::DlssFrame&
   if (frame.feature != NVSDK_NGX_Feature_SuperSampling && frame.feature != NVSDK_NGX_Feature_RayReconstruction) {
     return {.reason = nr::SkipReason::NOT_SR_OR_RR};
   }
+  if (!nr::MeetsNrFloor({frame.color_region.width, frame.color_region.height})) return {.reason = nr::SkipReason::FRAME_TOO_SMALL};
   if (!host.StateKnown()) return {.reason = nr::SkipReason::LIST_STATE_UNKNOWN};
   if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return {.reason = nr::SkipReason::COMPUTE_QUEUE};
   if (config.controls.intensity <= 0.f) return {.reason = nr::SkipReason::INTENSITY_ZERO};  // exact pass-through: no swap either
@@ -29,7 +30,7 @@ PipelineResult PreSrSource::Run(DlssFrameHost& host, const ngx_hooks::DlssFrame&
     }
   }
   const PipelineResult result = RecordOnGameList(host, timeline_, config.restore, [&] {
-    return pipeline_.RecordPreSr(list, game.target, game.inputs, config.controls, config.layout, config.part);
+    return pipeline_.RecordPreSr(list, game.target, game.inputs, config.controls, config.layout, config.part, &host);
   });
   if (result.nr_applied) {
     reset_owed_ = false;

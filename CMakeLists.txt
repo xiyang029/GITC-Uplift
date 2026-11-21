@@ -293,6 +293,7 @@ target_link_libraries(uplift_color PUBLIC uplift_nr)
 add_library(uplift_sources STATIC
   src/sources/work_size.cpp
   src/sources/nr_pipeline.cpp
+  src/sources/nr_gpu_timing.cpp
   src/sources/present_source.cpp
   src/sources/after_dlss_source.cpp
   src/sources/pre_sr_source.cpp

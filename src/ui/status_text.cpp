@@ -313,9 +313,7 @@ LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown) {
   if (work.Empty()) {
     card.resolution = mode;
   } else if (shown.stage == SourcePick::BEFORE_UPSCALING) {
-    if (!facts.canvas.Empty() && facts.canvas != work) {
-      card.resolution = std::format("{}x{} ({}, a {}x{} render padded)", facts.canvas.width, facts.canvas.height, mode, work.width, work.height);
-    } else if (full_size) {
+    if (full_size) {
       card.resolution = std::format("{}x{} ({}, the render size)", work.width, work.height, mode);
     } else {
       card.resolution = std::format("{}x{} of the {}x{} render ({}, {})", work.width, work.height, facts.frame.width, facts.frame.height, mode, upsampling);

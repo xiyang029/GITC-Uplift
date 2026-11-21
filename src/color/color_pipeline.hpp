@@ -38,7 +38,7 @@ struct EncodePass {
   ID3D12Resource* exposure = nullptr;  // optional 1x1 exposure texture, NON_PIXEL_SHADER_RESOURCE
   float exposure_factor = 1.f;         // DLSS.Exposure.Scale ÷ DLSS.Pre.Exposure
   nr::Rect region;  // the part of `source` resampled to the image; all zero = width x height at (0, 0)
-  nr::Size canvas;  // the model texture: the image plus mirrored padding; empty = the image
+  nr::Size canvas;  // the model texture, matching the image; empty = automatic
   uint32_t options = 0u;  // Plan 5: shader_options (the primaries, the near-black guard)
   nr::foveation::Grid foveation;
 };
@@ -114,7 +114,7 @@ struct MotionPass {
   nr::Rect region;                   // their region in `source`
   ID3D12Resource* target = nullptr;  // RG16F, UNORDERED_ACCESS
   nr::Size image;                    // the region resampled to this size, at the target's origin
-  nr::Size canvas;                   // the target's size: the image plus mirrored padding
+  nr::Size canvas;                   // the target's size, matching the image
   float scale_x = 1.f;               // multiplies the vectors into target pixels
   float scale_y = 1.f;
   float offset_x = 0.f;  // added in destination pixels, before any vertical flip

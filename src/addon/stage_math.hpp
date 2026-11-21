@@ -156,8 +156,6 @@ struct LayoutTarget {
   double scale = FULL_SCALE;
   // Anamorphic (2026-10-29): the height's own Custom scale, and whether it acts on its own axis at all. One
   // switch for the whole chain: a later group reads pass 1's, so two groups never disagree about the shape.
-  const bool split_axes = (mode == ui::ResolutionMode::CUSTOM && settings.resolution_asymmetric);
-  double scale_y = FULL_SCALE;
   switch (mode) {
     case ui::ResolutionMode::FULL:        break;
     case ui::ResolutionMode::QUALITY:     scale = sources::QUALITY_SCALE; break;
@@ -165,9 +163,6 @@ struct LayoutTarget {
     case ui::ResolutionMode::PERFORMANCE: scale = sources::PERFORMANCE_SCALE; break;
     case ui::ResolutionMode::CUSTOM:
       scale = custom_scale / CUSTOM_SCALE_PERCENT;
-      // Every preset above is one uniform factor; only Custom may split the axes, and only while the switch
-      // is on (both at one value is the uniform case, which WorkSize treats identically).
-      if (split_axes) scale_y = settings.resolution_scale_y / CUSTOM_SCALE_PERCENT;
       break;
     case ui::ResolutionMode::MATCH_GAME:
       if (snapshot && !snapshot->render.Empty() && !before_upscaling && !dlss_off) {
@@ -176,13 +171,9 @@ struct LayoutTarget {
       }
       break;
   }
-  if (!split_axes) scale_y = scale;  // read after the switch: a preset sets `scale` only
+  const double scale_y = (mode == ui::ResolutionMode::CUSTOM && settings.resolution_asymmetric
+                              ? settings.resolution_scale_y / CUSTOM_SCALE_PERCENT : scale);
   return {.width = target_width * scale, .height = target_height * scale_y, .slider_held = slider_held};
-}
-
-// The canvas NR runs a settled `image` at: Before upscaling pads an image below the NR floor into the floor canvas; every other stage runs at the image.
-[[nodiscard]] inline nr::Size StageCanvas(nr::Size image, Stage stage) {
-  return ((stage == Stage::BEFORE_UPSCALING && !nr::MeetsNrFloor(image)) ? sources::CanvasSize(image) : image);
 }
 
 // The time since a group's last recording (none for its first), which the stabiliser and the governor take as their frame time; `last` becomes `now`.

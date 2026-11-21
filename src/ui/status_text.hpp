@@ -131,7 +131,7 @@ struct SetupFacts {
   bool motion_copied = false;  // DLSS's vectors, copied for Present
   color::Upsampling upsampling = color::Upsampling::EDGE_AWARE;
   nr::Size work;    // the settled work image
-  nr::Size canvas;  // NR's size: `work`, or the floor canvas it is padded into
+  nr::Size canvas;  // NR's network size, matching `work`
   nr::Size frame;   // what the mode scales: the output region; Before upscaling, the render region
   std::string_view api;
   uint32_t passes_run = 0u;

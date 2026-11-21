@@ -156,7 +156,6 @@ class VkClient {
   std::string latch_;
   bool in_flight_ = false;  // a request has no reply yet: no share is touched until a FRAME reply
   bool run_sent_ = false;
-  bool floor_probed_ = false;  // SHARED_CPU: a frame below NR's floor already sent its one RUN
   bool second_queue_ = false;
   bool present_synced_ = false;           // this frame's present-queue wait is done; Describe clears it
   uint32_t present_queue_timeouts_ = 0u;  // consecutive 2 s timeouts of the present-queue wait

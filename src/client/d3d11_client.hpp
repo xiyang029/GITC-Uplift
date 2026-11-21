@@ -143,7 +143,6 @@ class D3D11Client {
   bool in_flight_ = false;             // a request has no reply yet: no share is touched until a FRAME reply
   bool gpu_pending_ = false;           // KMT: the event query's 2 s ran out; frames skip until the copy into the shared texture is done
   bool run_sent_ = false;
-  bool floor_probed_ = false;  // KMT: a frame below NR's floor already sent its one RUN
   uint64_t busy_skips_ = 0u;
 };
 

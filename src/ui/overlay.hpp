@@ -68,7 +68,7 @@ struct OverlayView {
     sources::MotionSource motion = sources::MotionSource::NONE;
     uint32_t planned = 0;
     std::string skip;
-
+    std::optional<double> gpu_ms;
   };
   std::array<StageRun, 4> stage_runs{};  // Pre-DLSS, After DLSS, Before FG, On Present. Only passes actually evaluated.
   [[nodiscard]] const char* RecordedStageName(uint32_t pass) const {
@@ -153,6 +153,7 @@ struct OverlayState {
 // `view->setup` and `view->live`; `view->card` must be set already. `device`: the shown device's identity. `facts`' views must outlive the draw.
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now);
 
+// Draws inside the Setup card. The diagram and the other cards share the same column breakpoint.
 bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state);
 
 // Draws the Uplift panel inside the window ReShade opened for it, editing `settings`

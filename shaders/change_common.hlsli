@@ -28,12 +28,6 @@ float ChangeEpsilon(uint encoding) {
   return (IsSdr(encoding) ? SDR_EPSILON : HDR_EPSILON);
 }
 
-// Mirror-repeat with period 2·size: the image pixel a canvas pixel `p` shows.
-uint Mirror(uint p, uint size) {
-  const uint wrapped = p % (2u * size);
-  return (wrapped < size ? wrapped : 2u * size - 1u - wrapped);
-}
-
 // Linear light for resampling and the compose: scene-linear BT.709 with diffuse white at 1.0, or for
 // SDR the sRGB-decoded display value. Unguarded, because the compose has to see a non-finite original to hand
 // the stored value back untouched; everything that only reads a colour takes it through LinearLight below.

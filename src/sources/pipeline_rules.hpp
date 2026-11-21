@@ -12,6 +12,7 @@
 #include "sources/auto_exposure.hpp"
 #include "sources/look_plan.hpp"
 #include "sources/nr_pipeline.hpp"
+#include "sources/work_size.hpp"
 
 namespace uplift::sources {
 
@@ -32,11 +33,15 @@ inline constexpr size_t TARGET_STOPS_COMPONENT = METER_TEXEL_COMPONENTS + 3u;
 inline constexpr float AUTO_BLEND_GAME = 0.f;
 inline constexpr float AUTO_BLEND_METER = 1.f;
 
-// A recording at `output` runs at: an empty image is the output itself, an empty canvas the image.
+// Clamp the effective image, never a padded canvas. The source's own size remains the eligibility gate.
+// A malformed/stale layout that needs resizing loses its old warp rather than reusing mismatched coordinates.
 [[nodiscard]] inline WorkLayout ResolveLayout(const WorkLayout& layout, nr::Size output) {
-  const nr::Size image = (layout.image.Empty() ? output : layout.image);
-  return {.image = image, .canvas = (layout.canvas.Empty() ? image : layout.canvas), .upsampling = layout.upsampling,
-                          .foveation = layout.foveation};
+  const nr::Size requested = (layout.image.Empty() ? output : layout.image);
+  const bool valid = nr::MeetsNrFloor(output) && nr::MeetsNrFloor(requested)
+                     && requested.width <= output.width && requested.height <= output.height;
+  const nr::Size image = (valid ? requested : WorkSize(requested.width, requested.height, output));
+  return {.image = image, .upsampling = layout.upsampling,
+          .foveation = (valid ? layout.foveation : nr::foveation::Grid{})};
 }
 
 // The encode's and the decodes' shader_options for `fixes`.

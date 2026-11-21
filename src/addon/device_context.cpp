@@ -219,7 +219,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
   // present_layout_ is what the Present placement records at, so it follows the present target's size in
   // every placement, not only while Present is the one running: the other placement's NR leaves it stale,
   // and Present then records a 2560x1440 target through a layout still shaped for the 2074x950 render
-  // size (Resolve keeps a non-empty layout.canvas whatever the target is). That is what the diagnostic
+  // size (the old Resolve kept a non-empty canvas whatever the target was). That is what the diagnostic
   // line read as "layout canvas 2074x950, target 2560x1440, resolved canvas 2074x950" forever.
   if (!present_size.Empty()) {
     present_layout_ = SettleLayout(present_size, Stage::PRESENT, now);  // before UpdateSession, so its Tick sees the size
@@ -252,6 +252,16 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
     };
     // A described target (the D3D11 bridge before its shared copy exists) has nothing to record on yet.
     frame_ready_ = (session_->State() == nr::SessionState::ACTIVE && target.resource != nullptr);
+    if (session_->State() == nr::SessionState::ACTIVE && !nr::MeetsNrFloor(present_size)) {
+      StageState& stage = stages_[static_cast<size_t>(Stage::PRESENT)];
+      stage.nr_applied = false;
+      stage.passes_run = 0u;
+      stage.skip_reason = nr::SkipReason::FRAME_TOO_SMALL;
+      stage.motion_source = sources::MotionSource::NONE;
+      present_reset_owed_ = true;
+      frame_ready_ = false;  // the helper's FRAME reply prevents the bridge's copies and RUN too
+      if (*present_group == 0u) status_.NoteSkip(nr::SkipReason::FRAME_TOO_SMALL, RecordingStatus::Reset::ALL);
+    }
   }
   return trigger_.OnPresent(marker_expected, facts.effects_on, facts.marker_rendered_early);
 }
@@ -309,7 +319,7 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   frame_target_.dlss_motion_age = dlss_motion_age;
   frame_target_.motion_enabled = settings_.motion_vectors || settings_.launchpad_motion;
   const sources::PresentResult result = present_source_->Record(host->NativeList(), frame_target_, controls_, present_reset_owed_, present_layout_,
-                                                                {.slice = slices_[group], .set = group});
+                                                                {.slice = slices_[group], .set = group}, present_queue_);
   host->TargetBarrier(D3D12_RESOURCE_STATE_COPY_SOURCE, entry_state);
   if (result.nr_applied) {
     present_reset_owed_ = false;
@@ -671,23 +681,19 @@ sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, st
   const bool pass1 = Pass1Group(chain_, stage);
   const LayoutTarget target = StageLayoutTarget(settings_, output, stage, pass1, main_snapshot_, dlss_off_.Off());
   StageState& state = stages_[static_cast<size_t>(stage)];
-  const nr::Size uniform = state.settle.Update(sources::WorkSize(target.width, target.height, output), now, target.slider_held);
+  const nr::Size settled = state.settle.Update(sources::WorkSize(target.width, target.height, output), now, target.slider_held);
+  const nr::Size uniform = sources::WorkSize(settled.width, settled.height, output);  // a held/stale size cannot bypass the floor or the source bounds
   // Foveated edge scaling (2026-10-21): NR works a grid that keeps the output centre at full density and thins toward the edges. Every NR stage warps,
   // before upscaling included, so the player's shares of the output are carried onto `uniform`, the grid the warp lands on.
-  const nr::foveation::Plan plan = nr::foveation::MakePlanFromShares(
+  const nr::foveation::Plan plan = sources::FoveatedWorkPlan(
       settings_.foveation,
       {settings_.foveation_width, settings_.foveation_height, settings_.foveation_falloff_x, settings_.foveation_falloff_y, settings_.foveation_edge_x, settings_.foveation_edge_y},
-      output.width, output.height, uniform.width, uniform.height);
+      output, uniform);
   const nr::Size image = {plan.width, plan.height};
-  const nr::Size canvas = StageCanvas(image, stage);
   state.work = image;
-  state.canvas = canvas;
-  if (pass1) {
-    work_size_ = image;
-    canvas_size_ = canvas;
-  }
-  session_->NoteFrameSize(static_cast<uint8_t>(stage), canvas);
-  return {.image = image, .canvas = canvas, .upsampling = settings_.upsampling, .foveation = plan.grid};
+  if (pass1) work_size_ = image;
+  session_->NoteFrameSize(static_cast<uint8_t>(stage), image);
+  return {.image = image, .upsampling = settings_.upsampling, .foveation = plan.grid};
 }
 
 sources::AfterDlssConfig DeviceContext::DlssConfig(const sources::WorkLayout& layout, uint32_t group) const {
@@ -758,6 +764,10 @@ BridgedDlssDecision DeviceContext::DecideBeforeEvaluate(const ngx_hooks::DlssFra
     status_.NoteSkip(nr::SkipReason::NONE, RecordingStatus::Reset::APPLIED_AND_REASON);
     return {};
   }
+  if (!nr::MeetsNrFloor(render_region)) {
+    NoteBridgedSkip(BridgedDlssWork::BEFORE_UPSCALING, nr::SkipReason::FRAME_TOO_SMALL);
+    return {};
+  }
   if (controls_.intensity <= 0.f) {
     NoteBridgedSkip(BridgedDlssWork::BEFORE_UPSCALING, nr::SkipReason::INTENSITY_ZERO);  // exact pass-through: nothing crosses, DLSS reads the game's own Color
     return {};
@@ -819,8 +829,7 @@ BridgedDlssDecision DeviceContext::DecideAfterEvaluate(const ngx_hooks::DlssFram
     return decision;
   }
   const nr::SkipReason skip = (!nr::MeetsNrFloor(output_region) ? nr::SkipReason::FRAME_TOO_SMALL
-                               : controls_.intensity <= 0.f     ? nr::SkipReason::INTENSITY_ZERO
-                                                                : nr::SkipReason::NONE);
+                               : controls_.intensity <= 0.f ? nr::SkipReason::INTENSITY_ZERO : nr::SkipReason::NONE);
   if (skip != nr::SkipReason::NONE) {
     NoteBridgedSkip(BridgedDlssWork::AFTER_DLSS, skip);  // as AfterDlssSource::Run says it, and owes it; nothing crosses
     before_reset_.reset();
@@ -1070,6 +1079,13 @@ std::string DeviceContext::CreateFailure() const {
   return ((status.create_failed && !out_of_memory) ? std::move(status.message) : std::string());
 }
 
+const sources::NrGpuTiming& DeviceContext::WatchNrTiming(std::chrono::steady_clock::time_point now,
+                                                       std::bitset<nr::SESSION_STAGES> stages) {
+  auto& timing = present_source_->Pipeline().Timing();
+  timing.Watch(now, stages);
+  return timing;
+}
+
 ContextStatus DeviceContext::Status() const {
   ContextStatus status;
   if (session_) {
@@ -1121,7 +1137,6 @@ ContextStatus DeviceContext::Status() const {
   status.dlss_seen = dlss_seen_;
   status.dlss_latch_tripped = dlss_latch_tripped_;
   status.work = work_size_;
-  status.canvas = canvas_size_;
   // The pieces of `message`, flattened for the status card ladder.
   status.blocked = blocked_reason_;
   status.claimed_elsewhere = claimed_elsewhere;
@@ -1148,16 +1163,14 @@ ContextStatus DeviceContext::Status() const {
   status.upsampling = settings_.upsampling;
   if (!work_size_.Empty()) {
     std::string detail;
-    if (canvas_size_ != work_size_) {
-      detail = std::format(" (a {}x{} render, padded)", work_size_.width, work_size_.height);
-    } else if (work_size_ != frame_size_ && !frame_size_.Empty()) {
+    if (work_size_ != frame_size_ && !frame_size_.Empty()) {
       detail = std::format(" of {}x{} ({})", frame_size_.width, frame_size_.height,
                            (settings_.upsampling == color::Upsampling::CLASSIC ? "Classic" : "Edge-aware"));
     }
     if (match_game_unread) {
       detail += (dlss_off_.Off() ? " (Match game: the game's DLSS is off)" : " (Match game: waiting for DLSS)");
     }
-    status.work_line = std::format("Working at {}x{}{}", canvas_size_.width, canvas_size_.height, detail);
+    status.work_line = std::format("Working at {}x{}{}", work_size_.width, work_size_.height, detail);
   }
   if (status_.nr_applied) {
     status.exposure_line = sources::ExposureLine(present_source_->Pipeline().LastExposure());

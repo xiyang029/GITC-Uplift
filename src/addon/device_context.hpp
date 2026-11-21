@@ -79,7 +79,6 @@ struct ContextStatus {
   bool dlss_seen = false;           // a main-handle evaluate reached this context
   bool dlss_latch_tripped = false;  // removed within DLSS_LATCH_WINDOW of a game-list recording
   nr::Size work;                    // the settled work image of the chosen placement
-  nr::Size canvas;                  // NR's network size: `work`, or the floor canvas it is padded into
   std::string work_line;            // "Working at 1920x1080 of 3840x2160 (Edge-aware)"; empty before a frame
   std::string exposure_line;        // "Input exposure: the game's" (sources::ExposureLine); empty unless NR ran on the latest frame and used one
   sources::MotionSource motion_source = sources::MotionSource::NONE;  // the latest recording's
@@ -119,7 +118,6 @@ struct ContextStatus {
     nr::SkipReason skip_reason = nr::SkipReason::NONE;
     sources::MotionSource motion_source = sources::MotionSource::NONE;
     nr::Size work;
-    nr::Size canvas;
   };
   std::array<Group, STAGE_COUNT> groups = {};
   uint32_t group_count = 0u;
@@ -218,7 +216,7 @@ class DeviceContext {
   // state); NONE otherwise, with the status as BeforeDlssEvaluate leaves it. Only for a context made with ContextOptions::dlss_stages.
   BridgedDlssDecision DecideBeforeEvaluate(const ngx_hooks::DlssFrame& frame, nr::Size render_region, std::chrono::steady_clock::time_point now);
   // After the original evaluate: OnDlssEvaluate's bookkeeping (DLSS seen, the cadence, the present-starvation catch-up), then AFTER_DLSS when NR runs after
-  // DLSS for this evaluate (the work size settled on `output_region` first, the NR floor, Intensity above 0), PRESENT_MOTION when Source = Present wants
+  // DLSS for this evaluate (the work size settled on `output_region` first, Intensity above 0), PRESENT_MOTION when Source = Present wants
   // DLSS's vectors (NR ACTIVE, the game passed vectors), else NONE. Split chain: `present_motion` too when a later group runs at Present.
   BridgedDlssDecision DecideAfterEvaluate(const ngx_hooks::DlssFrame& frame, nr::Size output_region, std::chrono::steady_clock::time_point now);
   // The decided AFTER_DLSS or BEFORE_UPSCALING on the private list `host` names, `frame` pointing at the bridge's shared copies; the status as OnDlssEvaluate
@@ -256,7 +254,7 @@ class DeviceContext {
   void SubmitTokens(std::span<const uint64_t> tokens, ID3D12CommandQueue* queue, uint32_t thread_id,
                     std::chrono::steady_clock::time_point now);
   // A closed list whose Uplift work was first recorded with `first_token` was submitted again
-  // without a Reset. Thread-safe, like SubmitTokens.
+  // without a Reset. Thread-safe.
   void ResubmitTokens(uint64_t first_token, ID3D12CommandQueue* queue, uint32_t thread_id,
                       std::chrono::steady_clock::time_point now);
   void DropTokens(std::span<const uint64_t> tokens);
@@ -297,6 +295,7 @@ class DeviceContext {
   }
 
   [[nodiscard]] ContextStatus Status() const;
+  [[nodiscard]] const sources::NrGpuTiming& WatchNrTiming(std::chrono::steady_clock::time_point now, std::bitset<nr::SESSION_STAGES> stages);
   // NGX could not create NR's feature on this context's device (the Session's message, with NGX's result), until a load works again; empty otherwise.
   // A Vulkan bridge's context: the Vulkan route chain goes on to the helper. Never for an out-of-memory result, which the Session's own retry
   // and budget handle (another device would most likely be short of memory too).
@@ -374,7 +373,6 @@ class DeviceContext {
   StageBook<> stages_;
   sources::WorkLayout present_layout_;
   nr::Size work_size_;  // pass 1's group's, as SettleLayout last settled it
-  nr::Size canvas_size_;
   NVSDK_NGX_Feature main_feature_ = NVSDK_NGX_Feature_Reserved_Unknown;
   uint64_t dlss_feature_serial_ = 0u;
   FrameTrigger trigger_;

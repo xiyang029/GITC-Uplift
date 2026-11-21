@@ -14,16 +14,19 @@ namespace uplift::ui {
 namespace {
 
 constexpr std::array<std::string_view, 3> MODELS = {"Style A", "Style B", "Style C"};
-constexpr std::array<std::string_view, 10> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8",
+constexpr std::array<std::string_view, 11> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8",
                                                           "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one",
-                                                          "FP8: 2x in one", "FP8: 3x in one", "FP8: 2x in one v2", "FP8: 3x in one v2"};
+                                                          "FP8: 2x in one", "FP8: 3x in one", "FP8: 2x in one v2", "FP8: 3x in one v2",
+                                                          "NVFP4: B feed-forward"};
 constexpr auto PASS_NETWORKS = [] {
   auto choices = NR_NETWORKS;
   choices[0] = "Same as pass 1";
   return choices;
 }();
-// Choice order differs from NGX preset order: NVFP4 2x is 16, 3x is 15; FP8 uses 18-21.
-constexpr std::array<uint32_t, 10> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 16u, 15u, 18u, 19u, 20u, 21u};
+// Choice order differs from NGX preset order: NVFP4 2x is 16, 3x is 15; FP8 uses 18-21; Model B's feed-forward is 22,
+// which is not a runtime preset at all (it asks the runtime for its preset 2, the small FP8 network).
+// Choice indices are stored in the config: append new models to preserve every existing selection.
+constexpr std::array<uint32_t, 11> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 16u, 15u, 18u, 19u, 20u, 21u, 22u};
 static_assert(NR_NETWORKS.size() == NETWORK_PRESET_VALUES.size());
 
 double NetworkPresetIndex(uint32_t preset) {
@@ -240,7 +243,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Resolution",
         .tooltip = "The size NR works at. Smaller sizes cost less GPU time and video memory. Match game uses DLSS render size. "
-                   "Minimum " UPLIFT_NR_FLOOR_TEXT ".",
+                   "Settings and FOV compression are limited to " UPLIFT_NR_FLOOR_TEXT ". Smaller source images skip NR.",
         .choices = RESOLUTION_MODES,
         .flags = RESTARTS_HISTORY,
         .get = [](const Settings& s) { return Index(s.resolution_mode); },
@@ -636,7 +639,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::PLACEMENT,
         .label = "Before upscaling (pre-SR)",
         .tooltip = "NR works on the game's render-resolution image, and the game's DLSS upscales the result. With Ray Reconstruction, NR "
-                   "works on its input. Never below " UPLIFT_NR_FLOOR_TEXT ".",
+                   "works on its input. Source images below " UPLIFT_NR_FLOOR_TEXT " skip NR.",
         .get = [](const Settings& s) { return Flag(s.pre_upscale); },
         .set = [](Settings& s, double v) { s.pre_upscale = (v != 0.0); },
     },

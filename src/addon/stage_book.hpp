@@ -21,7 +21,6 @@ inline constexpr char CHAIN_LINE[] = "Chain: {}";
 struct StageRecord {
   sources::WorkSizeSettle settle;  // the stage's settled work size
   nr::Size work;                   // the work size the recording ran at
-  nr::Size canvas;                 // the canvas the recording ran at
   bool nr_applied = false;         // whether the recording applied NR
   uint32_t passes_run = 0u;        // the passes the recording ran
   nr::SkipReason skip_reason = nr::SkipReason::NONE;                    // why the recording skipped
@@ -64,7 +63,7 @@ class StageBook {
   void WriteChain(const ChainPlan& chain, Status& status) const {
     std::array<nr::Size, STAGE_COUNT> canvases = {};
     for (size_t stage = 0u; stage < STAGE_COUNT; ++stage) {
-      canvases[stage] = entries_[stage].canvas;
+      canvases[stage] = entries_[stage].work;
     }
     if (chain.Split()) {
       status.chain_line = std::format(CHAIN_LINE, FormatChainLine(chain, canvases));
@@ -76,7 +75,7 @@ class StageBook {
       const StageEntry<Extra>& stage = entries_[static_cast<size_t>(group.stage)];
       status.groups[index] = {.stage = group.stage, .first = group.first, .count = group.count, .nr_applied = stage.nr_applied,
                               .passes_run = stage.passes_run, .skip_reason = stage.skip_reason, .motion_source = stage.motion_source,
-                              .work = stage.work, .canvas = stage.canvas};
+                              .work = stage.work};
     }
   }
 

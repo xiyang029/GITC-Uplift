@@ -28,6 +28,8 @@ class DlssFrameHost {
   virtual void ReplayState(state::RestoreMode mode) = 0;
   // The recording's completion token travels with the list: submitted and stamped with it.
   virtual void AttachToken(uint64_t token) = 0;
+  // Keep the timing sample with this list through submission, and through Reset for a game list.
+  virtual void HoldTiming(const std::shared_ptr<NrTimingSlot>& slot) = 0;
 };
 
 struct AfterDlssConfig {

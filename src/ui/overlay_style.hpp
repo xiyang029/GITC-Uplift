@@ -18,6 +18,7 @@
 // Include after <imgui.h> and reshade.hpp (which ui/localized_imgui.hpp pulls in), as the rest of the panel does.
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -51,6 +52,7 @@ constexpr ImVec4 kBgWindow = Hex(0x151617, 0.98f);
 constexpr ImVec4 kBgCard = Hex(0x222426);
 constexpr ImVec4 kBgControl = Hex(0x303336);
 constexpr ImVec4 kBgPopup = Hex(0x404448);
+constexpr ImVec4 kCardShadow = Hex(0x000000, 0.24f);
 constexpr ImVec4 kBgControlHover = Mix(kBgControl, kBgPopup, 0.70f);
 constexpr ImVec4 kBgControlActive = Mix(kBgPopup, Hex(0xFFFFFF), 0.10f);
 constexpr ImVec4 kTextPrimary = Hex(0xECEEF0);
@@ -72,11 +74,6 @@ constexpr ImVec4 kStroke = Fade(kTextSecondary, 0.40f);  // functional connector
 
 constexpr float kBaseFont = 13.f;
 constexpr float kHeadingScale = 1.15f;
-constexpr float kRadiusCard = 8.f;
-constexpr float kPad = 4.f;
-constexpr float kRowGap = 6.f;
-constexpr float kGroupGap = 12.f;
-constexpr float kSectionGap = 20.f;
 
 // Row geometry measured in the body font; the width limit is relative to the current column.
 constexpr float kLabelEm = 10.5f;
@@ -92,16 +89,20 @@ namespace icons {
 constexpr const char* kUndo = "\xef\x83\xa2";       // U+F0E2 undo
 }  // namespace icons
 
-// The panel's spacing rhythm, resolved from the live font size, so every gap, inset and control follows
-// ReShade's font-size setting instead of a fixed pixel grid. Each step is one of the same rhythm the rows use.
+// Round the scaled 4 px step once so repeated gaps stay integral at fractional font scales.
 inline float Scale() { return gui::GetFontSize() / tokens::kBaseFont; }
 inline float Px(float value) { return value * Scale(); }
-inline float Units(float count) { return Px(tokens::kPad * count); }
-inline float LabelGap() { return Px(tokens::kPad); }
-inline float RowGap() { return Px(tokens::kRowGap); }
-inline float BlockGap() { return Px(tokens::kGroupGap); }
-inline float SectionGap() { return Px(tokens::kSectionGap); }
-constexpr float ControlRadius(float height) { return height * 0.24f; }
+inline float GridStep(float scale) { return (std::max)(1.f, std::round(4.f * scale)); }
+inline float Units(float count) { return GridStep(Scale()) * count; }
+inline float LabelGap() { return Units(1); }
+inline float RowGap() { return Units(1); }
+inline float BlockGap() { return Units(2); }
+inline float CardInset() { return Units(3); }
+inline float CardGap() { return Units(4); }
+inline float SnapDown(float size) { const float step = Units(1); return std::floor(size / step) * step; }
+inline float SnapUp(float size) { const float step = Units(1); return std::ceil(size / step) * step; }
+inline float ControlRadius() { return Units(1); }
+inline float CardRadius() { return Units(2); }
 
 // The panel's two-column reading is one number, and it is the stage diagram's: a section shows its two groups
 // side by side only where the diagram above draws its six nodes on one line. Below that the diagram folds onto
@@ -109,7 +110,7 @@ constexpr float ControlRadius(float height) { return height * 0.24f; }
 // neither room for its label beside its control nor a diagram above it that explains what the columns are.
 // The panel opens at Units(112), so both states are reachable by dragging it.
 constexpr float kStageColumnsEm = 52.f;
-inline bool FitsStageColumns(float width) { return width >= gui::GetFontSize() * kStageColumnsEm; }
+inline bool FitsStageColumns(float width) { return width >= SnapUp(gui::GetFontSize() * kStageColumnsEm); }
 
 inline ImU32 ToU32(const ImVec4& color) { return ImGui::GetColorU32(color); }
 
@@ -305,33 +306,31 @@ inline void ApplyAt(float scale) {
 
   ApplyBorders();
 
-  // A window and the popups above it take the card radius plus a step, a card or a scrollbar inside it the
-  // card radius, the controls on it the control radius, and a grab the small one. The spacing rhythm is
-  // shared with the panel's own widgets (widgets.hpp), so hand-drawn and ImGui-drawn rows sit on one grid.
-  style.WindowRounding = (tokens::kRadiusCard + 2.f) * scale;
-  style.PopupRounding = (tokens::kRadiusCard + 2.f) * scale;
-  style.ChildRounding = tokens::kRadiusCard * scale;
-  style.ScrollbarRounding = tokens::kRadiusCard * scale;
-  style.WindowPadding = ImVec2(tokens::kGroupGap * scale, tokens::kGroupGap * scale);
-  style.FramePadding = ImVec2(2.f * tokens::kPad * scale, 1.25f * tokens::kPad * scale);
-  style.FrameRounding = ControlRadius(ImGui::GetFrameHeight());
+  const float step = GridStep(scale);
+  style.WindowRounding = 3.f * step;
+  style.PopupRounding = style.WindowRounding;
+  style.ChildRounding = 2.f * step;
+  style.ScrollbarRounding = step;
+  style.WindowPadding = ImVec2(3.f * step, 3.f * step);
+  style.FramePadding = ImVec2(2.f * step, step);
+  style.FrameRounding = step;
   style.GrabRounding = style.FrameRounding;
   style.TabRounding = style.FrameRounding;
   style.DragDropTargetRounding = style.FrameRounding;
-  style.ItemSpacing = ImVec2(tokens::kRowGap * scale, tokens::kRowGap * scale);
-  style.ItemInnerSpacing = ImVec2(tokens::kPad * scale, tokens::kPad * scale);
-  style.CellPadding = ImVec2(8.f * scale, 4.f * scale);
-  style.SeparatorTextPadding = ImVec2(14.f * scale, 6.f * scale);
-  style.IndentSpacing = 18.f * scale;
+  style.ItemSpacing = ImVec2(step, step);
+  style.ItemInnerSpacing = ImVec2(step, step);
+  style.CellPadding = ImVec2(2.f * step, step);
+  style.SeparatorTextPadding = ImVec2(3.f * step, step);
+  style.IndentSpacing = 4.f * step;
 
-  style.ScrollbarSize = 8.f * scale;
-  style.ScrollbarPadding = 2.f * scale;  // a pill grab inside a thin track, not a full-width block
-  style.GrabMinSize = 10.f * scale;
+  style.ScrollbarSize = 2.f * step;
+  style.ScrollbarPadding = 0.f;
+  style.GrabMinSize = 2.f * step;
   style.DragDropTargetBorderSize = 2.f * scale;
-  style.DragDropTargetPadding = 2.f * scale;
+  style.DragDropTargetPadding = step;
   style.TabBarOverlineSize = 2.f * scale;
   style.TreeLinesSize = 1.f * scale;
-  style.TreeLinesRounding = 3.f * scale;
+  style.TreeLinesRounding = step;
   style.WindowMinSize = ImVec2(style.WindowMinSize.x * scale, style.WindowMinSize.y * scale);
 
   style.DisabledAlpha = 0.55f;

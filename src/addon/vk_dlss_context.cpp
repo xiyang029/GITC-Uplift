@@ -55,8 +55,8 @@ constexpr auto RING_TEARDOWN_WAIT = std::chrono::milliseconds(2000);
 // How long a switch from native Present to a DLSS stage waits for Uplift's own command buffers before NR's features may go.
 constexpr auto RING_SWITCH_WAIT = std::chrono::milliseconds(2000);
 
-// What NGX is handed as motion for `inputs` at `canvas` (`in_canvas`: Before upscaling pads into a larger canvas, so the game's
-// vectors are copied into an RG16F canvas image).
+// What NGX is handed as motion for `inputs` at `canvas` (`in_canvas`: foveation remaps the game's
+// vectors into an RG16F canvas image).
 VkMotionShape MotionShapeOf(const nr::FrameInputs& inputs, nr::Size canvas, bool in_canvas) {
   if (inputs.motion.resource == nullptr) return {.kind = VkMotionKind::NONE, .format = VK_FORMAT_R16G16_SFLOAT};
   if (in_canvas) return {.kind = VkMotionKind::GAME_VECTORS, .format = VK_FORMAT_R16G16_SFLOAT};
@@ -393,8 +393,8 @@ TriggerPoint VkDlssContext::PrepareFrame(void* queue, const FrameSettings& setti
   }
   for (uint32_t group = 1u; group < chain_.group_count; ++group) {
     const Stage stage = chain_.groups[group].stage;
-    if (const nr::Size canvas = stages_[static_cast<size_t>(stage)].canvas; !canvas.Empty()) {
-      session_->NoteFrameSize(static_cast<uint8_t>(stage), canvas);
+    if (const nr::Size work = stages_[static_cast<size_t>(stage)].work; !work.Empty()) {
+      session_->NoteFrameSize(static_cast<uint8_t>(stage), work);
     }
   }
   UpdateSession(now);
@@ -504,6 +504,10 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
   // The evidence of frame generation: the live NGX FrameGeneration features, as this context has no detector.
   const bool frame_generation_on = (facts_.ngx_frame_generation > 0u);
   if (FrameGenerationSkipsPresent(frame_generation_on, facts_.fg_present_path)) return SkipPresent(nr::SkipReason::FRAME_GENERATION_ON, group);
+  if (!nr::MeetsNrFloor(present_frame_.back_buffer.size)) {
+    present_reset_owed_ = true;
+    return SkipPresent(nr::SkipReason::FRAME_TOO_SMALL, group);
+  }
   // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before anything is recorded. No GPU waits:
   // DLSS-stage NR on another queue keeps Present off for later groups (UpdateChain); until that shows, a later Present group runs only once every earlier
   // DLSS-stage recording off the effect queue has completed, else it skips this frame. On the effect queue itself the queue's order keeps them apart.
@@ -566,7 +570,9 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
   // MotionVectors wants them (a present whose copy is missing gets zeros of the copies' own shape: VkPresentTarget::dlss_motion_gap_size), else Launchpad's
   // UPLIFT_MV at the Uplift technique (a missed conversion gets zeros of its shape), else none. So a source that skips a frame never changes the input's kind:
   // no skip and no reload; only a real change of setting or shape does.
-  const nr::Size present_canvas = sources::ResolveLayout(present_layout_, present_frame_.back_buffer.size).canvas;
+  const sources::WorkLayout present_work = sources::ResolveLayout(present_layout_, present_frame_.back_buffer.size);
+  const nr::Size present_canvas = present_work.image;
+  const bool remap_motion = present_work.foveation.active();
   const bool copies_meant = (settings_.motion_vectors && facts_.present_motion_copy && !dlss_motion_size_.Empty());
   nr::Size copy_size = dlss_motion_size_;
   if (dlss_motion.image != VK_NULL_HANDLE) {
@@ -575,7 +581,7 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
   VkMotionShape motion_shape = {.kind = (launchpad_wanted ? VkMotionKind::LAUNCHPAD : VkMotionKind::NONE), .format = VK_FORMAT_R16G16_SFLOAT};
   if (copies_meant || dlss_motion.image != VK_NULL_HANDLE) {
     motion_shape = {.kind = VkMotionKind::PRESENT_COPY, .format = VK_FORMAT_R16G16_SFLOAT,
-                    .low_res = (copy_size.width < present_canvas.width || copy_size.height < present_canvas.height)};
+                    .low_res = !remap_motion && (copy_size.width < present_canvas.width || copy_size.height < present_canvas.height)};
   }
   if (const nr::SkipReason motion_skip = CheckMotion(Stage::PRESENT, motion_shape); motion_skip != nr::SkipReason::NONE) return SkipPresent(motion_skip, group);
   const sources::VkPresentTarget target = {
@@ -641,33 +647,29 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
 }
 
 nr::Size VkDlssContext::SessionFrameSize() const {
-  if (NativePresent()) return canvas_size_;  // the settled canvas of the swap-chain image (SettleLayout, as Direct3D 12's Present path)
+  if (NativePresent()) return work_size_;  // the settled canvas of the swap-chain image (SettleLayout, as Direct3D 12's Present path)
   const bool dlss_placement = (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
-  return ((dlss_placement && !canvas_size_.Empty()) ? canvas_size_ : output_size_);
+  return ((dlss_placement && !work_size_.Empty()) ? work_size_ : output_size_);
 }
 
 sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, std::chrono::steady_clock::time_point now) {
-  // As DeviceContext::SettleLayout: StageLayoutTarget's target, settled, and Before upscaling's floor canvas. Pass 1's group works at Setup's Resolution,
+  // As DeviceContext::SettleLayout: settle the target, then clamp the effective work size and FOV compression. Pass 1's group works at Setup's Resolution,
   // a later group at its stage's own.
   const bool pass1 = Pass1Group(chain_, stage);
   const LayoutTarget target = StageLayoutTarget(settings_, output, stage, pass1, main_snapshot_, dlss_off_.Off());
   StageState& state = stages_[static_cast<size_t>(stage)];
-  const nr::Size uniform = state.settle.Update(sources::WorkSize(target.width, target.height, output), now, target.slider_held);
+  const nr::Size settled = state.settle.Update(sources::WorkSize(target.width, target.height, output), now, target.slider_held);
+  const nr::Size uniform = sources::WorkSize(settled.width, settled.height, output);
   // Foveated edge scaling (2026-10-21), as DeviceContext::SettleLayout.
-  const nr::foveation::Plan plan = nr::foveation::MakePlanFromShares(
+  const nr::foveation::Plan plan = sources::FoveatedWorkPlan(
       settings_.foveation,
       {settings_.foveation_width, settings_.foveation_height, settings_.foveation_falloff_x, settings_.foveation_falloff_y, settings_.foveation_edge_x, settings_.foveation_edge_y},
-      output.width, output.height, uniform.width, uniform.height);
+      output, uniform);
   const nr::Size image = {plan.width, plan.height};
-  const nr::Size canvas = StageCanvas(image, stage);
   state.work = image;
-  state.canvas = canvas;
-  if (pass1) {
-    work_size_ = image;
-    canvas_size_ = canvas;
-  }
-  session_->NoteFrameSize(static_cast<uint8_t>(stage), canvas);
-  return {.image = image, .canvas = canvas, .upsampling = settings_.upsampling, .foveation = plan.grid};
+  if (pass1) work_size_ = image;
+  session_->NoteFrameSize(static_cast<uint8_t>(stage), image);
+  return {.image = image, .upsampling = settings_.upsampling, .foveation = plan.grid};
 }
 
 void VkDlssContext::UpdateSession(std::chrono::steady_clock::time_point now) {
@@ -990,7 +992,7 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
   const std::optional<uint32_t> variant = color::VkColorPipeline::OutputVariantOf(output_format_);
   std::string color_problem;
   if (BeforeUpscaling()) {
-    // The padded canvas takes any render size: only the Color's own format can keep NR off.
+    // Format eligibility; the render region's minimum size is checked before the pre-SR recording.
     const bool color_image = (frame.color != nullptr && copies.color.Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW);
     const VkFormat color_format = (color_image ? copies.color.Resource.ImageViewInfo.Format : VK_FORMAT_UNDEFINED);
     if (!color_image) {
@@ -1010,8 +1012,6 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
       problem = "DLSS's output is not an image view";
     } else if (!nr::MeetsNrFloor(output_size_)) {
       skip = nr::SkipReason::FRAME_TOO_SMALL;
-      problem = std::format("NR needs a frame of at least {}x{} (DLSS's output region is {}x{})", nr::MIN_NR_LONG_SIDE, nr::MIN_NR_SHORT_SIDE,
-                            output_size_.width, output_size_.height);
     } else if (!variant) {
       skip = nr::SkipReason::UNSUPPORTED_FORMAT;
       problem = std::format("Unsupported DLSS output format on Vulkan (VkFormat {})", static_cast<int>(output_format_));
@@ -1103,7 +1103,7 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
     }
     return {.reason = reason};
   };
-  if (skip != nr::SkipReason::NONE) return skip_group(skip, false);
+  if (skip != nr::SkipReason::NONE) return skip_group(skip, skip == nr::SkipReason::FRAME_TOO_SMALL);
   if (session_->State() != nr::SessionState::ACTIVE) {
     stage.nr_applied = false;
     stage.skip_reason = nr::SkipReason::NONE;
@@ -1118,8 +1118,10 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
   // game's evaluate (a first compile takes milliseconds): this one frame keeps DLSS's own output, and NR's history starts afresh after it.
   if (!pipeline_->Prepared(output_format_)) return skip_group(nr::SkipReason::PREPARING_FORMAT, true);
   // Never a different motion input from the one this load's features were first evaluated with.
+  const sources::WorkLayout work = sources::ResolveLayout(layout, output_size_);
   if (const nr::SkipReason motion_skip =
-          CheckMotion(Stage::AFTER_DLSS, MotionShapeOf(ReadDlssFrame(frame, copies, &copies.output, region, false).inputs, sources::ResolveLayout(layout, output_size_).canvas, false));
+          CheckMotion(Stage::AFTER_DLSS, MotionShapeOf(ReadDlssFrame(frame, copies, &copies.output, region, false).inputs, work.image,
+                                                     work.foveation.active()));
       motion_skip != nr::SkipReason::NONE) {
     return skip_group(motion_skip, true);
   }
@@ -1229,8 +1231,8 @@ const NVSDK_NGX_Resource_VK* VkDlssContext::BeforeDlssEvaluate(VkCommandBuffer b
   if (torn_down_ || dropped_ || core_shut_down_) return nullptr;
   NoteDlssFeature(frame.serial);
   if (placement_.placement != Placement::BEFORE_UPSCALING || dlss_idle_) return nullptr;  // Before upscaling is always pass 1's group
-  // The work image is the settled size of the render region at the Resolution mode, and below the floor it is padded into the floor
-  // canvas. The set is keyed on it while the render region moves (the decode upsamples). The Session hears the canvas in every state.
+  // The effective work image follows the settled Resolution target, clamped within the render region and above the NR floor.
+  // The set is keyed on it while the render region moves (the decode upsamples). The Session hears the work size in every state.
   frame_size_ = {frame.color_region.width, frame.color_region.height};
   const sources::WorkLayout layout = (frame_size_.Empty() ? sources::WorkLayout{} : SettleLayout(frame_size_, Stage::BEFORE_UPSCALING, now));
   if (session_->State() != nr::SessionState::ACTIVE) {
@@ -1238,12 +1240,21 @@ const NVSDK_NGX_Resource_VK* VkDlssContext::BeforeDlssEvaluate(VkCommandBuffer b
     return nullptr;
   }
   StageState& stage = stages_[static_cast<size_t>(Stage::BEFORE_UPSCALING)];
+  if (!nr::MeetsNrFloor(frame_size_)) {
+    stage.nr_applied = false;
+    stage.passes_run = 0u;
+    stage.skip_reason = nr::SkipReason::FRAME_TOO_SMALL;
+    stage.motion_source = sources::MotionSource::NONE;
+    stage.reset_owed = true;
+    status_.NoteSkip(nr::SkipReason::FRAME_TOO_SMALL, RecordingStatus::Reset::ALL);
+    return nullptr;
+  }
   {
-    // As After DLSS's. In a padded canvas the game's vectors reach NGX as an RG16F canvas copy (or the zero image).
+    // As After DLSS's. A foveated grid remaps the game's vectors into an RG16F work-image copy (or the zero image).
     const nr::FrameInputs probe = ReadDlssFrame(frame, copies, (frame.color != nullptr ? &copies.color : nullptr), frame.color_region, false).inputs;
-    const nr::Size image = (layout.image.Empty() ? frame_size_ : layout.image);
-    const nr::Size canvas = sources::ResolveLayout(layout, frame_size_).canvas;
-    if (const nr::SkipReason motion_skip = CheckMotion(Stage::BEFORE_UPSCALING, MotionShapeOf(probe, canvas, canvas != image)); motion_skip != nr::SkipReason::NONE) {
+    const sources::WorkLayout work = sources::ResolveLayout(layout, frame_size_);
+    if (const nr::SkipReason motion_skip = CheckMotion(Stage::BEFORE_UPSCALING, MotionShapeOf(probe, work.image, work.foveation.active()));
+        motion_skip != nr::SkipReason::NONE) {
       status_.NoteSkip(motion_skip, RecordingStatus::Reset::ALL_BUT_MOTION);
       stage.nr_applied = false;
       stage.passes_run = 0u;
@@ -1601,7 +1612,6 @@ ContextStatus VkDlssContext::Status() const {
   status.dlss_seen = dlss_seen_;
   status.dlss_latch_tripped = dlss_latch_tripped_;
   status.work = work_size_;  // both placements settle a work size (SettleLayout)
-  status.canvas = canvas_size_;
   status.blocked = blocked_reason_;
   status.claimed_elsewhere = claimed_elsewhere;
   status.output_problem = output_problem;
@@ -1617,18 +1627,16 @@ ContextStatus VkDlssContext::Status() const {
   const bool match_game_waiting = (settings_.resolution == ui::ResolutionMode::MATCH_GAME && (!main_snapshot_ || dlss_off_.Off()) && !before_upscaling);
   status.resolution_applied = (match_game_waiting ? ui::ResolutionMode::FULL : settings_.resolution);
   status.upsampling = settings_.upsampling;
-  if (!status.canvas.Empty() && (dlss_placement || native_present)) {
-    // As Direct3D 12's line: below the floor the render is padded into the canvas; below the output size the change returns through the upsampling.
+  if (!status.work.Empty() && (dlss_placement || native_present)) {
+    // As Direct3D 12's line: below the output size the change returns through the upsampling.
     std::string detail;
-    if (status.canvas != status.work) {
-      detail = std::format(" (a {}x{} render, padded)", status.work.width, status.work.height);
-    } else if (status.work != status.frame && !status.frame.Empty()) {
+    if (status.work != status.frame && !status.frame.Empty()) {
       detail = std::format(" of {}x{} ({})", status.frame.width, status.frame.height, (settings_.upsampling == color::Upsampling::CLASSIC ? "Classic" : "Edge-aware"));
     }
     if (match_game_waiting) {
       detail += " (Match game: waiting for DLSS)";
     }
-    status.work_line = std::format("Working at {}x{}{}", status.canvas.width, status.canvas.height, detail);
+    status.work_line = std::format("Working at {}x{}{}", status.work.width, status.work.height, detail);
   }
   if (status_.nr_applied && pipeline_) {
     status.exposure_line = sources::ExposureLine(pipeline_->LastExposure());

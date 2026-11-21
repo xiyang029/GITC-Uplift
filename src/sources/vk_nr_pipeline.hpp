@@ -69,7 +69,7 @@ struct VkPresentTarget {
 
 // The Vulkan DLSS placements' recordings: encode DLSS's Output in place into A, the Session's NR passes, Direct3D 12's
 // change path and look stage (RecordAfterNr's port: the change field, the pyramids, the stabiliser, the shape), decode in place (After DLSS); or encode the
-// game's Color (sampled) into A on a padded canvas, the same, and decode into Uplift's own colour that DLSS reads instead (Before upscaling). Both work at a
+// game's Color (sampled) into A, the same, and decode into Uplift's own colour that DLSS reads instead (Before upscaling). Both work at a
 // settled work size below the output (the decode upsamples the change field), meter the input's exposure when InputExposure asks for it, give each later pass
 // its own Transfer and Colour strength (this class is the Session's nr::PassResolver), and bind the NR mask copy. Owns A, B, the change field, the all-zero
 // motion image, Before upscaling's canvas motion and private colour (each an image with its NVSDK_NGX_Resource_VK, which is what the Session's opaque handles
@@ -103,17 +103,17 @@ class VkNrPipeline final : private nr::PassResolver {
   // The caller has checked the placement (the main handle, a tracked list), ticked the Session and issued its completion token before this call (the
   // token's event is set at the end of the hooked evaluate, whatever the result). `recorded` says whether anything went onto `buffer`. Nothing is recorded
   // for: Intensity 0 (nr::SkipReason::INTENSITY_ZERO: exact pass-through), an output format without a variant (nr::SkipReason::UNSUPPORTED_FORMAT),
-  // a variant whose pipelines cannot be built (nr::SkipReason::PIPELINE_FAILED), a region or a canvas below the NR floor (640x360)
-  // (nr::SkipReason::FRAME_TOO_SMALL).
+  // a variant whose pipelines cannot be built (nr::SkipReason::PIPELINE_FAILED), or an original region below the NR floor
+  // (nr::SkipReason::FRAME_TOO_SMALL). The effective work image is clamped to the floor within the original region.
   // Split chain: each recording below runs `part` of the chain (its Session slice, on its stage group's set); the default is the whole chain on
   // set 0, the single chain of before the split.
   PipelineResult RecordAfterDlss(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
                                  const WorkLayout& layout = {}, const ChainPart& part = {});
   // Before upscaling: NR on the region of the game's Color (`color.resource`: a sampled image view in
   // SHADER_READ_ONLY_OPTIMAL, only read) before DLSS-SR upscales it, inside the game's command buffer right before DLSS's evaluate. The region is resampled
-  // into the SETTLED work image of `layout` (the set is keyed on it, never on the per-frame render region), mirror-padded into the floor
-  // canvas (`layout.canvas`; the image itself when it meets the floor), the game's motion vectors are copied into a canvas motion image, NR runs at the
-  // canvas, and the decode composes NR's change into PrivateColor() at the region, upsampled from the work image (a render region that moves while
+  // into the SETTLED work image of `layout` (the set is keyed on it, never on the per-frame render region). Foveation remaps the game's motion
+  // vectors into a work-size motion image. NR runs at the work size, and the decode composes NR's change into PrivateColor() at the region,
+  // upsampled from the work image (a render region that moves while
   // the work size settles keeps NR running). DLSS reads that as its Color for this evaluate (the NGX detour swaps it in). Nothing is recorded for:
   // Intensity 0, a Color format the sampled encode cannot read (nr::SkipReason::UNSUPPORTED_FORMAT), a pipeline that cannot be built
   // (nr::SkipReason::PIPELINE_FAILED), motion vectors outside their image. The caller issued the token before this call; its event is set after DLSS
@@ -125,7 +125,7 @@ class VkNrPipeline final : private nr::PassResolver {
   // LookConfig says; DLSS's Present copy, else Launchpad's UPLIFT_MV converted, else none, NR's history restarting when that provider changes), and the
   // result copied back only when NR applied. The image is back in its layout on return either way, behind a global dependency on everything after. The
   // intermediates are used on ReShade's queue alone, so they go at their marks through FreeFinished (never the timeline's pending releases). Nothing is
-  // recorded for: Intensity 0, a frame or canvas below the NR floor, a pipeline that cannot be built, a busy descriptor slot, surfaces that cannot be made.
+  // recorded for: Intensity 0, a pipeline that cannot be built, a busy descriptor slot, surfaces that cannot be made.
   PipelineResult RecordPresent(VkCommandBuffer buffer, const VkPresentTarget& target, const nr::Controls& controls, bool reset_hint,
                                const WorkLayout& layout = {}, const ChainPart& part = {});
   // After RecordPreSr applied NR and until the next recording: what DLSS reads as Color (a pointer to the struct the pipeline owns, valid while the set is).
@@ -193,11 +193,11 @@ class VkNrPipeline final : private nr::PassResolver {
     vk::NrImage a;  // the model texture NR reads first; RGBA16F at the canvas
     vk::NrImage b;
     // RG16F at the canvas. Made at the first frame that needs one, and freed with the set.
-    vk::NrImage zero_motion;    // MotionVectors = None (or Before upscaling's canvas without readable vectors)
-    vk::NrImage canvas_motion;  // vectors remapped into a warped image or a padded canvas
+    vk::NrImage zero_motion;    // MotionVectors = None, or a remapped canvas without readable vectors
+    vk::NrImage canvas_motion;  // vectors remapped into a warped work image
     vk::NrImage private_color;  // Before upscaling: RGBA16F at the game's Color dimensions, what DLSS reads as Color
     vk::NrImage change;         // required RGBA16F change field at the work image
-    SetSizes sizes;             // the canvas is the work image, padded before upscaling below the floor
+    SetSizes sizes;             // the canvas matches the effective work image
     bool pre_sr = false;
     // The warped work grid the set was made for (nr/foveation.hpp). A grid that moves while the surfaces still fit restarts
     // the histories instead of reallocating (see RecordUav and RecordPreSr below).
@@ -401,7 +401,6 @@ class VkNrPipeline final : private nr::PassResolver {
   // The stabiliser's motion vectors (the game's own, current -> previous) with a resolved rect and their scale, or none: absent or unreadable vectors make
   // Motion change-gated static, as Direct3D 12's StabilizeMotionOf.
   [[nodiscard]] static color::VkStabilizeMotion StabilizeMotionOf(const nr::FrameInputs& inputs);
-  [[nodiscard]] static color::VkStabilizeMotion WorkStabilizeMotionOf(const nr::FrameInputs& inputs, nr::Size image);
   bool ConvertWorkMotion(VkCommandBuffer buffer, uint32_t slot, nr::FrameInputs& inputs, const color::VkStabilizeMotion& source,
                          const WorkLayout& work);
   // The target's input scale, and NR's history restarting when the encoding or the scale changed.

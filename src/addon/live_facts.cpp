@@ -74,7 +74,7 @@ void FillRunning(ui::SetupFacts* facts, const ContextStatus& status, bool workin
   facts->resolution = status.resolution_applied;
   facts->upsampling = status.upsampling;
   facts->work = status.work;
-  facts->canvas = status.canvas;
+  facts->canvas = status.work;
   facts->frame = status.frame;
   facts->passes_run = status.passes_run;
   facts->passes_requested = status.session.passes_requested;

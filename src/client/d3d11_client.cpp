@@ -88,7 +88,6 @@ void D3D11Client::ReleaseShared() {
   kmt_size_ = {};
   kmt_format_ = DXGI_FORMAT_UNKNOWN;
   kmt_bytes_ = 0u;
-  floor_probed_ = false;
 }
 
 void D3D11Client::ReleaseMask() {
@@ -320,17 +319,6 @@ bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon
   if (!fenced_) {
     // KMT: CopyResource into the shared texture, an event query (capped), RUN, and back.
     if (!kmt_texture_ || kmt_size_ != size || kmt_format_ != description->Format) return false;
-    if (!nr::MeetsNrFloor(size)) {
-      // Below NR's floor nothing can come back: after the first RUN at this size (whose reply's status says why) no RUN at all.
-      if (floor_probed_) return false;
-      const bool replied = link.Run(run).has_value();
-      run_sent_ = link.RunSent();
-      floor_probed_ = run_sent_;  // a RUN that was refused (another request outstanding) is tried again
-      if (!replied) {
-        in_flight_ = true;
-      }
-      return false;
-    }
     if (!query_) {
       const D3D11_QUERY_DESC query = {.Query = D3D11_QUERY_EVENT, .MiscFlags = 0u};
       if (FAILED(device_->CreateQuery(&query, &query_))) return false;
