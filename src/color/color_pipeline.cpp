@@ -11,6 +11,7 @@
 #include "decode_vs.h"
 #include "encode_cs.h"
 #include "change_stabilize_cs.h"
+#include "shader_values.h"
 #include "faces_cs.h"
 #include "look_pyramid_cs.h"
 #include "look_shape_cs.h"
@@ -68,9 +69,6 @@ constexpr uint32_t FACES_MODE_SHOW = 3u;
 constexpr uint32_t FACES_MODE_DESPIKE = 4u;
 constexpr uint32_t FACES_FLAG_FIRST = 1u;  // faces_cs.hlsl's flags
 constexpr uint32_t FACES_FLAG_FILL = 2u;
-constexpr uint32_t CHANGE_STABILIZE_FLAG_RESET = 1u;  // change_stabilize_cs.hlsl's flags
-constexpr uint32_t CHANGE_STABILIZE_FLAG_MOTION = 2u;
-constexpr uint32_t CHANGE_STABILIZE_FLAG_VECTORS = 4u;
 
 uint32_t Bits(float value) {
   return std::bit_cast<uint32_t>(value);
@@ -115,7 +113,8 @@ std::array<uint32_t, PASS_CONSTANTS> StabilizeConstants(uint32_t mode, const Sta
 std::array<uint32_t, PASS_CONSTANTS> ChangeStabilizeConstants(const ChangeStabilizePass& pass) {
   const StabilizeMotion& motion = pass.motion;
   const bool vectors = (motion.vectors.resource != nullptr);
-  const uint32_t flags = (pass.reset ? CHANGE_STABILIZE_FLAG_RESET : 0u) | CHANGE_STABILIZE_FLAG_MOTION | (vectors ? CHANGE_STABILIZE_FLAG_VECTORS : 0u);
+  const uint32_t flags = (pass.reset ? UPLIFT_CHANGE_STABILIZE_FLAG_RESET : 0u) | (vectors ? UPLIFT_CHANGE_STABILIZE_FLAG_VECTORS : 0u)
+                         | (pass.flat_denoise ? UPLIFT_CHANGE_STABILIZE_FLAG_FLAT_DENOISE : 0u);
   return {
       pass.image.width, pass.image.height, Bits(pass.rate), flags, motion.vectors.rect.x, motion.vectors.rect.y,
       (vectors ? motion.vectors.rect.width : 1u), (vectors ? motion.vectors.rect.height : 1u), Bits(motion.scale_x), Bits(motion.scale_y),

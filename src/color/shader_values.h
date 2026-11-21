@@ -11,10 +11,10 @@
 #define UPLIFT_STABILIZE_FLAG_MOTION 2u
 #define UPLIFT_STABILIZE_FLAG_VECTORS 4u
 
-// change_stabilize_cs.hlsl: the change field's own stabiliser, the same flags minus its modes.
+// change_stabilize_cs.hlsl: the change field's own stabiliser.
 #define UPLIFT_CHANGE_STABILIZE_FLAG_RESET 1u
-#define UPLIFT_CHANGE_STABILIZE_FLAG_MOTION 2u
 #define UPLIFT_CHANGE_STABILIZE_FLAG_VECTORS 4u
+#define UPLIFT_CHANGE_STABILIZE_FLAG_FLAT_DENOISE 8u
 
 #define UPLIFT_FACES_MODE_LEVEL 0u
 #define UPLIFT_FACES_MODE_FIRST 1u

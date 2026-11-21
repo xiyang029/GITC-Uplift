@@ -777,7 +777,8 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
         {.change = change, .previous = set_->look.change_history[1u - current].view, .current = stable,
          .image = set_->look.plan.image,
          .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
-         .reset = reset_history, .motion = history_input.reproject ? motion : color::VkStabilizeMotion{}});
+         .reset = reset_history, .motion = history_input.reproject ? motion : color::VkStabilizeMotion{},
+         .flat_denoise = change_input.has_value()});
     set_->look.change_valid = recorded;
     if (recorded) {
       color_.ComputeBarrier(buffer);

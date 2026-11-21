@@ -199,6 +199,7 @@ struct ChangeStabilizePass {
   float rate = 1.f;                    // look::StabilizeRate
   bool reset = false;
   StabilizeMotion motion;              // reproject along the game's vectors; null resource: the static sample
+  bool flat_denoise = false;           // Present only: softly filter small spatial variations in the current change
 };
 
 // v2 design §3.10: a pass's own strengths between NR passes.

@@ -26,8 +26,8 @@ cbuffer ChangeStabilizeConstants : register(b0) {
 };
 
 static const uint FLAG_RESET = UPLIFT_CHANGE_STABILIZE_FLAG_RESET;      // this frame starts the history afresh
-static const uint FLAG_MOTION = UPLIFT_CHANGE_STABILIZE_FLAG_MOTION;    // reproject along the vectors
 static const uint FLAG_VECTORS = UPLIFT_CHANGE_STABILIZE_FLAG_VECTORS;  // t2 holds them; without them Motion is change-gated static
+static const uint FLAG_FLAT_DENOISE = UPLIFT_CHANGE_STABILIZE_FLAG_FLAT_DENOISE;
 static const float GUIDE_GATE_LOW = 0.25f;   // stops of l_M: below this the history is trusted fully
 static const float GUIDE_GATE_HIGH = 1.0f;   // and above it, not at all (a real change is taken at once)
 static const float MIN_MOTION_PIXELS = 0.25f;  // a shorter vector is the frame's own jitter: reprojecting along it would only soften the history
@@ -42,6 +42,10 @@ static const float EDIT_LOW = 0.0067f;  // ~2 of 255: isolated one-code noise re
 static const float EDIT_HIGH = 0.020f;  // ~6 of 255: persistent small edits catch up sooner
 static const float CLIP_MAX_LUMINANCE_STOPS = 0.125f;  // limits how much a stale edge can escape the local range
 static const float CLIP_MAX_CHROMA = 0.05f;            // likewise for the two chroma channels
+static const float FLAT_GUIDE_LOW = 0.035f;  // original luminance range, in stops
+static const float FLAT_GUIDE_HIGH = 0.12f;
+static const float FLAT_LIGHTNESS_FLOOR = 0.25f;  // keep the edit gate from overlooking detail in darks
+static const float FLAT_BLEND = 0.25f;
 
 Texture2D<float4> change_texture : register(t0);    // this frame's C (shape's output)
 Texture2D<float4> previous_texture : register(t1);  // last frame's stabilised C
@@ -56,8 +60,6 @@ float2 MotionAt(float2 work_uv) {
   return (all(isfinite(motion)) ? motion : float2(0.f, 0.f));
 }
 
-// How badly one candidate history explains this frame's C: xyz is what is stabilised, w (l_M) is what tells a real change from a flicker. The candidate
-// that moved C the way this frame's C moved is the one that came from the same surface.
 float GuideConfidence(float error) {
   return 1.f - smoothstep(GUIDE_GATE_LOW, GUIDE_GATE_HIGH, error);
 }
@@ -98,18 +100,36 @@ void GuidedHistory(float2 position, int2 size, float guide, out float3 change, o
 // A shared 10x10 tile gives each 8x8 group a clamped one-texel halo for the 3x3 range.
 groupshared float4 change_tile[100];
 
-void Neighbourhood(uint2 local, out float3 low, out float3 high) {
-  const uint centre = (local.y + 1u) * 10u + local.x + 1u;
-  low = change_tile[centre].xyz;
-  high = low;
+void Neighbourhood(uint centre, float4 current, bool measure_guide, out float3 low, out float3 high, out float guide_range) {
+  float4 lo = current;
+  float4 hi = current;
   [unroll] for (int y = -1; y <= 1; ++y) {
     [unroll] for (int x = -1; x <= 1; ++x) {
+      if (x == 0 && y == 0) continue;
       const uint index = uint(int(centre) + y * 10 + x);
-      const float3 neighbour = change_tile[index].xyz;
-      low = min(low, neighbour);
-      high = max(high, neighbour);
+      const float4 neighbour = change_tile[index];
+      lo.xyz = min(lo.xyz, neighbour.xyz);
+      hi.xyz = max(hi.xyz, neighbour.xyz);
+      if (measure_guide) {
+        lo.w = min(lo.w, neighbour.w);
+        hi.w = max(hi.w, neighbour.w);
+      }
     }
   }
+  low = lo.xyz;
+  high = hi.xyz;
+  guide_range = hi.w - lo.w;
+}
+
+float3 FilterFlatChange(uint centre, float3 current, float3 low, float3 high, float guide_range, float lightness) {
+  const float guide_flatness = 1.f - smoothstep(FLAT_GUIDE_LOW, FLAT_GUIDE_HIGH, guide_range);
+  const float change_range = PerceptualEdit(low, high, max(lightness, FLAT_LIGHTNESS_FLOOR));
+  const float change_flatness = 1.f - smoothstep(EDIT_LOW, EDIT_HIGH, change_range);
+  const float weight = FLAT_BLEND * guide_flatness * change_flatness;
+  if (!(weight > 0.f)) return current;
+  const float3 average = 0.25f * (change_tile[centre - 10u].xyz + change_tile[centre + 10u].xyz +
+                                 change_tile[centre - 1u].xyz + change_tile[centre + 1u].xyz);
+  return all(isfinite(average)) ? lerp(current, average, weight) : current;
 }
 
 [numthreads(8, 8, 1)]
@@ -125,16 +145,31 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, uint3 gro
   GroupMemoryBarrierWithGroupSync();
   if (id.x >= image.x || id.y >= image.y) return;
   const uint2 local = group_thread_id.xy;
-  const float4 current = change_tile[(local.y + 1u) * 10u + local.x + 1u];
+  const uint centre = (local.y + 1u) * 10u + local.x + 1u;
+  const float4 current = change_tile[centre];
+  const bool reset = (flags & FLAG_RESET) != 0u;
+  const bool flat_denoise = (flags & FLAG_FLAT_DENOISE) != 0u;
+  if (reset && !flat_denoise) {
+    current_texture[id.xy] = current;
+    return;
+  }
+
+  const float lightness = max(exp2(current.w * (1.f / 3.f)), LIGHTNESS_FLOOR);
+  float3 low;
+  float3 high;
+  float guide_range;
+  Neighbourhood(centre, current, flat_denoise, low, high, guide_range);
   float4 result = current;
-  if ((flags & FLAG_RESET) == 0u) {
+  // Filter only new data; keep history rejection based on the raw current change. Use the same spatial
+  // filter on reset frames so a reset does not also toggle the spatial filter.
+  if (flat_denoise) result.xyz = FilterFlatChange(centre, current.xyz, low, high, guide_range, lightness);
+  if (!reset) {
     const float4 stationary = previous_texture.Load(int3(id.xy, 0));
-    const float lightness = max(exp2(current.w * (1.f / 3.f)), LIGHTNESS_FLOOR);
     const float static_guide_error = abs(current.w - stationary.w);
     float3 history = stationary.xyz;
     float confidence = GuideConfidence(static_guide_error);
     float edit = PerceptualEdit(history, current.xyz, lightness);
-    if ((flags & (FLAG_MOTION | FLAG_VECTORS)) == (FLAG_MOTION | FLAG_VECTORS)) {
+    if ((flags & FLAG_VECTORS) != 0u) {
       const float2 work_uv = (float2(id.xy) + 0.5f) / float2(image);
       const float2 work_motion = MotionAt(work_uv);
       const float2 previous_work_uv = work_uv + work_motion;
@@ -160,9 +195,6 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, uint3 gro
     }
     // An edit of C itself: NR moving the display value by a few codes, which l_M does not see when it is a soft shadow rather than a brightness step.
     confidence *= 1.f - smoothstep(EDIT_LOW, EDIT_HIGH, edit);
-    float3 low;
-    float3 high;
-    Neighbourhood(local, low, high);
     // A hard min/max erases temporal averaging when a whole flat patch flickers together. Allow only a small
     // perceptual error beyond the local hull, with caps that keep history from crossing a nearby surface.
     const float luminance_clip = min(CLIP_MAX_LUMINANCE_STOPS, EDIT_LOW / max(lightness * (0.693147f / 3.f), 1e-5f));
@@ -170,8 +202,8 @@ void main(uint3 id : SV_DispatchThreadID, uint3 group_id : SV_GroupID, uint3 gro
     const float3 clip_margin = float3(luminance_clip, chroma_clip, chroma_clip);
     history = clamp(history, low - clip_margin, high + clip_margin);
     const float blend = 1.f - (1.f - rate) * confidence;  // this frame's weight
-    const float4 blended = float4(history + blend * (current.xyz - history), current.w);
-    result = (all(isfinite(blended)) ? blended : current);
+    const float4 blended = float4(history + blend * (result.xyz - history), current.w);
+    if (all(isfinite(blended))) result = blended;
   }
-  current_texture[id.xy] = result;  // a reset frame writes C itself: the new history starts here
+  current_texture[id.xy] = result;
 }

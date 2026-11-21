@@ -742,7 +742,8 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
         {.change = change, .previous = set_->look.change_history[1u - current].Get(), .current = stable,
          .image = set_->look.plan.image,
          .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
-         .reset = reset_history, .motion = history_input.reproject ? motion : color::StabilizeMotion{}});
+         .reset = reset_history, .motion = history_input.reproject ? motion : color::StabilizeMotion{},
+         .flat_denoise = change_input.has_value()});
     Transition(list, stable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
     set_->look.change_valid = recorded;
     if (recorded) {

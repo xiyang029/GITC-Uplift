@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "change_stabilize_vk.h"
+#include "shader_values.h"
 #include "color/color_pipeline.hpp"
 #include "decode_vk_presr.h"
 #include "decode_vk_r11g11b10f.h"
@@ -77,10 +78,6 @@ constexpr uint32_t STABILIZE_DETAIL = 2u;
 constexpr uint32_t STABILIZE_FLAG_RESET = 1u;
 constexpr uint32_t STABILIZE_FLAG_MOTION = 2u;
 constexpr uint32_t STABILIZE_FLAG_VECTORS = 4u;
-// change_stabilize_cs.hlsl's flags (the same three, without modes: it is one dispatch).
-constexpr uint32_t CHANGE_STABILIZE_FLAG_RESET = 1u;
-constexpr uint32_t CHANGE_STABILIZE_FLAG_MOTION = 2u;
-constexpr uint32_t CHANGE_STABILIZE_FLAG_VECTORS = 4u;
 constexpr uint32_t FACES_MODE_LEVEL = 0u;  // faces_cs.hlsl's modes (ColorPipeline's)
 constexpr uint32_t FACES_MODE_FIRST = 1u;
 constexpr uint32_t FACES_MODE_LATER = 2u;
@@ -210,8 +207,8 @@ std::array<uint32_t, PASS_CONSTANTS> StabilizeConstants(uint32_t mode, const VkS
 std::array<uint32_t, PASS_CONSTANTS> ChangeStabilizeConstants(const VkChangeStabilizePass& pass) {
   const VkStabilizeMotion& motion = pass.motion;
   const bool vectors = (motion.vectors.view != VK_NULL_HANDLE);
-  const uint32_t flags =
-      (pass.reset ? CHANGE_STABILIZE_FLAG_RESET : 0u) | CHANGE_STABILIZE_FLAG_MOTION | (vectors ? CHANGE_STABILIZE_FLAG_VECTORS : 0u);
+  const uint32_t flags = (pass.reset ? UPLIFT_CHANGE_STABILIZE_FLAG_RESET : 0u) | (vectors ? UPLIFT_CHANGE_STABILIZE_FLAG_VECTORS : 0u)
+                         | (pass.flat_denoise ? UPLIFT_CHANGE_STABILIZE_FLAG_FLAT_DENOISE : 0u);
   return {
       pass.image.width,
       pass.image.height,

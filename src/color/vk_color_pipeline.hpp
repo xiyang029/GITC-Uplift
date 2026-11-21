@@ -157,6 +157,7 @@ struct VkChangeStabilizePass {
   float rate = 1.f;                       // look::StabilizeRate of the change field's own time
   bool reset = false;
   VkStabilizeMotion motion;
+  bool flat_denoise = false;  // Present only, as on D3D12
 };
 
 // Plan 14 Task 10 (v2 design §3.14, amendment 2): the exposure meter and governor, one thread group before the encode. The state image's x is the encode's
