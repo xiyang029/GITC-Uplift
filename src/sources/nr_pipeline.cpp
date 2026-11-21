@@ -734,16 +734,19 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
   if (look_ready && set_->look.plan.change) {
     const uint32_t current = set_->look.change_current;
     ID3D12Resource* const stable = set_->look.change_history[current].Get();
+    const bool reset_history = reset || !set_->look.change_valid;
     Transition(list, stable, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    color_.RecordChangeStabilize(list, slot,
-                                 {.change = change, .previous = set_->look.change_history[1u - current].Get(), .current = stable,
-                                  .image = set_->look.plan.image,
-                                  .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
-                                  .reset = (reset || !set_->look.change_valid), .motion = motion});
+    const bool recorded = color_.RecordChangeStabilize(list, slot,
+        {.change = change, .previous = set_->look.change_history[1u - current].Get(), .current = stable,
+         .image = set_->look.plan.image,
+         .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
+         .reset = reset_history, .motion = motion});
     Transition(list, stable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    set_->look.change_current = 1u - current;
-    set_->look.change_valid = true;
-    after.texture = stable;
+    set_->look.change_valid = recorded;
+    if (recorded) {
+      set_->look.change_current = 1u - current;
+      after.texture = stable;
+    }
   }
   return after;
 }

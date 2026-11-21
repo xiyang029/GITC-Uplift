@@ -771,18 +771,18 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
     }
     const uint32_t current = set_->look.change_current;
     const VkImageView stable = set_->look.change_history[current].view;
-    color_.RecordChangeStabilize(buffer, slot,
-                                 {.change = change,
-                                  .previous = set_->look.change_history[1u - current].view,
-                                  .current = stable,
-                                  .image = set_->look.plan.image,
-                                  .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
-                                  .reset = (reset || !set_->look.change_valid),
-                                  .motion = motion});
-    color_.ComputeBarrier(buffer);
-    set_->look.change_current = 1u - current;
-    set_->look.change_valid = true;
-    after.view = stable;
+    const bool reset_history = reset || !set_->look.change_valid;
+    const bool recorded = color_.RecordChangeStabilize(buffer, slot,
+        {.change = change, .previous = set_->look.change_history[1u - current].view, .current = stable,
+         .image = set_->look.plan.image,
+         .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
+         .reset = reset_history, .motion = motion});
+    set_->look.change_valid = recorded;
+    if (recorded) {
+      color_.ComputeBarrier(buffer);
+      set_->look.change_current = 1u - current;
+      after.view = stable;
+    }
   };
   if (!shape) {
     stabilise_change();
@@ -1026,8 +1026,11 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
     color_.RecordFacesShow(buffer, slot, nr_output, set_->faces.twin.view, work.canvas);
     Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
   }
+  // NGX's zero-filled inputs are not usable reprojection vectors.
+  const color::VkStabilizeMotion stabilize_motion = !game_motion || inputs.motion.resource == nr::AsResource(&present_.stand_in.ngx)
+      ? color::VkStabilizeMotion{} : (foveated ? WorkStabilizeMotionOf(frame_inputs, work.image) : source_motion);
   const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling,
-                                      foveated ? WorkStabilizeMotionOf(frame_inputs, work.image) : source_motion, frame_inputs.reset_hint);
+                                      stabilize_motion, frame_inputs.reset_hint);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source, .motion_scale_x = frame_inputs.motion_scale_x, .motion_scale_y = frame_inputs.motion_scale_y};
   }
@@ -1253,8 +1256,8 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr
     color_.RecordFacesShow(buffer, slot, nr_output, set_->faces.twin.view, canvas);  // Show the face mask, as after DLSS
     Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
   }
-  const color::VkStabilizeMotion stabilize_motion = foveated ? WorkStabilizeMotionOf(frame_inputs, image)
-                                                            : source_motion.value_or(color::VkStabilizeMotion{});
+  const color::VkStabilizeMotion stabilize_motion = use_zero_motion ? color::VkStabilizeMotion{}
+      : (foveated ? WorkStabilizeMotionOf(frame_inputs, image) : source_motion.value_or(color::VkStabilizeMotion{}));
   const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling,
                                       stabilize_motion, frame_inputs.reset_hint);
   if (!after.ok) {
