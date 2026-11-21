@@ -658,7 +658,8 @@ void NrPipeline::ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID
 
 NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
                                               ID3D12Resource* nr_output, uint32_t passes_run, bool reduced, bool look_ready,
-                                              color::Upsampling upsampling, const color::StabilizeMotion& motion, bool reset) {
+                                              color::Upsampling upsampling, const color::StabilizeMotion& motion, bool reset,
+                                              std::optional<ChangeStabilizeInput> change_input) {
   if (set_->look.plan != LookPlan{}) {
     set_->look.last_use = slot_marks_[slot];
   }
@@ -734,13 +735,14 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
   if (look_ready && set_->look.plan.change) {
     const uint32_t current = set_->look.change_current;
     ID3D12Resource* const stable = set_->look.change_history[current].Get();
-    const bool reset_history = reset || !set_->look.change_valid;
+    const ChangeStabilizeInput history_input = change_input.value_or(ChangeStabilizeInput{.reset = reset});
+    const bool reset_history = history_input.reset || !set_->look.change_valid;
     Transition(list, stable, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     const bool recorded = color_.RecordChangeStabilize(list, slot,
         {.change = change, .previous = set_->look.change_history[1u - current].Get(), .current = stable,
          .image = set_->look.plan.image,
          .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
-         .reset = reset_history, .motion = motion});
+         .reset = reset_history, .motion = history_input.reproject ? motion : color::StabilizeMotion{}});
     Transition(list, stable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
     set_->look.change_valid = recorded;
     if (recorded) {
@@ -993,15 +995,19 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   if (!Encode(list, slot, encode)) return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source};
   // 3. NR.
   const bool look_reset = (inputs.reset_hint || set_->intermediates.reset_pending);  // Evaluate pays the owed reset off
+  const bool change_reset = (reset_hint || set_->intermediates.reset_pending);
   const nr::EvaluateResult evaluated = Evaluate(list, slot, inputs, controls, part.slice);
   if (evaluated.output == nullptr) {
     return {.recorded = true, .reason = evaluated.reason, .from_session = nr::SessionWroteMessage(evaluated.reason),
             .motion_source = motion_source};
   }
   // 4. The change field and optional look stage.
+  const auto change_input = set_->present_change_history.Advance(
+      {.source = motion_source, .fresh = motion_source != MotionSource::PRESENT_COPY || (pick.slot ? pick.age : target.dlss_motion_age) == 0u,
+       .allow_gap = target.motion_enabled}, change_reset);
   const AfterNr after = RecordAfterNr(list, slot, encode, evaluated.output, evaluated.passes_run, reduced, look_ready, work.upsampling,
                                       foveated ? WorkStabilizeMotionOf(inputs, work.image)
-                                               : StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), look_reset);
+                                               : StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), look_reset, change_input);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source};
   }

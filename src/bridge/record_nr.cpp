@@ -91,7 +91,7 @@ bool RecordNr(addon::DeviceContext& context, addon::TriggerPoint point, ID3D12Gr
   // Direct3D 11's ring slot carries DLSS's scale as values (1 for every other source).
   return context
       .Run(&host, D3D12_RESOURCE_STATE_COMMON, point, targets.motion, targets.motion_is_dlss, targets.motion_scale_x, targets.motion_scale_y,
-           targets.motion_region)
+           targets.motion_region, targets.dlss_motion_age)
       .nr_applied;
 }
 

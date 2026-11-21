@@ -556,7 +556,8 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
   }
   ApplyLookConfig(now, group);
   // As DeviceContext::Run: DLSS's copy for this present while MotionVectors wants DLSS's (it stamps the copy's use), else Launchpad's UPLIFT_MV.
-  const vk::NrImage dlss_motion = ((settings_.motion_vectors && facts_.present_motion_copy) ? PresentMotion() : vk::NrImage{});
+  uint64_t dlss_motion_age = 0u;
+  const vk::NrImage dlss_motion = ((settings_.motion_vectors && facts_.present_motion_copy) ? PresentMotion(dlss_motion_age) : vk::NrImage{});
   const bool launchpad_wanted = (settings_.launchpad_motion && launchpad.view != VK_NULL_HANDLE);
   if (!settings_.motion_vectors || !facts_.present_motion_copy) {
     present_motion_bound_ = (launchpad_wanted ? BoundMotion::LAUNCHPAD : BoundMotion::NONE);  // the per-frame trace names the motion
@@ -594,6 +595,8 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
       .launchpad_format = launchpad.format,
       .motion_scale_x = settings_.motion_scale_x,
       .motion_scale_y = settings_.motion_scale_y,
+      .dlss_motion_age = dlss_motion_age,
+      .motion_enabled = settings_.motion_vectors || settings_.launchpad_motion,
   };
   const sources::PipelineResult result =
       pipeline_->RecordPresent(buffer, target, controls_, present_reset_owed_, present_layout_, {.slice = slices_[group], .set = group});
@@ -1495,10 +1498,10 @@ std::string VkDlssContext::DetailsLine() const {
   return std::format("Vulkan: NR runs inside the game's frame (native Vulkan NR, {:.0f} MiB; {})", static_cast<double>(bytes) / BYTES_PER_MIB, VK_FIRST_USE_NOTE);
 }
 
-vk::NrImage VkDlssContext::PresentMotion() {
+vk::NrImage VkDlssContext::PresentMotion(uint64_t& age) {
+  age = 0u;
   // None once the copies stopped. The frame no longer advances then, so the last slot would be bound again at every present.
   if (!CanCopy() || !pipeline_) return {};
-  uint64_t age = 0u;
   const uint64_t max_age = present_layout_.foveation.active() ? 0u : sources::PRESENT_MOTION_MAX_AGE;
   const vk::NrImage copy = pipeline_->PresentMotion(completion_->Timeline().CurrentFrame(), &age, max_age);
   if (facts_.present_motion_copy) {

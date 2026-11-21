@@ -258,7 +258,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
 
 sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES entry_state, TriggerPoint point,
                                           ID3D12Resource* motion, bool motion_is_dlss, float dlss_scale_x, float dlss_scale_y,
-                                          nr::Rect dlss_motion_region) {
+                                          nr::Rect dlss_motion_region, uint64_t dlss_motion_age) {
   if (point == TriggerPoint::NONE || !frame_ready_) return {};
   frame_ready_ = false;
   ran_since_present_ = true;
@@ -306,6 +306,8 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   frame_target_.dlss_motion_scale_y = (motion_is_dlss ? dlss_scale_y : 1.f);
   frame_target_.dlss_motion_raw = (motion_is_dlss && dlss_stages_);  // the motion copy filters them, as every other Present source
   frame_target_.dlss_motion_flip = (frame_target_.dlss_motion_raw && facts_.dlss_motion_upside_down);  // 1.1.6 (Vulkan's copies are flipped by theirs)
+  frame_target_.dlss_motion_age = dlss_motion_age;
+  frame_target_.motion_enabled = settings_.motion_vectors || settings_.launchpad_motion;
   const sources::PresentResult result = present_source_->Record(host->NativeList(), frame_target_, controls_, present_reset_owed_, present_layout_,
                                                                 {.slice = slices_[group], .set = group});
   host->TargetBarrier(D3D12_RESOURCE_STATE_COPY_SOURCE, entry_state);

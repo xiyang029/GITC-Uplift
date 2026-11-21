@@ -1298,23 +1298,30 @@ void RunBridged(DeviceEntry& entry, api::device* device, addon::TriggerPoint poi
     }
     // DLSS's motion vectors copied in the game's frame for this present, when the native context made one (Auto's order: DLSS first);
     // otherwise the Uplift technique's UPLIFT_MV, as before.
-    const vk::NrImage dlss_motion = (entry.vk_dlss ? entry.vk_dlss->PresentMotion() : vk::NrImage{});
+    uint64_t dlss_motion_age = 0u;
+    const vk::NrImage dlss_motion = (entry.vk_dlss ? entry.vk_dlss->PresentMotion(dlss_motion_age) : vk::NrImage{});
     const bool motion_is_dlss = (dlss_motion.image != VK_NULL_HANDLE);
     const vk::ImageInfo motion = (motion_is_dlss ? vk::ImageInfo{.image = dlss_motion.image,
                                                                  .size = {dlss_motion.ngx.Resource.ImageViewInfo.Width, dlss_motion.ngx.Resource.ImageViewInfo.Height},
                                                                  .format = DXGI_FORMAT_R16G16_FLOAT,
                                                                  .samples = 1u}
                                                  : VulkanImageInfo(device, {launchpad_motion}));
+    const bridge::Recorder record_vulkan = [&record, dlss_motion_age](ID3D12GraphicsCommandList* list, const bridge::BridgeTargets& targets) {
+      bridge::BridgeTargets stamped = targets;
+      stamped.dlss_motion_age = dlss_motion_age;
+      return record(list, stamped);
+    };
     if (outer_host && outer_image) {
       if (motion_is_dlss) outer_host->Register(motion.image, motion.size);
-      if (entry.vk_bridge->Run(*outer_host, *outer_image, entry_state, motion, record, nullptr, motion_is_dlss) && completed_passes) {
+      if (entry.vk_bridge->Run(*outer_host, *outer_image, entry_state, motion, record_vulkan, nullptr, motion_is_dlss) && completed_passes) {
         const auto status = entry.context->Status();
         for (uint32_t i = 0; i < status.group_count; ++i) {
           if (status.groups[i].stage == addon::Stage::PRESENT && status.groups[i].nr_applied) *completed_passes = status.groups[i].passes_run;
         }
       }
     } else {
-      entry.vk_bridge->Run(host, VulkanImageInfo(device, entry.back_buffer), entry_state, motion, record, (present_host ? &*present_host : nullptr), motion_is_dlss);
+      entry.vk_bridge->Run(host, VulkanImageInfo(device, entry.back_buffer), entry_state, motion, record_vulkan,
+                           (present_host ? &*present_host : nullptr), motion_is_dlss);
     }
     return;
   }

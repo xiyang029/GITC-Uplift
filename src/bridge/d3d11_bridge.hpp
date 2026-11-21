@@ -62,6 +62,7 @@ struct BridgeTargets {
   float motion_scale_x = 1.f;
   float motion_scale_y = 1.f;
   nr::Rect motion_region;  // `motion`'s subrect (a ring slot's region, at (0, 0)); empty: the whole texture
+  uint64_t dlss_motion_age = 0u;  // 0 for the current frame's vectors
 };
 
 // Records NR on `list` and says whether it wrote targets.color: the copy back to D3D11 follows only then.

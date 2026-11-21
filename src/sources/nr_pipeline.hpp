@@ -21,6 +21,7 @@
 #include "sources/auto_exposure.hpp"
 #include "sources/look_plan.hpp"
 #include "sources/motion_source.hpp"
+#include "sources/present_change_history.hpp"
 #include "sources/present_motion_counts.hpp"
 #include "sources/present_motion_ring.hpp"
 
@@ -44,6 +45,8 @@ struct PresentTarget {
   nr::BoundResource launchpad_motion;  // this frame's UPLIFT_MV (back-buffer pixels), or none; converted before NR
   float motion_scale_x = 1.f;          // MotionScaleX/Y for it
   float motion_scale_y = 1.f;
+  uint64_t dlss_motion_age = 0u;  // bridged copy; the native ring reports its age separately
+  bool motion_enabled = true;    // false for an explicit None, not for a missed copy
 };
 
 // The After-DLSS target: the region of DLSS's Output that NR runs on. Also pre-SR's
@@ -287,7 +290,7 @@ class NrPipeline final : private nr::PassResolver {
   ID3D12Resource* BoundMask(uint32_t slot);  // the mask copy for this recording, or null
   AfterNr RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
                         ID3D12Resource* nr_output, uint32_t passes_run, bool reduced, bool look_ready, color::Upsampling upsampling,
-                        const color::StabilizeMotion& motion, bool reset);
+                        const color::StabilizeMotion& motion, bool reset, std::optional<ChangeStabilizeInput> change_input = std::nullopt);
 
   LookConfig config_;
   // Keep faces: this recording's first pass ran its twin, so the later passes keep only their broad change inside the face mask. Split chain: the
@@ -336,6 +339,7 @@ class NrPipeline final : private nr::PassResolver {
     AutoExposure auto_exposure;  // kept for the pipeline's life (a latch never flips back), across disables and setting changes
     ExposureReport exposure_report;
     MotionSource present_motion = MotionSource::NONE;  // the last present's provider
+    PresentChangeHistory present_change_history;
   };
   struct PresentMotionCounters : PresentMotionCounts {
     uint64_t age_max = 0u;

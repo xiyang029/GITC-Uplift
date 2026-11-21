@@ -198,7 +198,7 @@ class DeviceContext {
   // Returns the recording's result; an empty one when nothing ran.
   sources::PresentResult Run(FrameHost* host, D3D12_RESOURCE_STATES entry_state, TriggerPoint point,
                              ID3D12Resource* motion = nullptr, bool motion_is_dlss = false, float dlss_scale_x = 1.f,
-                             float dlss_scale_y = 1.f, nr::Rect dlss_motion_region = {});
+                             float dlss_scale_y = 1.f, nr::Rect dlss_motion_region = {}, uint64_t dlss_motion_age = 0u);
   // After the hooked evaluate of this device's main handle returned, under the
   // add-on's lock. Records NR after DLSS when that is the chosen placement; otherwise notes the evaluate.
   sources::PipelineResult OnDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,

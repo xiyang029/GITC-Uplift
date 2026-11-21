@@ -63,6 +63,8 @@ struct VkPresentTarget {
   VkFormat launchpad_format = VK_FORMAT_UNDEFINED;
   float motion_scale_x = 1.f;  // MotionScaleX/Y for UPLIFT_MV
   float motion_scale_y = 1.f;
+  uint64_t dlss_motion_age = 0u;
+  bool motion_enabled = true;  // false for an explicit None, not for a missed copy
 };
 
 // The Vulkan DLSS placements' recordings: encode DLSS's Output in place into A, the Session's NR passes, Direct3D 12's
@@ -106,7 +108,7 @@ class VkNrPipeline final : private nr::PassResolver {
   // Split chain: each recording below runs `part` of the chain (its Session slice, on its stage group's set); the default is the whole chain on
   // set 0, the single chain of before the split.
   PipelineResult RecordAfterDlss(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
-                                 const WorkLayout& layout = {}, const ChainPart& part = {}, bool motion_is_canvas = false);
+                                 const WorkLayout& layout = {}, const ChainPart& part = {});
   // Before upscaling: NR on the region of the game's Color (`color.resource`: a sampled image view in
   // SHADER_READ_ONLY_OPTIMAL, only read) before DLSS-SR upscales it, inside the game's command buffer right before DLSS's evaluate. The region is resampled
   // into the SETTLED work image of `layout` (the set is keyed on it, never on the per-frame render region), mirror-padded into the floor
@@ -334,7 +336,16 @@ class VkNrPipeline final : private nr::PassResolver {
     ExposureCheck check;
     AutoExposure auto_exposure;  // kept for the pipeline's life (a latch never flips back)
     ExposureReport exposure_report;
+    PresentChangeHistory present_change_history;
   };
+
+  struct PresentChangeInput {
+    PresentChangeMotion motion;
+    bool reset;  // excludes the model's per-frame provider switch hint
+  };
+  PipelineResult RecordAfterDlssImpl(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
+                                     const WorkLayout& layout, const ChainPart& part, bool motion_is_canvas,
+                                     std::optional<PresentChangeInput> present_change);
 
   // `set`'s surfaces, freed now if the GPU is done with them, else at their mark: the recording's set, or any from ReleaseNrSurfaces and RetireSetsFrom.
   void RetireSet(StageSet* set);
@@ -397,7 +408,8 @@ class VkNrPipeline final : private nr::PassResolver {
   float NoteEncoding(const VkDlssTarget& target);
   // Generate the required change field, optionally shape it, and make the writes visible to composition.
   AfterNr RecordAfterNr(VkCommandBuffer buffer, uint32_t slot, const color::VkEncodePass& encode, VkImageView nr_output, uint32_t passes_run, bool reduced, bool look_ready,
-                        color::Upsampling upsampling, const color::VkStabilizeMotion& motion, bool reset);
+                        color::Upsampling upsampling, const color::VkStabilizeMotion& motion, bool reset,
+                        std::optional<ChangeStabilizeInput> change_input = std::nullopt);
   void LogAllocationFailure(nr::Size size);  // once until an allocation works again
 
   vk::NrFunctions functions_;

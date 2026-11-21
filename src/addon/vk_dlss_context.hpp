@@ -237,7 +237,7 @@ class VkDlssContext {
   // image (none was made: the Present path's recording takes UPLIFT_MV, or none; always empty once CanCopy is false). Reading it stamps the slot's last use
   // (the bridge's copy-in follows). A present whose own copy was skipped (the GPU ran behind) gets the newest copy at most
   // sources::PRESENT_MOTION_MAX_AGE frames older, so the motion stays DLSS's; empty only with none that recent.
-  [[nodiscard]] vk::NrImage PresentMotion();
+  [[nodiscard]] vk::NrImage PresentMotion(uint64_t& age);
   // Why that copy is missing, for Setup: GAME_PASSED_NONE (the latest evaluate seen carried no readable float vectors; kept while the copies are not asked
   // for), DLSS_PAUSED (DLSS was seen, the present has none, and no evaluate came for 250 ms: a menu or a loading screen), NO_COPY (an evaluate came but no copy
   // within sources::PRESENT_MOTION_MAX_AGE frames exists: a slot or the constants ring stayed busy), else NONE. NONE while the add-on is not asking for the copies (GAME_PASSED_NONE aside) and once CanCopy is false.

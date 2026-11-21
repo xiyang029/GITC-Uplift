@@ -748,7 +748,7 @@ float VkNrPipeline::NoteEncoding(const VkDlssTarget& target) {
 
 VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32_t slot, const color::VkEncodePass& encode, VkImageView nr_output, uint32_t passes_run,
                                                   bool reduced, bool look_ready, color::Upsampling upsampling, const color::VkStabilizeMotion& motion,
-                                                  bool reset) {
+                                                  bool reset, std::optional<ChangeStabilizeInput> change_input) {
   if (set_->look.plan != LookPlan{}) {
     set_->look.last_use = slot_marks_[slot];
   }
@@ -765,18 +765,19 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
   // 5. The change field's own stabiliser: the field the decode consumes, averaged along the vectors, into the other buffer
   //    of the pair. It is not part of the look - a look that shapes nothing still has a change field to steady - so it is
   //    its own step, taken whether or not the look's passes below run.
-  const auto stabilise_change = [&after, this, buffer, slot, change, look_ready, motion, reset]() {
+  const auto stabilise_change = [&after, this, buffer, slot, change, look_ready, motion, reset, change_input]() {
     if (!look_ready || !set_->look.plan.change) {
       return;
     }
     const uint32_t current = set_->look.change_current;
     const VkImageView stable = set_->look.change_history[current].view;
-    const bool reset_history = reset || !set_->look.change_valid;
+    const ChangeStabilizeInput history_input = change_input.value_or(ChangeStabilizeInput{.reset = reset});
+    const bool reset_history = history_input.reset || !set_->look.change_valid;
     const bool recorded = color_.RecordChangeStabilize(buffer, slot,
         {.change = change, .previous = set_->look.change_history[1u - current].view, .current = stable,
          .image = set_->look.plan.image,
          .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
-         .reset = reset_history, .motion = motion});
+         .reset = reset_history, .motion = history_input.reproject ? motion : color::VkStabilizeMotion{}});
     set_->look.change_valid = recorded;
     if (recorded) {
       color_.ComputeBarrier(buffer);
@@ -843,7 +844,13 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
 }
 
 PipelineResult VkNrPipeline::RecordAfterDlss(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
-                                             const WorkLayout& layout, const ChainPart& part, bool motion_is_canvas) {
+                                             const WorkLayout& layout, const ChainPart& part) {
+  return RecordAfterDlssImpl(buffer, target, inputs, controls, layout, part, false, std::nullopt);
+}
+
+PipelineResult VkNrPipeline::RecordAfterDlssImpl(VkCommandBuffer buffer, const VkDlssTarget& target, const nr::FrameInputs& inputs, const nr::Controls& controls,
+                                                 const WorkLayout& layout, const ChainPart& part, bool motion_is_canvas,
+                                                 std::optional<PresentChangeInput> present_change) {
   if (session_.State() != nr::SessionState::ACTIVE) return {.reason = nr::SkipReason::INACTIVE};
   // The union is read only for an image view (NGX's resource can also be a buffer).
   if (buffer == VK_NULL_HANDLE || target.resource == nullptr || target.resource->Type != NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW || part.set >= STAGE_SETS) {
@@ -1001,6 +1008,7 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
     frame_inputs.motion_scale_y = 1.f;
   }
   frame_inputs.reset_hint = (inputs.reset_hint || set_->intermediates.reset_pending);
+  const bool change_reset = present_change && (present_change->reset || set_->intermediates.reset_pending);
   if (foveated) {
     frame_inputs.depth = {};
   }
@@ -1029,8 +1037,13 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
   // NGX's zero-filled inputs are not usable reprojection vectors.
   const color::VkStabilizeMotion stabilize_motion = !game_motion || inputs.motion.resource == nr::AsResource(&present_.stand_in.ngx)
       ? color::VkStabilizeMotion{} : (foveated ? WorkStabilizeMotionOf(frame_inputs, work.image) : source_motion);
+  std::optional<ChangeStabilizeInput> change_input;
+  if (present_change) {
+    if (stabilize_motion.vectors.view == VK_NULL_HANDLE) present_change->motion.source = MotionSource::NONE;
+    change_input = set_->present_change_history.Advance(present_change->motion, change_reset);
+  }
   const AfterNr after = RecordAfterNr(buffer, slot, encode, nr_output, evaluated.passes_run, reduced, look_ready, work.upsampling,
-                                      stabilize_motion, frame_inputs.reset_hint);
+                                      stabilize_motion, frame_inputs.reset_hint, change_input);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source, .motion_scale_x = frame_inputs.motion_scale_x, .motion_scale_y = frame_inputs.motion_scale_y};
   }
@@ -1558,13 +1571,16 @@ PipelineResult VkNrPipeline::RecordPresent(VkCommandBuffer buffer, const VkPrese
   present_motion_source_ = motion_source;
 
   // 3. NR in place on the intermediate, as on DLSS's Output (the encode, the passes, the change path and the look, the decode), with no game exposure.
-  PipelineResult result = RecordAfterDlss(buffer,
+  PipelineResult result = RecordAfterDlssImpl(buffer,
                                           {.resource = &present_.color.ngx,
                                            .encoding = target.encoding,
                                            .diffuse_white_nits = target.diffuse_white_nits,
                                            .transfer_strength = target.transfer_strength,
                                            .color_strength = target.color_strength},
-                                          inputs, controls, layout, part, motion_is_canvas);
+                                          inputs, controls, layout, part, motion_is_canvas,
+                                          PresentChangeInput{.motion = {.source = motion_source,
+                                                                        .fresh = motion_source != MotionSource::PRESENT_COPY || target.dlss_motion_age == 0u,
+                                                                        .allow_gap = target.motion_enabled}, .reset = reset_hint});
   result.recorded = true;
   result.motion_source = motion_source;
 

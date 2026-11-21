@@ -324,6 +324,7 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
           .motion_scale_x = (ring_slot_ != nullptr ? ring_slot_->scale_x : 1.f),
           .motion_scale_y = (ring_slot_ != nullptr ? ring_slot_->scale_y : 1.f),
           .motion_region = (ring_slot_ != nullptr ? ring_slot_->region : nr::Rect{}),  // the slot is the vectors' whole size
+          .dlss_motion_age = (ring_slot_ != nullptr ? bridge_.presents_ - ring_slot_->frame : 0u),
       };
       if (targets.mask != nullptr) {
         Transition(list, targets.mask, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
