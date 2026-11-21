@@ -1003,7 +1003,6 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
   frame_inputs.reset_hint = (inputs.reset_hint || set_->intermediates.reset_pending);
   if (foveated) {
     frame_inputs.depth = {};
-    frame_inputs.reset_hint |= !game_motion;
   }
   frame_inputs.later_passes = config_.later_controls;
   frame_inputs.resolver = this;
@@ -1231,7 +1230,6 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr
   frame_inputs.reset_hint = (inputs.reset_hint || set_->intermediates.reset_pending);
   if (foveated) {
     frame_inputs.depth = {};
-    frame_inputs.reset_hint |= use_zero_motion;
   }
   frame_inputs.later_passes = config_.later_controls;
   frame_inputs.resolver = this;

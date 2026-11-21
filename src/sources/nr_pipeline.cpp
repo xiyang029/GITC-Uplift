@@ -937,8 +937,6 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   if (foveated && motion_source == MotionSource::PRESENT_COPY && !ConvertWorkMotion(list, slot, inputs, work, flip_y)) {
     motion_source = MotionSource::NONE;
   }
-  // Without current vectors, restart foveated history rather than treating it as stationary.
-  if (foveated && inputs.motion.resource == nullptr) inputs.reset_hint = true;
   if (motion_copies_.textures[0] || present_motion_counters_.evaluates != 0u) {
     PresentMotionCounters& counters = present_motion_counters_;
     ++counters.presents;
@@ -1072,7 +1070,6 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   if (foveated) {
     ConvertWorkMotion(list, slot, nr_inputs, work);
     nr_inputs.depth = {};  // unwarped depth edges do not match the encoded colour
-    nr_inputs.reset_hint |= nr_inputs.motion.resource == nullptr;
   }
   const MotionSource motion_source = (nr_inputs.motion.resource != nullptr ? MotionSource::DIRECT : MotionSource::NONE);
 
@@ -1222,7 +1219,6 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
   if (remap_motion) ConvertWorkMotion(list, slot, nr_inputs, work);
   if (foveated) {
     nr_inputs.depth = {};
-    nr_inputs.reset_hint |= nr_inputs.motion.resource == nullptr;
   }
   // Reported as bound in place either way: a canvas copy still carries the game's own motion vectors,
   // scaled by what the caller asked for (inputs.motion_scale_x/y), not nr_inputs' own post-copy (1, 1).

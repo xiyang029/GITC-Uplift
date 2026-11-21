@@ -44,21 +44,13 @@ Texture2D<float4> change_texture : register(t1);
 Texture2D<float> exposure_texture : register(t2);
 Texture2D<float4> mask_texture : register(t3);  // Uplift's copy of UPLIFT_MASK, read with OPTION_MASK
 
-static const float SPATIAL_RADIUS = 1.5f;      // the tent's half-width, in work texels
-static const float SPATIAL_INV_RADIUS = 1.f / SPATIAL_RADIUS;  // so the tent's weight is a multiply, not a divide
+static const float WIDE_TENT_SLOPE = 1.f / 1.5f;  // reciprocal half-width in work texels
+static const float NATIVE_DENSITY_LIMIT = 1.f + 1e-5f;
 static const float MIN_WEIGHT = 1e-4f;         // below this total use the bilinear sample
 static const float GUIDE_FULL_SUPPORT = 0.25f;  // total weight needed to trust the guided sample fully
 static const float FOV_GUIDE_FULL_DENSITY = 1.125f;  // use the output guide fully at ~89% of unwarped density
+static const float UNWARPED_GUIDE_LIMIT = 0.5f;
 
-// Band shaping (2026-10-26; density scale 2026-10-27). The upsample's two bands are shaped before they are
-// combined: the detail band by how coarse the working grid is here, both bands by how dark the pixel is.
-// Edge-aware (Upsampling 2) sets the base band's gain, which is a ceiling on the shaping rather than a factor.
-//
-// `density` covers the uniform work scale as well as the foveated grid: a Custom resolution below Full is
-// exactly as coarse as the foveated edges are, so leaving it out left the shaping inert for the common case.
-// The fade-in rate below is the only shaping the density drives now that the detail gain and the coarse-grid
-// attenuation are gone (2026-11-04): both read as no-ops in practice, and a control that does nothing is worse
-// than none.
 static const float DARK_EDIT_FLOOR = 0.80f;           // the edit's weight in the deepest shadows
 static const float DARK_GUIDE_LOW = -7.f;             // log2 stops below diffuse white: fully dark
 static const float DARK_GUIDE_HIGH = -3.5f;           // and fully lit
@@ -66,12 +58,7 @@ static const float CLAMP_SLACK = 0.15f;               // how far past the neighb
 // -1 / (2 * sigma^2 * ln 2) for the range kernel's sigma of 0.5 stops at density 1: the exponent per stop^2.  The
 // caller divides it by the density, which widens the Gaussian as sqrt(density).
 static const float RANGE_K = -2.885390082f;
-// Kernel fade: 1 / the density excess at which the correction reaches full strength; 4 puts that at density 1.25
-// (an 80 % work grid). It was a UI row for a day (2026-10-29) and is a constant again: the fade saturates by
-// 80 % whatever the rate, so the row only paced the 90-85 % steps, which did not earn a control. See
-// ChangeBands: at density 1 the field is 1:1 with the output and the kernel is pure blur, so the
-// correction has to fade out there or the plateau's one-load path steps against the ramp's first texels. 10 was
-// tried and reverted: ghosting and flicker got markedly worse.
+// Fade out the correction at 1:1; reach full strength at 1.25 output texels per work texel.
 static const float KERNEL_FADE_IN = 4.f;
 
 // Classic: a bilinear sample of the change field at `position` (work pixels), clamped to its texels.
@@ -85,37 +72,14 @@ float3 ChangeBilinear(float2 position, uint2 size) {
   return lerp(top, bottom, fraction.y);
 }
 
-// One tap's spatial weight: a tent around `position`, its half-width SPATIAL_RADIUS work texels on both axes.
-//
-// It was per axis from 2026-10-29 to 2026-11-05, dividing SPATIAL_RADIUS by each axis' own upsampling so a Custom
-// resolution that scales width and height apart kept the support round in output space. The floor added under
-// that quotient on 2026-11-05 made it constant: the per-axis upsampling is density / scale with scale <= 1 and
-// density >= 1, so it is never below one, and max(SPATIAL_RADIUS / upsampling, SPATIAL_RADIUS) is SPATIAL_RADIUS
-// at every scale. No caller carries a radius any more, and each axis' weight is one multiply instead of a divide.
-float TentWeight(float2 position, float2 tap) {
-  const float2 gap = abs(position - tap);  // not `distance`: an HLSL intrinsic
-  return max(1.f - gap.x * SPATIAL_INV_RADIUS, 0.f) * max(1.f - gap.y * SPATIAL_INV_RADIUS, 0.f);
-}
-
 // The change field at `tap`, clamped to the field's texels; the position a caller weights it by stays the
 // unclamped one, as the tap grid is the one `position` was resolved against.
 float4 ChangeTap(int2 tap, uint2 size) {
   return change_texture.Load(int3(clamp(tap, int2(0, 0), int2(size) - 1), 0));
 }
 
-// One tap into the joint bilateral: the tent, times how close the tap's guide is to this pixel's, and the
-// tap's own value into the neighbourhood's min/max when the caller wants a range.
-//
-// The range is exp2(d^2 * range_k), the plateau's Gaussian widened by the grid's density: a coarse grid
-// averages a few taps instead of snapping to the nearest one, which is what stepped at texel boundaries.
-//
-// The weight is accumulated unconditionally: the tent and exp2 are both non-negative, so a zero-weight tap
-// adds zero, and a branch per tap (which the guard it replaced emitted) costs more than the six multiplies
-// it skipped. Non-finite taps are the exception a branchless add cannot carry -- 0 * Inf is NaN, which would
-// poison the sum and hand the pixel back to Compose's finite guard as an untouched source -- so they select
-// a zero weight and a zero value instead, and stay out of the hull. The change field's own writers sanitise
-// (ChangeField, ResolveStrengths), so this only guards a field read before it is written.
-void AccumulateTap(float4 change, float2 position, float2 tap, float guide, float range_k, bool want_range,
+// Drop non-finite taps from both the weighted sum and the clamp range.
+void AccumulateTap(float4 change, float spatial_weight, float guide, float range_k, bool want_range,
                    inout float3 sum, inout float total, inout float3 tap_min, inout float3 tap_max) {
   const bool finite = all(isfinite(change));
   if (want_range && finite) {
@@ -123,24 +87,18 @@ void AccumulateTap(float4 change, float2 position, float2 tap, float guide, floa
     tap_max = max(tap_max, change.xyz);
   }
   const float difference = guide - change.w;
-  const float weight = finite ? TentWeight(position, tap) * exp2(difference * difference * range_k) : 0.f;
+  const float weight = finite ? spatial_weight * exp2(difference * difference * range_k) : 0.f;
   sum += weight * (finite ? change.xyz : float3(0.f, 0.f, 0.f));
   total += weight;
 }
 
-// The centre 2x2 supplies the Classic sample and field guide. In the foveated ramp, blend toward
-// the output guide so the coarser field does not mix across moving edges. Load additional taps for
-// the tent or, when enabled, for the clamp's full neighbourhood range.
-float3 ChangeEdgeAware(float2 position, uint2 size, float density, float output_guide, float guide_mix,
-                       bool want_range, out float3 tap_min, out float3 tap_max, out float3 classic) {
+// The centre 2x2 supplies the Classic sample and confidence in the full-resolution guide.
+float3 ChangeEdgeAware(float2 position, uint2 size, float2 tent_slope, float density, float output_guide,
+                       float warp_guide_mix, bool unwarped, bool want_range,
+                       out float3 tap_min, out float3 tap_max, out float3 classic) {
   const int2 base = int2(floor(position));
   const float2 fraction = position - float2(base);
   const float range_k = RANGE_K / density;
-  // The tent's half-width is SPATIAL_RADIUS at every scale: the per-axis radius the 2026-10-29 kernel carried
-  // became constant once 2026-11-05 floored it (see TentWeight), so it is not computed here any more. The floor
-  // is still the design: a tent one texel wide is the bilinear cell, which put `edge` equal to `classic` and
-  // silently turned edge-aware into Classic wherever the grid was coarser than 67 %.
-
   const float4 c00 = ChangeTap(base, size);
   const float4 c10 = ChangeTap(base + int2(1, 0), size);
   const float4 c01 = ChangeTap(base + int2(0, 1), size);
@@ -151,34 +109,49 @@ float3 ChangeEdgeAware(float2 position, uint2 size, float density, float output_
   const float w11 = fraction.x * fraction.y;
   const float4 bilinear = c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11;
   classic = bilinear.xyz;
+  float guide_mix = warp_guide_mix;
+  if (unwarped) {
+    const float4 field_guides = float4(c00.w, c10.w, c01.w, c11.w);
+    const float2 lo = min(field_guides.xy, field_guides.zw);
+    const float2 hi = max(field_guides.xy, field_guides.zw);
+    const float4 error = abs(field_guides - output_guide);
+    const float2 nearest = min(error.xy, error.zw);
+    // Use the original only if the coarse cell sees an edge and can represent this side of it.
+    const float contrast = max(hi.x, hi.y) - min(lo.x, lo.y);
+    const float supported = 1.f - smoothstep(0.125f, 0.5f, min(nearest.x, nearest.y));
+    const float disagreement = smoothstep(0.0625f, 0.25f, abs(bilinear.w - output_guide));
+    guide_mix = UNWARPED_GUIDE_LIMIT * smoothstep(0.25f, 1.f, contrast) * supported * disagreement;
+  }
   const float guide = lerp(bilinear.w, output_guide, guide_mix);
 
   float3 sum = float3(0.f, 0.f, 0.f);
   float total = 0.f;
   tap_min = float3(1e30f, 1e30f, 1e30f);
   tap_max = float3(-1e30f, -1e30f, -1e30f);
-  AccumulateTap(c00, position, float2(base), guide, range_k, want_range, sum, total, tap_min, tap_max);
-  AccumulateTap(c10, position, float2(base + int2(1, 0)), guide, range_k, want_range, sum, total, tap_min, tap_max);
-  AccumulateTap(c01, position, float2(base + int2(0, 1)), guide, range_k, want_range, sum, total, tap_min, tap_max);
-  AccumulateTap(c11, position, float2(base + int2(1, 1)), guide, range_k, want_range, sum, total, tap_min, tap_max);
+  const float2 near0 = 1.f - fraction * tent_slope;
+  const float2 near1 = 1.f - (1.f - fraction) * tent_slope;
+  const float2 far = max(1.f - (1.f + min(fraction, 1.f - fraction)) * tent_slope, 0.f);
+  AccumulateTap(c00, near0.x * near0.y, guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c10, near1.x * near0.y, guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c01, near0.x * near1.y, guide, range_k, want_range, sum, total, tap_min, tap_max);
+  AccumulateTap(c11, near1.x * near1.y, guide, range_k, want_range, sum, total, tap_min, tap_max);
 
   const int2 outer = int2(fraction.x < 0.5f ? -1 : 2, fraction.y < 0.5f ? -1 : 2);
-  const int2 ring[4] = {int2(outer.x, 0), int2(outer.x, 1), int2(0, outer.y), int2(1, outer.y)};
-  [unroll] for (int i = 0; i < 4; ++i) {
-    const int2 tap = base + ring[i];
-    AccumulateTap(ChangeTap(tap, size), position, float2(tap), guide, range_k, want_range, sum, total, tap_min,
-                  tap_max);
+  const int2 ring[5] = {int2(outer.x, 0), int2(outer.x, 1), int2(0, outer.y), int2(1, outer.y), outer};
+  const float weights[5] = {far.x * near0.y, far.x * near1.y, near0.x * far.y, near1.x * far.y, far.x * far.y};
+  [unroll] for (int i = 0; i < 5; ++i) {
+    // A zero-weight tap still belongs to the clamp hull when it is used.
+    [branch] if (want_range || weights[i] > 0.f) {
+      AccumulateTap(ChangeTap(base + ring[i], size), weights[i], guide, range_k, want_range, sum, total, tap_min, tap_max);
+    }
   }
-  const int2 corner = base + outer;
-  AccumulateTap(ChangeTap(corner, size), position, float2(corner), guide, range_k, want_range, sum, total, tap_min,
-                tap_max);
 
   if (want_range) {
     // The hull's four taps the weights left at zero, min/max only.
     const int2 opposite = int2(fraction.x < 0.5f ? 2 : -1, fraction.y < 0.5f ? 2 : -1);
-    const int2 far[4] = {int2(opposite.x, 0), int2(opposite.x, 1), int2(0, opposite.y), int2(1, opposite.y)};
+    const int2 hull_only[4] = {int2(opposite.x, 0), int2(opposite.x, 1), int2(0, opposite.y), int2(1, opposite.y)};
     [unroll] for (int i = 0; i < 4; ++i) {
-      const float4 change = ChangeTap(base + far[i], size);
+      const float4 change = ChangeTap(base + hull_only[i], size);
       tap_min = min(tap_min, change.xyz);
       tap_max = max(tap_max, change.xyz);
     }
@@ -305,7 +278,7 @@ float4 DecodePixel(uint2 pixel) {
       const bool hull = 1.f - guided_low_gain > CLAMP_SLACK;
       const FovSample sx = FovFullToWorkSample1(pixel.x, width, size.x, foveation_x, foveation_gmax_x);
       const FovSample sy = FovFullToWorkSample1(pixel.y, height, size.y, foveation_y, foveation_gmax_y);
-      // Undo gmax's normalization to get output texels per work texel. Use the coarsest axis.
+      // Undo gmax's normalization to get output texels per work texel on each axis.
       const float2 axis = float2(sx.density, sy.density) * (float2(width, height) / float2(size))
                           * float2(foveation_gmax_x, foveation_gmax_y);
       const float density = max(axis.x, axis.y);
@@ -314,19 +287,21 @@ float4 DecodePixel(uint2 pixel) {
       has_original = true;
       const float output_guide = ChangeGuide(encoding, source.rgb, SanitiseLight(original));
       const float dark = EditDarkness(output_guide);
-      if (density <= 1.f + 1e-5f) {
+      if (density <= NATIVE_DENSITY_LIMIT) {
         // Both axes are 1:1, so ChangeBands adds no correction. The warp can still offset the texel.
         const uint2 texel = min(uint2(max(float2(sx.position, sy.position) + 0.5f, 0.f)), size - 1u);
         const float4 value = change_texture.Load(int3(texel, 0));
         change = dark * guided_low_gain * value.xyz;
       } else {
-        const float2 position = float2(sx.position, sy.position);
-        // Only the warp, not uniform scaling, shifts the guide toward the output sample.
-        const float guide_mix = smoothstep(1.f, FOV_GUIDE_FULL_DENSITY, max(sx.density, sy.density));
+        // The coarser axis keeps the original tent. Narrow the finer one toward bilinear, even when both are reduced.
+        const float2 spatial_mix = saturate((axis - NATIVE_DENSITY_LIMIT) / (density - NATIVE_DENSITY_LIMIT));
+        const float2 tent_slope = lerp(1.f, WIDE_TENT_SLOPE, spatial_mix);
+        const bool unwarped = !FovAny(uint2(foveation_x, foveation_y));
+        const float warp_guide_mix = smoothstep(1.f, FOV_GUIDE_FULL_DENSITY, max(sx.density, sy.density));
         float3 tap_min, tap_max;
         float3 classic;
-        const float3 edge = ChangeEdgeAware(position, size, density, output_guide, guide_mix, hull, tap_min,
-                                           tap_max, classic);
+        const float3 edge = ChangeEdgeAware(float2(sx.position, sy.position), size, tent_slope, density, output_guide,
+                                           warp_guide_mix, unwarped, hull, tap_min, tap_max, classic);
         change = dark * ChangeBands(classic, edge, tap_min, tap_max, guided_low_gain, density, hull);
       }
     } else {
