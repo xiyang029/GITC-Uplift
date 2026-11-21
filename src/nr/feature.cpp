@@ -39,8 +39,7 @@ NVSDK_NGX_Result Feature::Create(ID3D12GraphicsCommandList* list, const CreateIn
   parameters_->Set(keys::WIDTH, info.capacity.width);
   parameters_->Set(keys::HEIGHT, info.capacity.height);
   requested_preset_ = info.preset;
-  // A 4-bit model keeps the runtime on the model our weights were made from -- preset 1 (Model A) for those that
-  // replace its launches one by one, preset 2 (Model B) for the one that is Model B's feed-forward only.
+  // Custom weights use runtime preset 1 (Model A), whose launches they replace one by one.
   parameters_->Set(keys::PRESET, DlssNr::Nvfp4::RuntimePreset(info.preset));
   parameters_->Set(keys::SCALING_RATIO, 1.f);
   parameters_->Set(keys::PERF_QUALITY_VALUE, static_cast<int>(info.performance) - 1);

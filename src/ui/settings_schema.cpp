@@ -14,17 +14,16 @@ namespace uplift::ui {
 namespace {
 
 constexpr std::array<std::string_view, 3> MODELS = {"Style A", "Style B", "Style C"};
-constexpr std::array<std::string_view, 11> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8",
+constexpr std::array<std::string_view, 10> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8",
                                                           "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one",
-                                                          "NVFP4: B feed-forward", "FP8: 2x in one", "FP8: 3x in one",
-                                                          "FP8: 2x in one v2", "FP8: 3x in one v2"};
+                                                          "FP8: 2x in one", "FP8: 3x in one", "FP8: 2x in one v2", "FP8: 3x in one v2"};
 constexpr auto PASS_NETWORKS = [] {
   auto choices = NR_NETWORKS;
   choices[0] = "Same as pass 1";
   return choices;
 }();
 // Choice order differs from NGX preset order: NVFP4 2x is 16, 3x is 15; FP8 uses 18-21.
-constexpr std::array<uint32_t, 11> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 16u, 15u, 17u, 18u, 19u, 20u, 21u};
+constexpr std::array<uint32_t, 10> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 16u, 15u, 18u, 19u, 20u, 21u};
 static_assert(NR_NETWORKS.size() == NETWORK_PRESET_VALUES.size());
 
 double NetworkPresetIndex(uint32_t preset) {

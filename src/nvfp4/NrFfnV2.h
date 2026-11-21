@@ -17,9 +17,8 @@ struct ID3D12GraphicsCommandList;
 namespace NrFfnV2 {
 struct Options {
     // modelFolders false: the folder with ffn_v2.cubin, ffn_v2.bin and ffn_v2.txt of the model in use (probes).
-    // modelFolders true: the folder with ffn_v2.cubin and the folders modelA and modelB, each with ffn_v2.bin and
-    // ffn_v2.txt. The model is then recognised from the runtime's launch sequence, per evaluation, and the loaded
-    // nvngx_dlssnr.dll must be one of the builds the weights were taken from; anything else runs unchanged.
+    // modelFolders true: the folder with ffn_v2.cubin and the modelA weight subfolder. Only evaluations that
+    // match Model A's launch sequence are replaced.
     std::filesystem::path assets;
     bool modelFolders = false;
     unsigned expandGroups = 8, expandHalves = 2;    // CTA shape of the expand kernel: 16-token groups (2, 4, 8) x 64-output halves (1, 2)
@@ -68,9 +67,8 @@ void RuntimeLaunches(ID3D12GraphicsCommandList* commands, unsigned launches, uns
 // the first set or the trained one, as Options::trained says.
 constexpr unsigned kDefaultSet = ~0u;
 void UseSet(unsigned set);
-// Are this set's weight files all there? `model`: 0 Model A, 1 Model B (each folder has its own sets); a missing
-// file is named under that model's folder.
-bool SetComplete(unsigned set, std::string* missing, int model = 0);
+// Are this set's weight files all there? Reports the missing file relative to the asset directory.
+bool SetComplete(unsigned set, std::string* missing);
 unsigned long long Faults();                          // pairs left to the runtime or run with another set's weights
 void SkipPair(ID3D12GraphicsCommandList* commands);
 }

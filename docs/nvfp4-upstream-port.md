@@ -85,7 +85,7 @@ reviewed for this half yet; the next sweep should start at `d3299ce5` and record
 Selective port of `fca8f4c19307d32983b71d703b416ee4294ced55` from `codex/standalone-current`.
 
 - `NrFp8` wraps NvAPI outside the 4-bit layers to see the original launch sequence. It uses NVIDIA's FP8 CUDA-on-D3D12 kernels (RTX 40/50) with weights from `nvfp4/fp8/fp8_set<n>.txt` / `.bin`. Assets are runtime-only. Missing assets or a launch mismatch refuse the pass without falling back or disabling the 4-bit models.
-- Local presets **18-21** select FP8 sets 1-4 (2x, 3x, 2x v2, 3x v2) on runtime Model A. Upstream uses 17-20, but local **17** remains Model B feed-forward on runtime Model B. FP8 has no Vulkan path.
+- Local presets **18-21** select FP8 sets 1-4 (2x, 3x, 2x v2, 3x v2) on runtime Model A. Upstream uses 17-20; local preset IDs remain unchanged for saved configurations, and **17** is retired. FP8 has no Vulkan path.
 - `uplift_nr` builds `NrFp8.cpp` with the existing libraries. The settings schema exposes all four FP8 choices.
 
 Not ported from `e468b65dd68051fa896738d8874688c770e41703`:
