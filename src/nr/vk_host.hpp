@@ -37,7 +37,6 @@ class VkHost final : public Host {
   void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
                   D3D12_RESOURCE_STATES after) override;
 
-  [[nodiscard]] const Snippet& GetSnippet() const { return snippet_; }
   [[nodiscard]] bool LegacyRuntime() const override { return snippet_.LegacyRuntime(); }
   // SnippetConfig::initialize_core_for_device for the next LoadRuntime. The owner decides it at each present (the game created no DLSS on the device
   // yet, so an NGX core already loaded in the process is initialised for it too), not once at creation, which may come before the game's own DLSS.

@@ -49,8 +49,6 @@ struct VkListState {
   bool executed = false;         // submitted at least once since the last reset
 };
 
-// What the Vulkan DLSS placements' readout, Details line and README say about the one-time cost.
-inline constexpr std::string_view VK_FIRST_USE_NOTE = "after the first use, about 0.6 GB stays with the game's device until the game exits";
 // How long the game's NGX shutdown waits for NR's last recordings to finish on the GPU before Uplift releases NR (else abandons it).
 inline constexpr std::chrono::milliseconds VK_CORE_SHUTDOWN_WAIT{2000};
 
@@ -233,9 +231,6 @@ class VkDlssContext {
   // AtDlssPlacement, or NR at Present runs natively here (FrameFacts::vk_native_present), with the same rule after the game's NGX shutdown.
   [[nodiscard]] bool WantsNr() const;
   [[nodiscard]] bool LatchTripped() const { return dlss_latch_tripped_; }
-  // "Vulkan: NR runs inside the game's frame (native Vulkan NR, 412 MiB; after the first use, about 0.6 GB stays ...)"; at Present: "Vulkan: NR
-  // runs natively on the game's Vulkan device (...)"; empty while NR neither runs here nor is wanted.
-  [[nodiscard]] std::string DetailsLine() const;
   // The copy of DLSS's motion vectors made in the game's frame for the present now running, in SHADER_READ_ONLY_OPTIMAL, or an empty
   // image (none was made: the Present path's recording takes UPLIFT_MV, or none; always empty once CanCopy is false). Reading it stamps the slot's last use
   // (the bridge's copy-in follows). A present whose own copy was skipped (the GPU ran behind) gets the newest copy at most
@@ -440,7 +435,7 @@ class VkDlssContext {
   uint32_t pending_stop_presents_ = 0u;
   std::function<void()> before_present_load_;  // VkContextSetup::before_present_load
   // The command buffers the Session's NR was loaded for, and a reload through OFF in progress because the placement moved to
-  // other ones (VkStreamNeedsReload). Split chain: the set of them the chain uses; any change of it reloads (VkStreamsNeedReload).
+  // other ones. Split chain: the set of them the chain uses; any change of it reloads (VkStreamsNeedReload).
   VkStreamSet session_streams_ = 0u;
   bool stream_reload_ = false;
   bool own_drain_waited_ = false;  // transitions: Uplift's own command buffers were waited for in this drain from Present (once)

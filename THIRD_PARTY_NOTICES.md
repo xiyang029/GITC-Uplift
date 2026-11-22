@@ -14,7 +14,7 @@ and `src/nr/pe_imports.cpp` are derived from `benchmarks/native/include/neural_r
 Source: https://github.com/clshortfuse/openNR
 
 ## RenoDX (MIT) — Copyright (c) 2025 Carlos Lopez Jr.
-The luminance Neutwo tonemapper (`src/color/reference.cpp`, `shaders/color_common.hlsli`) and the
+The luminance Neutwo tonemapper (`shaders/color_common.hlsli`) and the
 UpgradeToneMap-style restore semantics derive from RenoDX. The DLSS-SR override mapping follows the NGX SDK header,
 not RenoDX.
 Source: https://github.com/clshortfuse/renodx
@@ -60,7 +60,7 @@ time. The API is header-only, so its inline code is compiled into `gitc-uplift.a
 every ImGui call goes through the function table ReShade exports. Source: https://github.com/ocornut/imgui
 
 ## OkLab (MIT) — Copyright (c) 2020 Björn Ottosson
-The linear sRGB ↔ OkLab matrices in `src/color/reference.cpp` and `shaders/color_common.hlsli`.
+The linear sRGB ↔ OkLab matrices in `shaders/color_common.hlsli`.
 Source: https://bottosson.github.io/posts/oklab/
 
 ## MinHook (BSD-2-Clause) — Copyright (C) 2009-2017 Tsuda Kageyu; Hacker Disassembler Engine 32/64 C — Copyright (c) 2008-2009 Vyacheslav Patkov

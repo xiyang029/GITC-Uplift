@@ -44,8 +44,7 @@ class GlBridge final : public PrivateDeviceBridge {
   static constexpr uint32_t WAIT_CAP_MS = 2000u;
 
   // nullptr, with `error` set, when the adapter is not NVIDIA's or the D3D12 side cannot be made. `functions` are Functions::Load's (the context current now:
-  // the fences are imported here); a driver without semaphores, or one that refuses the fence import, still gets a bridge that builds CPU-ordered and
-  // StatusLine says why. `created` receives the private device as D3D12Side made it, whether or not this succeeds (on the fallback D3D12CreateDevice's,
+  // the fences are imported here); a driver without semaphores, or one that refuses the fence import, still gets a bridge that builds CPU-ordered (cpu_reason_ tells why). `created` receives the private device as D3D12Side made it, whether or not this succeeds (on the fallback D3D12CreateDevice's,
   // ReShade's proxy under HookDirectX): release it only outside the add-on's lock.
   static std::unique_ptr<GlBridge> Create(gl::Functions functions, LUID luid, Microsoft::WRL::ComPtr<ID3D12Device>* created, std::string* error);
   // Waits up to 2 s for the private queue, then releases the D3D12 side. It makes no GL call: ForgetGl first (destroy_device).
@@ -86,7 +85,6 @@ class GlBridge final : public PrivateDeviceBridge {
   void ForgetGl();
   [[nodiscard]] bool GpuOrdered() const { return gpu_ordered_; }
   [[nodiscard]] uint64_t SharedBytes() const override;
-  [[nodiscard]] std::string StatusLine() const;
   [[nodiscard]] bool Stopped() const override { return !latch_.empty(); }
   [[nodiscard]] std::string_view Latch() const override { return latch_; }  // the card's reason; empty while it runs
   [[nodiscard]] uint64_t BusySkips() const override { return busy_skips_; }

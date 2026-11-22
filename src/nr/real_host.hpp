@@ -28,7 +28,6 @@ class RealHost final : public Host {
   void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
                   D3D12_RESOURCE_STATES after) override;
 
-  [[nodiscard]] const Snippet& GetSnippet() const { return snippet_; }
   [[nodiscard]] bool LegacyRuntime() const override { return snippet_.LegacyRuntime(); }
 
  private:

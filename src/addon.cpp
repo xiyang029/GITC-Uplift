@@ -4202,7 +4202,7 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon_module, HMODULE 
 }
 
 BOOL APIENTRY DllMain(HMODULE /*module*/, DWORD reason, LPVOID reserved) {
-  // No ReShade check here (upstream's host::RefusesLoad refuses the load outside ReShade): get_reshade_module_handle() finds ReShade by
+  // No ReShade check here (AddonInit refuses a load without ReShade's module): get_reshade_module_handle() finds ReShade by
   // enumerating the process modules and caches that first answer for the process. In a game whose loader hides ReShade from that enumeration
   // (Denuvo's virtualised loaders do), the refusal would raise ERROR_DLL_INIT_FAILED (1114) and leave the cached handle null for the AddonInit
   // that never ran. ReShade passes its own module to AddonInit, where register_addon refuses a load without one: outside ReShade the add-on

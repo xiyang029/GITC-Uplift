@@ -209,19 +209,9 @@ void NrPipeline::RetireDepthCopies() {
   depth_copies_ = {};
 }
 
-void NrPipeline::RetireLaunchpadMotion() {
-  if (launchpad_motion_.texture && !timeline_.IsComplete(launchpad_motion_.last_use)) {
-    timeline_.ReleaseAfter(launchpad_motion_.last_use, [retired = launchpad_motion_.texture] {});
-  }
-  launchpad_motion_ = {};
-}
+void NrPipeline::RetireLaunchpadMotion() { RetireHeld(launchpad_motion_); }
 
-void NrPipeline::RetireDlssPresentMotion() {
-  if (dlss_present_motion_.texture && !timeline_.IsComplete(dlss_present_motion_.last_use)) {
-    timeline_.ReleaseAfter(dlss_present_motion_.last_use, [retired = dlss_present_motion_.texture] {});
-  }
-  dlss_present_motion_ = {};
-}
+void NrPipeline::RetireDlssPresentMotion() { RetireHeld(dlss_present_motion_); }
 
 void NrPipeline::RetireLook(StageSet* set) {
   if (set->look.plan == LookPlan{}) return;
@@ -305,12 +295,7 @@ void NrPipeline::CombineFaces(ID3D12GraphicsCommandList* list, ID3D12Resource* l
   faces_ran_ = true;
 }
 
-void NrPipeline::RetireMask() {
-  if (mask_.texture && !timeline_.IsComplete(mask_.last_use)) {
-    timeline_.ReleaseAfter(mask_.last_use, [retired = mask_.texture] {});
-  }
-  mask_ = {};
-}
+void NrPipeline::RetireMask() { RetireHeld(mask_); }
 
 void NrPipeline::RetireExposure(StageSet* set) {
   if (set->exposure.state && !timeline_.IsComplete(set->exposure.last_use)) {

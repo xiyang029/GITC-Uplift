@@ -73,9 +73,6 @@ class RemoteNr final : public NrLink {
   [[nodiscard]] bool NrMayRun() const { return nr_may_run_; }
   // The helper's PID: the current one, else the last (0 before the first start).
   [[nodiscard]] DWORD Pid() const { return pid_; }
-  // Presents that could not send a FRAME because a request was still outstanding (the helper was busy) while its Session was ACTIVE:
-  // the loads that answer late by design are not counted.
-  [[nodiscard]] uint64_t BusyFrames() const { return busy_frames_; }
 
   // NrLink:
   std::optional<ipc::Reply> Run(const ipc::Run& run) override;

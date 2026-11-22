@@ -873,10 +873,6 @@ void DeviceContext::NoteBridgedSkip(BridgedDlssWork stage, nr::SkipReason reason
   status_.NoteSkip(reason, RecordingStatus::Reset::ALL);  // the motion source as a skip from the sources' Run leaves it
 }
 
-bool DeviceContext::StageResetOwed(BridgedDlssWork stage) const {
-  return (stage == BridgedDlssWork::BEFORE_UPSCALING ? pre_sr_->ResetOwed() : after_dlss_->ResetOwed());
-}
-
 void DeviceContext::NoteGameDeviceRemoved(HRESULT reason, std::chrono::steady_clock::time_point now) {
   if (!bridged_ || dlss_latch_tripped_ || !last_game_list_recording_ || now - *last_game_list_recording_ > DLSS_LATCH_WINDOW) return;
   dlss_latch_tripped_ = true;

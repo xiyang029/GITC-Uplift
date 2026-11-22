@@ -29,8 +29,6 @@ class MarkerLedger {
   // A device is destroyed; only one that still counts matters. True when the file must be deleted.
   [[nodiscard]] bool Destroyed(const void* device);
 
-  [[nodiscard]] bool IsProven() const { return proven_; }
-
  private:
   uint32_t reserved_ = 0u;                   // creations under way, counted
   std::unordered_set<const void*> devices_;  // adjusted devices that count

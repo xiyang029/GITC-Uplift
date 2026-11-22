@@ -82,7 +82,6 @@ bool D3D11Bridge::EnsureShared(Shared* shared, std::optional<ShareFailure>* fail
     return false;
   }
   failure->reset();
-  ++dlss_shares_made_;
   return true;
 }
 

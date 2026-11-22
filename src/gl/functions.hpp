@@ -21,12 +21,10 @@ struct SyncObject;  // the driver's GLsync
 using GLsync = SyncObject*;
 
 // Values from Khronos gl.xml (as reshade-main\deps\khronos\gl.xml has them). Only those gl.h does not define.
-inline constexpr GLenum GL_FRAMEBUFFER = 0x8D40;
 inline constexpr GLenum GL_READ_FRAMEBUFFER = 0x8CA8;
 inline constexpr GLenum GL_DRAW_FRAMEBUFFER = 0x8CA9;
 inline constexpr GLenum GL_DRAW_FRAMEBUFFER_BINDING = 0x8CA6;
 inline constexpr GLenum GL_READ_FRAMEBUFFER_BINDING = 0x8CAA;
-inline constexpr GLenum GL_FRAMEBUFFER_SRGB = 0x8DB9;
 inline constexpr GLenum GL_RASTERIZER_DISCARD = 0x8C89;
 inline constexpr GLenum GL_FRAMEBUFFER_DEFAULT = 0x8218;  // the target ReShade puts in a default framebuffer's pseudo handle (handle >> 40)
 inline constexpr GLenum GL_NUM_EXTENSIONS = 0x821D;

@@ -46,7 +46,7 @@ class VkBridge final : public PrivateDeviceBridge {
   static constexpr uint32_t WAIT_CAP_MS = 2000u;
 
   // nullptr, with `error` set, when the adapter is not NVIDIA's, the LUID is unknown or the D3D12 side cannot be made. A device that cannot be
-  // ordered on the GPU still gets a bridge: it builds CPU-ordered and StatusLine says why. `created` receives the private device as D3D12Side made
+  // ordered on the GPU still gets a bridge: it builds CPU-ordered (cpu_reason_ tells why). `created` receives the private device as D3D12Side made
   // it, whether or not this succeeds (on the fallback D3D12CreateDevice's, ReShade's proxy under the Vulkan layer): release it only outside the
   // add-on's lock.
   static std::unique_ptr<VkBridge> Create(vk::Device device, LUID luid, Microsoft::WRL::ComPtr<ID3D12Device>* created, std::string* error);
@@ -96,7 +96,6 @@ class VkBridge final : public PrivateDeviceBridge {
   [[nodiscard]] bool GpuOrdered() const { return gpu_ordered_; }
   [[nodiscard]] uint64_t SharedBytes() const override;
   // `route_reason`, why NR at Present runs here rather than natively on the game's device, follows "a private Direct3D 12 device: ".
-  [[nodiscard]] std::string StatusLine(std::string_view route_reason = {}) const;
   [[nodiscard]] bool Stopped() const override { return !latch_.empty(); }
   [[nodiscard]] std::string_view Latch() const override { return latch_; }  // the card's reason; empty while it runs
   [[nodiscard]] uint64_t BusySkips() const override { return busy_skips_; }

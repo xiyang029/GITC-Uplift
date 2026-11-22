@@ -26,12 +26,17 @@
 #include <vector>
 
 #include "NrSwin4.h"
+#include "Nvfp4Support.h"    // the asset reader, buffer allocation and error checks every loader shares
 
 #pragma comment(lib, "bcrypt.lib")
 
 namespace NrSwin4 {
 namespace {
 using Microsoft::WRL::ComPtr;
+using nvfp4::Check;
+using nvfp4::CreateBuffer;
+using nvfp4::NvCheck;
+using nvfp4::ReadAsset;
 namespace fs = std::filesystem;
 
 constexpr unsigned kCreateModule = 0xad1a677d, kCreateFunction = 0xe2436e22, kLaunch = 0x24973538,
@@ -47,24 +52,6 @@ constexpr uint16_t kBlendWeight = 0x39eb;
 constexpr unsigned kBlendParam = 104;
 enum Variant : unsigned { Plain, InpView, Downsample, Upsample, OutView };
 constexpr const char* kVariantName[5] = {"plain", "inpview", "ds", "upsample", "outview"};
-
-void Check(HRESULT result, const char* what) {
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed: D3D12 status " + std::to_string(unsigned(result)));
-}
-void NvCheck(NvAPI_Status result, const char* what) {
-    if (result != NVAPI_OK) throw std::runtime_error(std::string(what) + " failed: NVAPI status " + std::to_string(result));
-}
-
-std::vector<unsigned char> ReadAsset(const fs::path& path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) throw std::runtime_error("missing NVFP4 asset " + path.string());
-    std::vector<unsigned char> bytes(size_t(file.tellg()));
-    file.seekg(0);
-    if (bytes.empty() || !file.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(bytes.size())))
-        throw std::runtime_error("cannot read NVFP4 asset " + path.string());
-    return bytes;
-}
-
 
 // What a kernel of the runtime is, from its name: cc_tinlayout_fused_swin_<n>h_<width>_<n>_[variant_][protocol_]fp8.
 struct Kind {
@@ -105,18 +92,6 @@ struct Buffer {
     uint64_t bytes = 0;
     uint64_t Address() const { return resource->GetGPUVirtualAddress(); }
 };
-ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t bytes, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state) {
-    D3D12_RESOURCE_DESC desc{};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Width = bytes; desc.Height = 1; desc.DepthOrArraySize = 1; desc.MipLevels = 1; desc.SampleDesc.Count = 1;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if (heap == D3D12_HEAP_TYPE_DEFAULT) desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    D3D12_HEAP_PROPERTIES properties{};
-    properties.Type = heap;
-    ComPtr<ID3D12Resource> resource;
-    Check(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&resource)), "NVFP4 buffer allocation");
-    return resource;
-}
 
 struct Layer { unsigned index = 0, heads = 0, variant = 0; uint64_t offset = 0, bytes = 0; };
 struct Manifest {
@@ -1357,85 +1332,6 @@ unsigned long long Faults() {
     auto& s = S();
     std::lock_guard guard(s.mutex);
     return s.passed + s.ioPassed;
-}
-
-void UseSetsForNextEvaluations(const unsigned* sets, unsigned count) {
-    auto& s = S(); std::lock_guard guard(s.mutex);
-    if (count && !sets) throw std::runtime_error("null evaluation-set list");
-    for (unsigned i = 0; i < count; ++i) if (sets[i] != kDefaultSet && sets[i] >= kMaxSets) throw std::runtime_error("invalid evaluation set");
-    s.evaluationSets.clear(); if (count) s.evaluationSets.assign(sets, sets + count); s.evaluationSetAt = 0;
-}
-
-void EnablePostProbe(bool enabled) {
-    auto& s=S();std::lock_guard guard(s.mutex);s.probeEnabled=enabled;
-    if (enabled) for (auto& [device,d] : s.devices) d.probeCaptured=false;
-}
-
-void EnableLaunchTrace() { auto& s=S();std::lock_guard guard(s.mutex);s.trace.enabled=true; }
-void BeginLaunchTrace(ID3D12GraphicsCommandList* commands, ID3D12CommandQueue* queue) {
-    auto& s=S();std::lock_guard guard(s.mutex);auto& t=s.trace;
-    if(!t.enabled || t.active || t.pending) throw std::runtime_error("Invalid checker launch trace begin");
-    if(!t.heap) {
-        ComPtr<ID3D12Device> device;Check(commands->GetDevice(IID_PPV_ARGS(&device)),"trace device");
-        D3D12_QUERY_HEAP_DESC desc{D3D12_QUERY_HEAP_TYPE_TIMESTAMP,1024,0};
-        Check(device->CreateQueryHeap(&desc,IID_PPV_ARGS(&t.heap)),"trace heap");
-        t.readback=CreateBuffer(device.Get(),1024*8,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
-    }
-    Check(queue->GetTimestampFrequency(&t.frequency),"trace frequency");
-    t.commands=commands;t.rows.clear();t.active=true;commands->EndQuery(t.heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,0);
-}
-void EndLaunchTrace(ID3D12GraphicsCommandList* commands) {
-    auto& s=S();std::lock_guard guard(s.mutex);auto& t=s.trace;
-    if(!t.active || t.commands!=commands) throw std::runtime_error("Invalid checker launch trace end");
-    const unsigned count=unsigned(t.rows.size())*2+2;
-    commands->EndQuery(t.heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,count-1);
-    commands->ResolveQueryData(t.heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,0,count,t.readback.Get(),0);
-    t.active=false;t.pending=true;
-}
-void WriteLaunchTrace(const std::filesystem::path& path) {
-    auto& s=S();std::lock_guard guard(s.mutex);auto& t=s.trace;
-    if(!t.pending || t.active) throw std::runtime_error("No completed checker launch trace");
-    void* mapped=nullptr;D3D12_RANGE range{0,(2*t.rows.size()+2)*8};
-    Check(t.readback->Map(0,&range,&mapped),"trace readback");
-    const auto* ticks=static_cast<const uint64_t*>(mapped);std::vector<uint64_t> stamp(ticks,ticks+2*t.rows.size()+2);
-    D3D12_RANGE empty{0,0};t.readback->Unmap(0,&empty);t.pending=false;
-    std::ofstream out(path,std::ios::trunc);out.precision(12);
-    out << "{\"source\":\"NrSwin4 hook around each forwarded CUDA call\",\"timing_warning\":\"per-launch timestamps perturb overlap; suppressed fused calls may contain only timestamps; fused-level work is charged to its last original call\",\"gpu_ms\":"
-        << double(stamp.back()-stamp.front())*1000/t.frequency << ",\"launches\":[\n";
-    for(size_t i=0;i<t.rows.size();++i) {
-        const auto& r=t.rows[i];out << "{\"index\":" << i << ",\"name\":\"" << r.name << "\",\"plan\":" << r.plan
-            << ",\"grid\":[" << r.grid[0] << ',' << r.grid[1] << ',' << r.grid[2] << "],\"block\":[" << r.block[0] << ',' << r.block[1] << ',' << r.block[2]
-            << "],\"gpu_ms\":" << double(stamp[2*i+2]-stamp[2*i+1])*1000/t.frequency << ",\"start_ms\":" << double(stamp[2*i+1]-stamp[0])*1000/t.frequency << '}';
-        out << (i+1<t.rows.size()?",\n":"\n");
-    }
-    out << "]}\n";if(!out)throw std::runtime_error("Cannot write checker launch trace");
-}
-
-void WritePostProbe(ID3D12Device* device, const std::filesystem::path& path) {
-    auto& s=S();std::lock_guard guard(s.mutex);const auto found=s.devices.find(device);
-    if (found==s.devices.end() || !found->second.probeCaptured) throw std::runtime_error("No native POST diagnostic was captured");
-    auto& d=found->second;void* mapped=nullptr;D3D12_RANGE range{0,32};float v[8];
-    Check(d.probeReadback->Map(0,&range,&mapped),"post probe readback");memcpy(v,mapped,sizeof v);
-    D3D12_RANGE empty{0,0};d.probeReadback->Unmap(0,&empty);
-    std::ofstream out(path,std::ios::trunc);out.precision(9);out << "{\n  \"blend_weight\": " << v[0] << ", \"history\": " << v[1]
-        << ", \"motion\": " << v[2] << ", \"final_clamp\": " << v[3] << ", \"raw_weight\": \"" << v[4]
-        << "\", \"motion_present\": " << v[5] << ", \"weight_pointer\": " << v[6] << ", \"active\": " << v[7]
-        << ", \"pre_history\": " << (d.probePreHistory!=0) << ", \"pre_motion\": " << (d.probePreMotion!=0)
-        << ", \"sample_count\": " << d.probeSampleBytes/64 << ", \"sample_stride\": 4,\n  \"params_hex\": \"";
-    constexpr char hex[]="0123456789abcdef";for (unsigned char b:d.probeParams) out << hex[b>>4] << hex[b&15];
-    uint64_t postHistory=0,postMotion=0;int seed=0;
-    memcpy(&postHistory,d.probeParams.data()+88,8);memcpy(&postMotion,d.probeParams.data()+96,8);memcpy(&seed,d.probePreParams.data()+208,4);
-    out << "\", \"projection_diagnostic\": " << (d.probeProjectionDiagnostic?"true":"false")
-        << ", \"pre_seed\": " << seed << ", \"same_history_handle\": " << (d.probePreHistory==postHistory?"true":"false")
-        << ", \"same_motion_handle\": " << (d.probePreMotion==postMotion?"true":"false") << ", \"pre_params_hex\": \"";
-    for(unsigned char b:d.probePreParams)out << hex[b>>4] << hex[b&15];
-    out << "\"\n}\n";if (!out) throw std::runtime_error("Cannot write POST diagnostic");
-    if (d.probeSampleBytes) {
-        D3D12_RANGE samples{0,SIZE_T(d.probeSampleBytes)};Check(d.probeSamplesReadback->Map(0,&samples,&mapped),"post samples readback");
-        auto samplePath=path;samplePath.replace_extension(L".samples.f32");std::ofstream data(samplePath,std::ios::binary|std::ios::trunc);
-        data.write(static_cast<const char*>(mapped),std::streamsize(d.probeSampleBytes));d.probeSamplesReadback->Unmap(0,&empty);
-        if (!data) throw std::runtime_error("Cannot write POST samples");
-    }
 }
 
 void Disable() {

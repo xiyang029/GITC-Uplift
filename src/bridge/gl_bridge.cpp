@@ -480,15 +480,4 @@ uint64_t GlBridge::SharedBytes() const {
   return color_.bytes + mask_.bytes + motion_.bytes;
 }
 
-std::string GlBridge::StatusLine() const {
-  const double mib = static_cast<double>(SharedBytes()) / BYTES_PER_MIB;
-  std::string line = (gpu_ordered_ ? std::format("OpenGL: NR runs on a private Direct3D 12 device (shared textures and fences, {:.1f} MiB)", mib)
-                                   : std::format("OpenGL: NR runs on a private Direct3D 12 device (shared textures, CPU-ordered, {:.1f} MiB): {}", mib,
-                                                 cpu_reason_));
-  if (busy_skips_ > 0u) {
-    line += std::format(", {} frame(s) without NR while the bridge was busy", busy_skips_);
-  }
-  return line;
-}
-
 }  // namespace uplift::bridge

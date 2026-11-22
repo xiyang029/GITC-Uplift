@@ -80,10 +80,6 @@ bool PinReshade(HMODULE reshade_module);
 // The API's name in the texts.
 [[nodiscard]] std::string_view ApiName(api::device_api device_api);
 
-// DllMain: outside ReShade the add-on refuses to load.
-[[nodiscard]] inline bool RefusesLoad(DWORD reason) {
-  return reason == DLL_PROCESS_ATTACH && reshade::internal::get_reshade_module_handle() == nullptr;
-}
 // DllMain: the process is ending (DLL_PROCESS_DETACH with a non-null reserved), not a FreeLibrary. What runs then takes no lock and allocates
 // nothing: ExitProcess may have ended a thread that held one.
 [[nodiscard]] inline bool ProcessEnding(DWORD reason, LPVOID reserved) { return reason == DLL_PROCESS_DETACH && reserved != nullptr; }

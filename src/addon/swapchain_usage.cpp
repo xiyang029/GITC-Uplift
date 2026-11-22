@@ -72,8 +72,4 @@ void RegisterCreateSwapchainEvent(bool desc_has_fullscreen_state) {
   reshade::register_event<reshade::addon_event::create_swapchain>(&OnCreateSwapchain);
 }
 
-bool CreateSwapchainEventSeen() {
-  return g_vulkan_swapchain_event.load(std::memory_order_relaxed);
-}
-
 }  // namespace uplift::addon

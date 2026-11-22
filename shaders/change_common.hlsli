@@ -3,9 +3,7 @@
 
 #include "color_common.hlsli"
 
-// GPU colour math: resampling, NR's change field, the compose and the
-// per-pass resolve. CPU twins: color::ChangeField, color::Compose (with its Rebuild) and color::ResolveStrengths
-// (src/color/reference.cpp); tests/gpu/color_gpu_test.cpp and tests/gpu/look_gpu_test.cpp compare them.
+// GPU colour math: resampling, NR's change field, the compose and the per-pass resolve.
 
 static const float CHANGE_LIMIT = 3.f;              // ±3 stops: the restore's ratio clamp of [1/8, 8]
 static const float LIGHTNESS_FLOOR = 0.0625f;       // L_ε: κ divides by max(L, L_ε)

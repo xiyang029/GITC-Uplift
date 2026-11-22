@@ -1,8 +1,7 @@
 #ifndef UPLIFT_COLOR_COMMON_HLSLI
 #define UPLIFT_COLOR_COMMON_HLSLI
 
-// GPU twin of src/color/reference.cpp: same functions, same maths. tests/gpu/color_gpu_test.cpp
-// compares the two, so change both together.
+// The colour math shared by the DXIL and SPIR-V shaders, and by src/color/encoding.cpp.
 
 static const uint ENCODING_AUTO = 0u;
 static const uint ENCODING_LINEAR_BT709 = 1u;

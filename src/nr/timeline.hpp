@@ -105,7 +105,6 @@ class Timeline {
   // token forgotten. Empty when everything finished in time; otherwise what did not ("Timeline flush timed out", ...). The same stamping caveat as Flush:
   // only while no game thread is between its execute_command_list event and its native call (the game's own NGX shutdown, at the device's teardown).
   [[nodiscard]] std::string_view WaitIdle(std::chrono::milliseconds timeout);
-  [[nodiscard]] size_t PendingCount() const { return pending_.size(); }
 
   // A producer ticket distinguishes a recorded/discarded copy from a queued copy, even after Poll prunes its token.
   class SubmissionProof {

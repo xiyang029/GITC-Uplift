@@ -139,8 +139,6 @@ class Snippet {
   [[nodiscard]] HMODULE Module() const { return module_; }
   [[nodiscard]] ID3D12Device* Device() const { return device_; }
   [[nodiscard]] VkDevice VulkanDevice() const { return vk_device_; }
-  [[nodiscard]] const std::filesystem::path& CorePath() const { return core_path_; }
-  [[nodiscard]] bool CoreInitializedByUplift() const { return core_initialized_by_uplift_; }
   [[nodiscard]] bool LegacyRuntime() const { return legacy_runtime_; }
 
  private:

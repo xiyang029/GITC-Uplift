@@ -766,10 +766,6 @@ void SetXmxMode(bool xmx) {
   nr::Logf(nr::LogLevel::INFO, "sl-fg: XMX mode {}; NVIDIA's Dynamic MFG stands down", xmx ? "on" : "off");
 }
 
-uint32_t GeneratedFramesCeiling() {
-  return g_provider_max_generated.load(std::memory_order_relaxed);
-}
-
 void NotifyDynamicD3D12(bool d3d12) {
   g_dynamic_d3d12.store(d3d12, std::memory_order_relaxed);
 }

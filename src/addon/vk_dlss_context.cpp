@@ -1511,25 +1511,6 @@ void VkDlssContext::Abandon() {
   Drop(false);
 }
 
-std::string VkDlssContext::DetailsLine() const {
-  if (core_shut_down_) return "Vulkan: the game shut NVIDIA's NGX down on this device; NR stays off here until the game restarts";
-  if (!WantsNr() && NrState() == nr::SessionState::OFF) return {};
-  const nr::SessionStatus status = (session_ ? session_->Status() : nr::SessionStatus{});
-  const uint64_t bytes = status.runtime_bytes.value_or(0u) + (pipeline_ ? pipeline_->HeldBytes() : 0u);
-  if (NativePresent()) {
-    // The route the card names, with what the Present path's own counters say (as the bridge's line does).
-    std::string line = std::format("Vulkan: NR runs natively on the game's Vulkan device ({:.0f} MiB; {})", static_cast<double>(bytes) / BYTES_PER_MIB, VK_FIRST_USE_NOTE);
-    if (busy_skips_ > 0u) {
-      line += std::format(", {} frame(s) without NR while Uplift's command buffers were busy", busy_skips_);
-    }
-    if (second_queue_) {
-      line += ", presents from a second queue";
-    }
-    return line;
-  }
-  return std::format("Vulkan: NR runs inside the game's frame (native Vulkan NR, {:.0f} MiB; {})", static_cast<double>(bytes) / BYTES_PER_MIB, VK_FIRST_USE_NOTE);
-}
-
 vk::NrImage VkDlssContext::PresentMotion(uint64_t& age, VkQueue consumer, uint64_t max_age) {
   age = 0u;
   // None once the copies stopped. The frame no longer advances then, so the last slot would be bound again at every present.

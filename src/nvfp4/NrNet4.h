@@ -45,11 +45,6 @@ struct Options {
     bool byOrder = true;
     bool Any() const { return family[Split].groups || family[Vit].groups || family[PrePost].groups; }
 };
-// Settings as text, for a settings file, a command line or an environment variable. Items separated by spaces or
-// commas:   <family>=<mask | all | group+group...>   <family>.<group>=<options word>   <family>.slots=<hex>
-// <family>.trained=<0 | 1>
-// for example "split=all vit=qkv+projection vit.attention=1 prepost=3". Throws std::runtime_error on anything else.
-void Parse(const std::string& text, Options& options);
 // Give it each NvAPI interface id with the entry point to call below it; it returns what the caller should use.
 // Transparent until Enable().
 void* WrapNvapi(unsigned id, void* original);
@@ -82,9 +77,6 @@ bool SetComplete(unsigned set, std::string* missing);  // are this set's weight 
 unsigned long long Faults();                          // blocks left to / run with other weights than ours
 // For hosts that know where an evaluation of the model ends.
 void EndEvaluation(ID3D12GraphicsCommandList* commands) noexcept;
-// Checker-only: after a fence, write full/base/final/unpooled stored bytes captured
-// when NR_VIT_POOL_PROBE is set. No probe work/resources without that environment flag.
-void WritePoolProbe(ID3D12Device* device, const std::filesystem::path& path);
 std::string Status(bool counters = false);
 void SetLog(void (*log)(const char* line));
 }

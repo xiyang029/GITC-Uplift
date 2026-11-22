@@ -27,12 +27,17 @@
 
 #include "NrNet4.h"
 #include "NrFfnV2.h"
+#include "Nvfp4Support.h"    // the asset reader, buffer allocation and error checks every loader shares
 
 #pragma comment(lib, "bcrypt.lib")
 
 namespace NrNet4 {
 namespace {
 using Microsoft::WRL::ComPtr;
+using nvfp4::Check;
+using nvfp4::CreateBuffer;
+using nvfp4::NvCheck;
+using nvfp4::ReadAsset;
 namespace fs = std::filesystem;
 
 constexpr unsigned kCreateModule = 0xad1a677d, kCreateFunction = 0xe2436e22, kLaunch = 0x24973538,
@@ -68,24 +73,6 @@ Role RoleOf(const std::string& name) {
     return Role::None;
 }
 
-void Check(HRESULT result, const char* what) {
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed: D3D12 status " + std::to_string(unsigned(result)));
-}
-void NvCheck(NvAPI_Status result, const std::string& what) {
-    if (result != NVAPI_OK) throw std::runtime_error(what + " failed: NVAPI status " + std::to_string(result));
-}
-
-std::vector<unsigned char> ReadAsset(const fs::path& path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) throw std::runtime_error("missing NVFP4 asset " + path.string());
-    std::vector<unsigned char> bytes(size_t(file.tellg()));
-    file.seekg(0);
-    if (bytes.empty() || !file.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(bytes.size())))
-        throw std::runtime_error("cannot read NVFP4 asset " + path.string());
-    return bytes;
-}
-
-
 uint64_t Fnv(uint64_t hash, const std::string& name) {
     for (const unsigned char byte : name) hash = (hash ^ byte) * kFnvPrime;
     return (hash ^ uint64_t('\n')) * kFnvPrime;
@@ -102,18 +89,6 @@ struct Buffer {
     uint64_t bytes = 0;
     uint64_t Address() const { return resource->GetGPUVirtualAddress(); }
 };
-ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t bytes, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state) {
-    D3D12_RESOURCE_DESC desc{};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Width = bytes; desc.Height = 1; desc.DepthOrArraySize = 1; desc.MipLevels = 1; desc.SampleDesc.Count = 1;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if (heap == D3D12_HEAP_TYPE_DEFAULT) desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    D3D12_HEAP_PROPERTIES properties{};
-    properties.Type = heap;
-    ComPtr<ID3D12Resource> resource;
-    Check(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&resource)), "NVFP4 buffer allocation");
-    return resource;
-}
 
 struct Slot {
     std::string name;                           // the runtime's kernel
@@ -1112,52 +1087,6 @@ std::string Groups(unsigned family, unsigned mask) {
 }
 }   // namespace
 
-void Parse(const std::string& text, Options& options) {
-    std::string spaced = text;
-    std::replace(spaced.begin(), spaced.end(), ',', ' ');
-    std::istringstream in(spaced);
-    for (std::string item; in >> item;) {
-        const size_t equals = item.find('=');
-        if (equals == std::string::npos || !equals || equals + 1 == item.size()) throw std::runtime_error("NVFP4 setting without a value: " + item);
-        std::string key = item.substr(0, equals);
-        const std::string value = item.substr(equals + 1);
-        std::string member;
-        const size_t dot = key.find('.');
-        if (dot != std::string::npos) { member = key.substr(dot + 1); key.erase(dot); }
-        unsigned f = 0;
-        while (f < kFamilies && key != kFamilyName[f]) ++f;
-        if (f == kFamilies) throw std::runtime_error("unknown NVFP4 family in: " + item);
-        auto& family = options.family[f];
-        unsigned all = 0;
-        for (unsigned g = 0; g < kMaxGroups; ++g) if (kGroupName[f][g]) all |= 1u << g;
-        if (member.empty()) {
-            if (value == "all") family.groups = all;
-            else if (value[0] >= '0' && value[0] <= '9') family.groups = unsigned(Number(value)) & all;     // (no group's name starts with a digit)
-            else {
-                unsigned mask = 0;
-                for (const auto& name : Pieces(value, '+')) {
-                    const int g = GroupOf(f, name);
-                    if (g < 0) throw std::runtime_error("unknown NVFP4 group in: " + item);
-                    mask |= 1u << g;
-                }
-                family.groups = mask;
-            }
-        } else if (member == "trained") {
-            if (value != "0" && value != "1") throw std::runtime_error("NVFP4 trained is 0 or 1: " + item);
-            family.trained = value == "1";
-        } else if (member == "slots") {
-            if (value.empty() || value.size() > 32 || value.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
-                throw std::runtime_error("NVFP4 slots are up to 32 hexadecimal digits: " + item);
-            const std::string padded = std::string(32 - value.size(), '0') + value;
-            family.slots = {Number(padded.substr(16), 16), Number(padded.substr(0, 16), 16)};
-        } else {
-            const int g = GroupOf(f, member);
-            if (g < 0) throw std::runtime_error("unknown NVFP4 group in: " + item);
-            family.options[g] = int64_t(Number(value) & 0xffffffffull);
-        }
-    }
-}
-
 void* WrapNvapi(unsigned id, void* original) {
     if (!original) return original;
     auto& s = S();
@@ -1305,17 +1234,6 @@ void ReleaseDevice(ID3D12Device* device) {
     }
     for (auto i = s.targets.begin(); i != s.targets.end();) i = i->second.device == device ? s.targets.erase(i) : std::next(i);
     s.lists.clear();                        // command lists of the device go with it; their addresses may be reused
-}
-
-void WritePoolProbe(ID3D12Device* device, const std::filesystem::path& path) {
-    auto& s=S();std::lock_guard guard(s.mutex);auto i=s.devices.find(device);
-    if(i==s.devices.end() || !i->second.poolReadback.resource)return;
-    auto& d=i->second;void* bytes=nullptr;D3D12_RANGE range{0,size_t(d.poolProbe.bytes)};
-    Check(d.poolReadback.resource->Map(0,&range,&bytes),"pool probe map");
-    std::ofstream out(path,std::ios::binary);const uint32_t header[4]{0x36504c56,d.poolProbeH,d.poolProbeW,0};
-    out.write(reinterpret_cast<const char*>(header),sizeof header);out.write(static_cast<const char*>(bytes),std::streamsize(d.poolProbe.bytes));
-    D3D12_RANGE empty{0,0};d.poolReadback.resource->Unmap(0,&empty);
-    if(!out)throw std::runtime_error("pool probe write failed");
 }
 
 std::string Status(bool counters) {

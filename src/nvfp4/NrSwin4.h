@@ -67,17 +67,6 @@ inline constexpr unsigned kDefaultSet = ~0u;
 unsigned UseSet(unsigned set);
 bool SetComplete(unsigned set, std::string* missing);  // are this set's weight files all there?
 unsigned long long Faults();                          // blocks left to / run with other weights than ours
-// Optional harness override for successive UseSet calls (one per Processor evaluation). kDefaultSet entries keep
-// that call's preset selection. Clear with (nullptr, 0) after the frame. Existing hosts need not call this.
-void UseSetsForNextEvaluations(const unsigned* sets, unsigned count);
-// Opt-in harness diagnostic. Read only after the host has drained the GPU.
-void EnablePostProbe(bool enabled);
-void WritePostProbe(ID3D12Device* device, const std::filesystem::path& path);
-// Opt-in checker-only launch timing. Configure before InstallPassBorrow; collect after a bounded GPU drain.
-void EnableLaunchTrace();
-void BeginLaunchTrace(ID3D12GraphicsCommandList* commands, ID3D12CommandQueue* queue);
-void EndLaunchTrace(ID3D12GraphicsCommandList* commands);
-void WriteLaunchTrace(const std::filesystem::path& path);
 // Destroy our kernels and weights on `device`. Call only when the GPU can no longer be running command lists recorded
 // with them, or once the device is lost.
 void ReleaseDevice(ID3D12Device* device);

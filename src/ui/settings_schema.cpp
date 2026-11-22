@@ -2210,10 +2210,6 @@ bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& sett
   return false;
 }
 
-bool RowHidden(const SettingDescriptor& descriptor, const Settings& settings) {
-  return descriptor.hidden != nullptr && descriptor.hidden(settings);
-}
-
 bool DiffuseWhiteInExposureGroup(const Settings& settings) {
   return settings.input_exposure == color::InputExposure::MANUAL;
 }

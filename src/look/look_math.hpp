@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <vector>
 
 #include "nr/types.hpp"
 
@@ -50,38 +49,6 @@ struct LookSettings {
 
 // Whether the look stage runs: Shape result is on and a control would change NR's result.
 [[nodiscard]] bool LookRuns(const LookSettings& settings);
-
-struct Float2 { float x = 0.f; float y = 0.f; };
-struct Float4 { float x = 0.f; float y = 0.f; float z = 0.f; float w = 0.f; };
-
-// CPU twin of shaders/look_common.hlsli: same functions, same maths. tests/gpu/look_gpu_test.cpp compares them.
-[[nodiscard]] float SmoothStep(float low, float high, float value);  // HLSL's smoothstep
-// ℓ_O, the tone key in scene stops against diffuse white, from the change field's guide ℓ_M:
-// Neutwo's luminance inverse on HDR paths (encode's gamut clip keeps luminance), the value itself on SDR.
-[[nodiscard]] float ToneKey(bool sdr, float guide);
-struct ToneWeights { float shadows = 0.f; float midtones = 0.f; float highlights = 0.f; };
-[[nodiscard]] ToneWeights WeighTone(float key);  // tonal bands; they sum to 1
-struct ChromaSplit { Float2 radial; Float2 tangential; };  // R(δ): toward or away from grey; T(δ): the hue turn
-// δ split along NR's input chroma κ_M; near grey only saturation is meaningful, so all of it is radial.
-[[nodiscard]] ChromaSplit SplitChroma(Float2 delta, Float2 basis);
-// Soft limit, value / sqrt(1 + (value/limit)²): 0.71·limit at the limit; 0 = no limit.
-[[nodiscard]] float SoftLimit(float value, float limit);
-[[nodiscard]] Float2 LimitChroma(Float2 delta, float limit);
-
-// One pixel's broad/fine change bands, halo reference, model guide and input chroma for the shape pass.
-struct ShapeInput {
-  float low = 0.f;        // ã_low: the broad change (stabilised with Stabilize on), stops
-  float high = 0.f;       // ã_high: the fine change a − a_low (stabilised with Stabilize detail)
-  Float2 chroma_low;      // δ̃_low
-  Float2 chroma_high;     // δ̃_high
-  float reference = 0.f;  // a_ref: the halo's wider band
-  float peak = 0.f;       // P_max: the brightest ℓ_M within the radius
-  float guide = 0.f;      // ℓ_M
-  Float2 basis;           // κ_M: NR's input chroma
-};
-struct ShapedChange { float stops = 0.f; Float2 chroma; };  // (a*, δ*)
-// Shapes the bands, halo, sign, chroma and tonal weights, then applies soft limits and the safety clamp. Compose applies the mask; non-finite output is no change.
-[[nodiscard]] ShapedChange ShapeChange(const ShapeInput& input, const ShapeSettings& settings, bool sdr);
 
 // The pyramid's levels 1..levels side by side in one atlas texture: level k is ceil(image / 2^k), at x = the widths
 // of levels 1..k-1, y = 0 (level 0 is the image). look_common.hlsli derives the same layout.
@@ -139,12 +106,5 @@ struct FacesParameters {
 [[nodiscard]] FacesParameters MakeFacesParameters(float lighting_scale, const FacesTuning& tuning, uint32_t height, uint32_t levels);
 // α = 1 − exp(−Δt/τ), with Δt clamped to [1 ms, 100 ms]: frame-rate independent smoothing.
 [[nodiscard]] float StabilizeRate(float frame_seconds, float stabilize_ms);
-
-// look_common.hlsli's LowPass at work pixel (x, y) of an atlas (row-major texels): trilinear between floor(level) and
-// the next level, each a bilinear sample, or with `tent` a 3x3 tent of them from level 3 up.
-[[nodiscard]] Float4 LowPass(const std::vector<Float4>& atlas_texels, const Atlas& atlas, float level, uint32_t x, uint32_t y,
-                             bool tent);
-// The largest of the 2x2 texels of `level` around work pixel (x, y): the halo's P_max.
-[[nodiscard]] float PeakAround(const std::vector<float>& peaks, const Atlas& atlas, uint32_t level, uint32_t x, uint32_t y);
 
 }  // namespace uplift::look

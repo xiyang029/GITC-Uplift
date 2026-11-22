@@ -16,30 +16,19 @@
 #include <vector>
 
 #include "NrFp8.h"
+#include "Nvfp4Support.h"    // the asset reader and the error check the loaders share
 
 namespace NrFp8 {
 namespace {
 using Microsoft::WRL::ComPtr;
+using nvfp4::Check;
+using nvfp4::ReadAsset;
 namespace fs = std::filesystem;
 
 constexpr unsigned kCreateFunction = 0xe2436e22, kLaunch = 0x24973538, kDestroyFunction = 0xdf295ea6;
 constexpr unsigned kMaxSets = 8;            // fp8_set1 .. fp8_set7
 constexpr uint16_t kBlendWeight = 0x39eb;   // FP16 history blend weight (0.7397)
 constexpr size_t kMaxParams = 512;
-
-void Check(HRESULT result, const char* what) {
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed: D3D12 status " + std::to_string(unsigned(result)));
-}
-
-std::vector<unsigned char> ReadFile(const fs::path& path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) throw std::runtime_error("missing FP8 asset " + path.string());
-    std::vector<unsigned char> bytes(size_t(file.tellg()));
-    file.seekg(0);
-    if (bytes.empty() || !file.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(bytes.size())))
-        throw std::runtime_error("cannot read FP8 asset " + path.string());
-    return bytes;
-}
 
 struct Entry {
     bool present = false;
@@ -160,7 +149,7 @@ Weights& LoadWeights(State& s, Device& d, ID3D12Device* device, unsigned n) {
     if (!w.failure.empty()) throw std::runtime_error(w.failure);
     if (w.ready) return w;
     try {
-        const std::vector<unsigned char> blob = ReadFile(s.sets[n].bin);
+        const std::vector<unsigned char> blob = ReadAsset(s.sets[n].bin, "FP8");
         if (blob.size() != s.sets[n].binBytes) throw std::runtime_error(s.sets[n].bin.string() + " changed after it was checked");
         w.blendAt = (blob.size() + 511) / 512 * 512;
         const uint64_t bytes = (w.blendAt + 512 + 4096 + 255) / 256 * 256;    // (kernels read ahead of a record's end)

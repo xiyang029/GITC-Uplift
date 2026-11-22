@@ -204,8 +204,6 @@ class D3D11Bridge final : public PrivateDeviceBridge {
   // True when it did.
   bool DiagnosticWaitForGameSignal(DWORD cap_ms);
   [[nodiscard]] uint64_t SharedBytes() const override;
-  // The Details line names the stage NR runs at (`placement`, the context's).
-  [[nodiscard]] std::string StatusLine(addon::Placement placement = addon::Placement::PRESENT) const;
   [[nodiscard]] bool Stopped() const override { return !latch_.empty(); }    // the D3D10 bridge's one latch
   [[nodiscard]] std::string_view Latch() const override { return latch_; }   // the card's reason; empty while it runs
   [[nodiscard]] uint64_t BusySkips() const override { return busy_skips_; }  // the D3D10 bridge's status line
@@ -214,9 +212,6 @@ class D3D11Bridge final : public PrivateDeviceBridge {
   // grows once from 8 to 12 (logged), and never shrinks. The default path keeps 8.
   void GrowRingForSplit();
   [[nodiscard]] size_t RingSize() const { return side_->RingSize(); }
-  // Split chain: the shares the DLSS stages and the Present ring made so far (EnsureShared's), for the tests: a Before + After split makes none
-  // per evaluate once both stages hold theirs.
-  [[nodiscard]] uint64_t DlssSharesMade() const { return dlss_shares_made_; }
   // True once, after an object on the D3D11 device was released (a retired surface freed, or one dropped at
   // once) since the last call. D3D11 destroys a released object only at its context's next Flush, which a device with no
   // Present of its own (the D3D10 relay) must make itself.
@@ -323,7 +318,6 @@ class D3D11Bridge final : public PrivateDeviceBridge {
   uint64_t waited11_ = 0u;    // the highest to11_ value a D3D11 wait was queued for
   uint64_t busy_skips_ = 0u;
   bool ring_growth_failed_ = false;  // logged once
-  uint64_t dlss_shares_made_ = 0u;  // DlssSharesMade
   std::string problem_;                // the back buffer's problem, logged once per change
   std::string latch_;                  // set once: the bridge stopped for the session
   std::function<void()> on_latch_;     // called once, when the latch is first set, by the owner that must pass it on

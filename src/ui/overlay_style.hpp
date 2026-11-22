@@ -142,26 +142,18 @@ class StyleScope {
     return *this;
   }
   // The accent as a control's fill and the window's colour as its words: the panel's primary action.
-  StyleScope& AccentButton() {
-    return Color(ImGuiCol_Button, tokens::kAccent)
-        .Color(ImGuiCol_ButtonHovered, tokens::kAccentHover)
-        .Color(ImGuiCol_ButtonActive, tokens::kAccentActive)
-        .Color(ImGuiCol_Text, tokens::kOnAccent);
-  }
+  StyleScope& AccentButton() { return Button(tokens::kAccent, tokens::kAccentHover, tokens::kAccentActive, tokens::kOnAccent); }
   // A button with no surface of its own: the reset arrows and other quiet icon actions.
-  StyleScope& FlatButton() {
-    return Color(ImGuiCol_Button, tokens::kTransparent)
-        .Color(ImGuiCol_ButtonHovered, tokens::kSurfaceHover)
-        .Color(ImGuiCol_ButtonActive, tokens::kSurfaceActive)
-        .Color(ImGuiCol_Text, tokens::kTextSecondary);
-  }
-  StyleScope& SelectedButton() {
-    return Color(ImGuiCol_Button, tokens::kSelected)
-        .Color(ImGuiCol_ButtonHovered, tokens::kSelectedHover)
-        .Color(ImGuiCol_ButtonActive, tokens::kSelectedActive)
-        .Color(ImGuiCol_Text, tokens::kAccent);
-  }
+  StyleScope& FlatButton() { return Button(tokens::kTransparent, tokens::kSurfaceHover, tokens::kSurfaceActive, tokens::kTextSecondary); }
+  StyleScope& SelectedButton() { return Button(tokens::kSelected, tokens::kSelectedHover, tokens::kSelectedActive, tokens::kAccent); }
  private:
+  // A button's four colours: its surface at rest, hovered and pressed, and the words on it.
+  StyleScope& Button(const ImVec4& base, const ImVec4& hovered, const ImVec4& active, const ImVec4& text) {
+    return Color(ImGuiCol_Button, base)
+        .Color(ImGuiCol_ButtonHovered, hovered)
+        .Color(ImGuiCol_ButtonActive, active)
+        .Color(ImGuiCol_Text, text);
+  }
   int colors_ = 0;
   int vars_ = 0;
 };

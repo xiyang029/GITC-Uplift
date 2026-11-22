@@ -25,16 +25,12 @@ void SetDynamicMfg(bool enabled, uint32_t target_fps);
 
 // Raise DLSSGState::numFramesToGenerateMax in the game's GetState answers, so native
 // multiplier selectors built from it (STALKER 2) offer more than 2x. 0 = do not advertise.
-// Never raises above the runtime's own ceiling (GeneratedFramesCeiling).
+// Never raises above the runtime's own ceiling.
 void SetAdvertisedMaxGenerated(uint32_t generated_frames);
 
 // XMX owns the multiplier through its own ported model (src/xmx/), so the provider is never asked
 // for NVIDIA's Dynamic MFG: that row stands down while this is on.
 void SetXmxMode(bool xmx);
-
-// The DLSS-G runtime's own numFramesToGenerateMax, seen before this add-on advertises more
-// (generated frames: 4 = 5x, 5 = 6x). 0 = not observed yet: offer every multiplier.
-uint32_t GeneratedFramesCeiling();
 
 // The game's graphics API, observed by the add-on at Present; Dynamic MFG is D3D12-only.
 void NotifyDynamicD3D12(bool d3d12);

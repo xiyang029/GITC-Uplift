@@ -64,10 +64,9 @@ class D3D10Bridge final : public PrivateDeviceBridge {
   // Stops the bridge for the session and releases every queued fence wait (D3D11Bridge::Stop).
   void Stop(std::string reason) override;
   [[nodiscard]] uint64_t SharedBytes() const override;
-  [[nodiscard]] std::string StatusLine() const;
   [[nodiscard]] bool Stopped() const override { return bridge_->Stopped() || relay_->Stopped(); }
   [[nodiscard]] std::string_view Latch() const override { return bridge_->Latch(); }  // the card's reason (the relay's reaches it through its handler)
-  [[nodiscard]] uint64_t BusySkips() const override { return bridge_->BusySkips(); }  // the D3D11 bridge's, which StatusLine prints
+  [[nodiscard]] uint64_t BusySkips() const override { return bridge_->BusySkips(); }  // the D3D11 bridge's
   [[nodiscard]] std::string_view Label() const override { return bridge_->Label(); }  // the relay's D3D11 bridge is made with its label
 
  private:

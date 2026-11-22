@@ -287,7 +287,6 @@ endforeach()
 
 add_library(uplift_color STATIC
   src/color/encoding.cpp
-  src/color/reference.cpp
   src/color/color_pipeline.cpp
   src/color/vk_color_pipeline.cpp
   src/look/look_math.cpp

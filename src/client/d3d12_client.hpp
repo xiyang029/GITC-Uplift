@@ -97,8 +97,6 @@ class D3D12Client {
   // What this side still keeps alive of the helper's textures: the opened colour, mask and motion, and the ones on the retire lists that no fence has released.
   // Zero once NR is off and the retire fence has passed (the smoke checks it).
   [[nodiscard]] uint64_t HeldBytes() const;
-  // The objects (textures and fences) waiting on the retire lists.
-  [[nodiscard]] size_t RetiredCount() const { return retired_.size() + unsignalled_.size(); }
   // The FRAME Describe described was put on the wire (the caller read NrLink's FrameSent after the present): a colour handle that reply, or a late one stashed
   // from an earlier FRAME, brings is opened with the size and format of that FRAME's target.
   void NoteFrameSent();

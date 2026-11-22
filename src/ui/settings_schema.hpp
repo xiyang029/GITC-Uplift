@@ -79,9 +79,6 @@ inline constexpr double TYPED_PAST_SLIDER = 10.0;
   return key.starts_with("DLSSRenderScale") || key.starts_with("Foveation");
 }
 
-// The longest a setting's tooltip may be, in bytes: about three lines once the overlay wraps it. Detail beyond that belongs in the Guide.
-inline constexpr size_t TOOLTIP_MAX_CHARS = 200u;
-
 // One persisted setting (v2 design §3.16): the single description load, save, sanitising, resets
 // and the overlay rows all read.
 struct SettingDescriptor {
@@ -134,8 +131,6 @@ void RestoreAllDefaults(Settings* settings);
 [[nodiscard]] double DescriptorMax(const SettingDescriptor& descriptor);
 // A FLOAT slider's end: `ui_max` when set, else `max`.
 [[nodiscard]] double SliderMax(const SettingDescriptor& descriptor);
-// The overlay hides this row while `settings` hold its `hidden` condition.
-[[nodiscard]] bool RowHidden(const SettingDescriptor& descriptor, const Settings& settings);
 // The colour fixes' exposure rows the overlay hides while `settings`' Input exposure makes them moot: Adaptation and its rates unless
 // Metered or Auto; Auto exposure unless Auto, and Blend unless Auto's Blend.
 [[nodiscard]] bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& settings);

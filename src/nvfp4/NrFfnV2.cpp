@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "NrPassBorrowTables.h"      // the runtime builds whose kernels and weights have been audited
+#include "Nvfp4Support.h"             // the asset reader, buffer allocation and error checks every loader shares
 
 #include "NrFfnV2.h"
 
@@ -40,6 +41,10 @@
 namespace NrFfnV2 {
 namespace {
 using Microsoft::WRL::ComPtr;
+using nvfp4::Check;
+using nvfp4::CreateBuffer;
+using nvfp4::NvCheck;
+using nvfp4::ReadAsset;
 namespace fs = std::filesystem;
 
 constexpr unsigned kCreateModule = 0xad1a677d, kCreateFunction = 0xe2436e22, kLaunch = 0x24973538,
@@ -59,42 +64,12 @@ constexpr unsigned kFirstExpand[2] = {58, 20};
 constexpr const wchar_t* kModelFolder[2] = {L"modelA", L"modelB"};
 constexpr const char* kModelName[2] = {"Model A", "Model B"};
 
-void Check(HRESULT result, const char* what) {
-    if (FAILED(result)) throw std::runtime_error(std::string(what) + " failed: D3D12 status " + std::to_string(unsigned(result)));
-}
-void NvCheck(NvAPI_Status result, const char* what) {
-    if (result != NVAPI_OK) throw std::runtime_error(std::string(what) + " failed: NVAPI status " + std::to_string(result));
-}
-
-std::vector<unsigned char> ReadAsset(const fs::path& path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) throw std::runtime_error("missing NVFP4 asset " + path.string());
-    std::vector<unsigned char> bytes(size_t(file.tellg()));
-    file.seekg(0);
-    if (bytes.empty() || !file.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(bytes.size())))
-        throw std::runtime_error("cannot read NVFP4 asset " + path.string());
-    return bytes;
-}
-
-
 struct Buffer {
     ComPtr<ID3D12Resource> resource;
     uint64_t bytes = 0;
     uint64_t Address() const { return resource->GetGPUVirtualAddress(); }
 };
 
-ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t bytes, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state) {
-    D3D12_RESOURCE_DESC desc{};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Width = bytes; desc.Height = 1; desc.DepthOrArraySize = 1; desc.MipLevels = 1; desc.SampleDesc.Count = 1;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if (heap == D3D12_HEAP_TYPE_DEFAULT) desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    D3D12_HEAP_PROPERTIES properties{};
-    properties.Type = heap;
-    ComPtr<ID3D12Resource> resource;
-    Check(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&resource)), "NVFP4 buffer allocation");
-    return resource;
-}
 Buffer Allocate(ID3D12Device* device, uint64_t bytes) {
     bytes = (std::max<uint64_t>(bytes, 256) + 255) / 256 * 256;
     return {CreateBuffer(device, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS), bytes};

@@ -72,7 +72,6 @@ class ComputeShadow {
 
   // True when every compute-state change since a Reset in `epoch` was seen and held.
   [[nodiscard]] bool Known(uint64_t epoch) const;
-  [[nodiscard]] uint64_t RootSignature() const { return root_signature_; }
   // Re-binds the recorded state after Uplift's own recording: heaps and root signature, pipeline, tables, constants,
   // then native root views.
   void Replay(ReplayTarget& target, RestoreMode mode) const;

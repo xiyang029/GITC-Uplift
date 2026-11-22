@@ -259,14 +259,4 @@ uint64_t D3D10Bridge::SharedBytes() const {
   return bridge_->SharedBytes() + color_.bytes + mask_.bytes + motion_.bytes;
 }
 
-std::string D3D10Bridge::StatusLine() const {
-  std::string line =
-      std::format("Direct3D 10: NR runs on a private Direct3D 12 device through a Direct3D 11 relay (shared {:.1f} MiB)",
-                  static_cast<double>(SharedBytes()) / BYTES_PER_MIB);
-  if (bridge_->BusySkips() > 0u) {
-    line += std::format(", {} frame(s) without NR while the bridge was busy", bridge_->BusySkips());
-  }
-  return line;
-}
-
 }  // namespace uplift::bridge

@@ -240,8 +240,6 @@ class DeviceContext {
   // submitted it): the status says NR was not applied, with `reason`, and the stage's next recording starts NR's history afresh, as
   // Direct3D 12's sources owe it for their own skips.
   void NoteBridgedSkip(BridgedDlssWork stage, nr::SkipReason reason);
-  // Whether the stage's next recording starts NR's history afresh. For the tests.
-  [[nodiscard]] bool StageResetOwed(BridgedDlssWork stage) const;
   // The game's own Direct3D 11 device was removed (`reason`): within DLSS_LATCH_WINDOW of NR running inside its frame the DLSS placements latch off
   // (LatchTripped), as a Direct3D 12 game's removal does. A bridged context's own private device never latches them: its removal gets Retry now.
   void NoteGameDeviceRemoved(HRESULT reason, std::chrono::steady_clock::time_point now);
@@ -278,7 +276,6 @@ class DeviceContext {
   // or OnDlssEvaluate sees a feature newer than `serial`, FeatureRegistry::LastSerial now), and the teardown then makes none. A bridged context (a private
   // device) never gets this call. Not after a removal or a teardown.
   void OnCoreShutdown(std::chrono::milliseconds cap, uint64_t upscaler_creates, uint64_t serial);
-  [[nodiscard]] bool CoreHeld() const { return core_hold_.Held(); }
   // The hold outlives this context. The add-on keeps the device's copy when destroy_command_queue ends the context, and a new
   // context on the same game device starts from it (before its first BeginFrame), so it never loads NR into a core the game shut down, or into an abandoned
   // runtime.

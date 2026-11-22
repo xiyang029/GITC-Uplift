@@ -504,19 +504,4 @@ uint64_t VkBridge::SharedBytes() const {
   return color_.bytes + mask_.bytes + motion_.bytes;
 }
 
-std::string VkBridge::StatusLine(std::string_view route_reason) const {
-  const double mib = static_cast<double>(SharedBytes()) / BYTES_PER_MIB;
-  const std::string device = (route_reason.empty() ? std::string("a private Direct3D 12 device")
-                                                   : std::format("a private Direct3D 12 device: {}", route_reason));
-  std::string line = (gpu_ordered_ ? std::format("Vulkan: NR runs on {} (shared textures and fences, {:.1f} MiB)", device, mib)
-                                   : std::format("Vulkan: NR runs on {} (shared textures, CPU-ordered, {:.1f} MiB): {}", device, mib, cpu_reason_));
-  if (busy_skips_ > 0u) {
-    line += std::format(", {} frame(s) without NR while the bridge was busy", busy_skips_);
-  }
-  if (second_queue_) {
-    line += ", presents from a second queue";
-  }
-  return line;
-}
-
 }  // namespace uplift::bridge

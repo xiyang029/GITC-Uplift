@@ -17,13 +17,6 @@ void SetNvfp4AssetsDirectory(const std::filesystem::path& addon_directory);
 // SetNvfp4AssetsDirectory(). Configure is idempotent for an unchanged path, so a per-frame call is cheap.
 void RequestNvfp4(bool wanted);
 
-// True when a D3D12 frame asked for a 4-bit model but the kernels could not run it (missing assets,
-// wrong runtime, unsupported path). The caller must skip presenting that frame's NR result.
-bool Nvfp4Refused();
-
-// A short reason for the overlay when the last evaluation was refused; empty otherwise.
-std::string Nvfp4Problem();
-
 // Vulkan has no CUDA-on-D3D12 path: a 4-bit choice is refused up front, with a reason.
 void RefuseNvfp4(const char* reason);
 

@@ -410,6 +410,14 @@ class NrPipeline final : private nr::PassResolver {
   bool MakeDepthCopies(size_t first, size_t end, nr::Size size);
   void RetireLaunchpadMotion();  // likewise for Launchpad's converted motion
   void RetireDlssPresentMotion();  // likewise for Direct3D 11's converted ring vectors
+  // Releases a surface the timeline may still be reading and clears the holder: what the Retire* above do.
+  template <typename Held>
+  void RetireHeld(Held& held) {
+    if (held.texture && !timeline_.IsComplete(held.last_use)) {
+      timeline_.ReleaseAfter(held.last_use, [retired = held.texture] {});
+    }
+    held = {};
+  }
   bool MakeMotionCopies(size_t first, size_t end, nr::Size size);  // motion_copies_.textures[first, end); none kept on a failure
   // Records the motion copy of `motion` (DLSS's raw vectors in the ring slot, the region its rect) into dlss_present_motion_ at
   // the region's size with `scale_x/y` applied, on the committed `slot`. The texture to bind whole at a scale of (1, 1), or none (an unreadable format, a
@@ -442,7 +450,6 @@ class NrPipeline final : private nr::PassResolver {
   // Superior Scaling's fallback rule (PR #237): a degradation the card only names tersely warns once in the
   // log, then runs degraded quietly -- never a per-frame warning, never a fully silent fallback. WarnOnce
   // (nr_pipeline.cpp) does the logging; these are its one-shot gates.
-  bool decode_pipeline_warned_ = false;
   bool dlss_present_motion_warned_ = false;
   bool launchpad_motion_warned_ = false;
   MotionCopies motion_copies_;

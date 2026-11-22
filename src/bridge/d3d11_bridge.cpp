@@ -483,20 +483,4 @@ uint64_t D3D11Bridge::RingBytes() const {
   return bytes;
 }
 
-std::string D3D11Bridge::StatusLine(addon::Placement placement) const {
-  // The Details line names the DLSS stage NR runs at.
-  const std::string_view where = (placement == addon::Placement::AFTER_DLSS        ? "NR after DLSS on Uplift's private Direct3D 12 device"
-                                  : placement == addon::Placement::BEFORE_UPSCALING ? "NR before upscaling on Uplift's private Direct3D 12 device"
-                                                                                    : "NR runs on a private Direct3D 12 device");
-  std::string line = std::format("{}: {} (shared {:.1f} MiB)", label_, where, static_cast<double>(SharedBytes()) / BYTES_PER_MIB);
-  if (busy_skips_ > 0u) {
-    line += std::format(", {} frame(s) without NR while the bridge was busy", busy_skips_);
-  }
-  if (const uint64_t ring = RingBytes(); ring > 0u) {
-    // As Vulkan's Details line says its copies.
-    line += std::format("; DLSS's motion vectors copied in the game's frame ({:.1f} MiB)", static_cast<double>(ring) / BYTES_PER_MIB);
-  }
-  return line;
-}
-
 }  // namespace uplift::bridge

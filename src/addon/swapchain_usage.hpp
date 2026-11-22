@@ -26,7 +26,4 @@ void RegisterCreateSwapchainEvent(bool desc_has_fullscreen_state);
 // swap chain's exclusive fullscreen into a window of the same size (borderless), with ReShade 6.8 or later; creation and every Reset.
 void NoteD3D9ExRequested();
 
-// A Vulkan swap chain went through the handler since the process started.
-[[nodiscard]] bool CreateSwapchainEventSeen();
-
 }  // namespace uplift::addon

@@ -5,8 +5,6 @@
 
 namespace uplift::addon {
 
-// Persistent device-removal latch.
-inline constexpr std::wstring_view REMOVAL_LATCH_EXTENSION = L".latch";
 // Vulkan device adjustment awaiting proof of presentation or clean teardown.
 inline constexpr std::wstring_view VK_DEVICE_PENDING_EXTENSION = L".vkdevice-pending";
 // Native Vulkan NR startup awaiting enough successful frames or a clean stop.

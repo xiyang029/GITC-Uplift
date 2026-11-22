@@ -62,16 +62,12 @@ enum class VkNrStream : uint8_t {
   AFTER_DLSS,        // the game's command buffers, after its DLSS evaluate
   BEFORE_UPSCALING,  // the game's command buffers, before its DLSS evaluate
 };
-// True when the Session, loaded for `loaded_for` and not OFF, must go through OFF before NR runs for `wanted`. Pure.
-[[nodiscard]] inline bool VkStreamNeedsReload(VkNrStream loaded_for, VkNrStream wanted, bool session_off) {
-  return !session_off && loaded_for != VkNrStream::NONE && wanted != VkNrStream::NONE && wanted != loaded_for;
-}
 // The streams a native chain records into, one bit per stream (NONE has none). A one-group chain's set is its one stream.
 using VkStreamSet = uint8_t;
 [[nodiscard]] constexpr VkStreamSet VkStreamBit(VkNrStream stream) {
   return (stream == VkNrStream::NONE ? VkStreamSet{0u} : static_cast<VkStreamSet>(1u << static_cast<uint32_t>(stream)));
 }
-// VkStreamNeedsReload for the chain's set: any change of it (a stream joins or leaves) reloads the Session from OFF, never a warm per-group rebuild. Pure.
+// Any change of the chain's set (a stream joins or leaves) reloads the Session from OFF, never a warm per-group rebuild. Pure.
 [[nodiscard]] inline bool VkStreamsNeedReload(VkStreamSet loaded_for, VkStreamSet wanted, bool session_off) {
   return !session_off && loaded_for != 0u && wanted != 0u && wanted != loaded_for;
 }

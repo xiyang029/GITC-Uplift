@@ -90,10 +90,6 @@ void RequestNvfp4(bool wanted) {
   DlssNr::Nvfp4::Configure(true, g_assets_directory / L"nvfp4");
 }
 
-bool Nvfp4Refused() { return !DlssNr::Nvfp4::Problem().empty(); }
-
-std::string Nvfp4Problem() { return DlssNr::Nvfp4::Problem(); }
-
 void RefuseNvfp4(const char* reason) { DlssNr::Nvfp4::Refuse(reason); }
 
 }  // namespace uplift::addon

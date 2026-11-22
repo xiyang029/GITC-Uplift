@@ -25,30 +25,6 @@ namespace {
 
 constexpr size_t INITIAL_MODULE_CAPACITY = 256u;
 constexpr size_t MODULE_PATH_CHARS = 32768u;
-constexpr size_t ENTRY_POINT_COUNT = 17u;
-constexpr size_t FIRST_D3D11 = 5u;  // The D3D11 entries precede Vulkan's entries.
-constexpr size_t FIRST_VULKAN = 11u;
-
-struct ModuleExports {
-  void* create = nullptr;
-  void* evaluate = nullptr;
-  void* evaluate_c = nullptr;
-  void* release = nullptr;
-  void* shutdown1 = nullptr;
-  void* d3d11_create = nullptr;
-  void* d3d11_evaluate = nullptr;
-  void* d3d11_evaluate_c = nullptr;
-  void* d3d11_release = nullptr;
-  void* d3d11_shutdown1 = nullptr;
-  void* d3d11_shutdown = nullptr;
-  void* vk_create = nullptr;
-  void* vk_create1 = nullptr;
-  void* vk_evaluate = nullptr;
-  void* vk_evaluate_c = nullptr;
-  void* vk_release = nullptr;
-  void* vk_shutdown1 = nullptr;
-};
-
 using CreateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D12GraphicsCommandList*, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*,
                                                NVSDK_NGX_Handle**);
 using EvaluateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D12GraphicsCommandList*, const NVSDK_NGX_Handle*,
@@ -714,55 +690,6 @@ std::vector<std::pair<HMODULE, std::wstring>> FindCores() {
   return cores;
 }
 
-ModuleExports ResolveExports(HMODULE module) {
-  const auto export_address = [module](const char* export_name) {
-    return reinterpret_cast<void*>(GetProcAddress(module, export_name));
-  };
-  return {
-      .create = export_address("NVSDK_NGX_D3D12_CreateFeature"),
-      .evaluate = export_address("NVSDK_NGX_D3D12_EvaluateFeature"),
-      .evaluate_c = export_address("NVSDK_NGX_D3D12_EvaluateFeature_C"),
-      .release = export_address("NVSDK_NGX_D3D12_ReleaseFeature"),
-      .shutdown1 = export_address("NVSDK_NGX_D3D12_Shutdown1"),
-      .d3d11_create = export_address("NVSDK_NGX_D3D11_CreateFeature"),
-      .d3d11_evaluate = export_address("NVSDK_NGX_D3D11_EvaluateFeature"),
-      .d3d11_evaluate_c = export_address("NVSDK_NGX_D3D11_EvaluateFeature_C"),
-      .d3d11_release = export_address("NVSDK_NGX_D3D11_ReleaseFeature"),
-      .d3d11_shutdown1 = export_address("NVSDK_NGX_D3D11_Shutdown1"),
-      .d3d11_shutdown = export_address("NVSDK_NGX_D3D11_Shutdown"),
-      .vk_create = export_address("NVSDK_NGX_VULKAN_CreateFeature"),
-      .vk_create1 = export_address("NVSDK_NGX_VULKAN_CreateFeature1"),
-      .vk_evaluate = export_address("NVSDK_NGX_VULKAN_EvaluateFeature"),
-      .vk_evaluate_c = export_address("NVSDK_NGX_VULKAN_EvaluateFeature_C"),
-      .vk_release = export_address("NVSDK_NGX_VULKAN_ReleaseFeature"),
-      .vk_shutdown1 = export_address("NVSDK_NGX_VULKAN_Shutdown1"),
-  };
-}
-
-void Rollback(size_t slot, std::span<void* const> created, std::string_view name) {
-  bool poisoned = false;
-  for (void* const target : created) {
-    if (const MH_STATUS status = MH_DisableHook(target); status != MH_OK) {
-      nr::Logf(nr::LogLevel::WARN, "MinHook could not disable a hook rolling back {}: {}", name,
-               MH_StatusToString(status));
-      poisoned = true;
-    }
-    if (const MH_STATUS status = MH_RemoveHook(target); status != MH_OK) {
-      nr::Logf(nr::LogLevel::WARN, "MinHook could not remove a hook rolling back {}: {}", name,
-               MH_StatusToString(status));
-      poisoned = true;
-    }
-  }
-  if (poisoned) {
-    // The hook may still be live: never null its originals, and never hand this slot to another
-    // module.
-    g_originals[slot].poisoned.store(true, std::memory_order_release);
-  } else {
-    g_originals[slot].Clear();
-  }
-  nr::Logf(nr::LogLevel::WARN, "NGX hooks on {} failed; the DLSS placements cannot use it", name);
-}
-
 }  // namespace
 
 bool InsideVulkanEvaluate() {
@@ -907,87 +834,6 @@ size_t HookInstaller::Scan() {
   const std::unique_lock lock(mutex_);
   return ScanLocked();
 }
-
-namespace {
-
-// The modules loaded into this process. K32EnumProcessModules is asked first; when it fails or reports
-// nothing (Phantom Blade Zero reports zero on every scan, commit 3dcf52c), the loader's own list in the
-// PEB is read instead -- it needs no API, so it is current even under the loader lock (the XMX field log
-// had CreateToolhelp32Snapshot answering ERROR_BAD_LENGTH, 24, on the same process). Toolhelp is the
-// 32-bit half only: the PEB offsets below are the x64 ABI's.
-std::vector<HMODULE> LoadedModules() {
-  std::vector<HMODULE> modules(256u);
-  for (;;) {
-    DWORD needed_bytes = 0u;
-    if (K32EnumProcessModules(GetCurrentProcess(), modules.data(), static_cast<DWORD>(modules.size() * sizeof(HMODULE)),
-                              &needed_bytes)
-        == FALSE) {
-      break;  // the call fails outright here (ERROR_INVALID_HANDLE on every scan of this process)
-    }
-    const size_t count = needed_bytes / sizeof(HMODULE);
-    if (count == 0u) break;  // an empty list is not worth a second ask
-    if (count <= modules.size()) {
-      modules.resize(count);
-      return modules;
-    }
-    modules.resize(count);  // the list grew past the buffer: ask again with it
-  }
-  modules.clear();
-  // The loader's own list, read from the PEB: every module here is a mapped image and the list is
-  // always current, so its three pointers need no API at all.
-#if defined(_WIN64)
-  // PEB_LDR_DATA: Length, Initialized, SsHandle, then the three list heads. InLoadOrderModuleList
-  // comes first, right after the 4-byte fields padded to 8 (x64): 0x00, 0x04, 0x08, 0x10.
-  struct PebLdrData {
-    ULONG Length;
-    BOOLEAN Initialized;
-    PVOID SsHandle;
-    LIST_ENTRY InLoadOrderModuleList;
-  };
-  struct LdrEntry {
-    LIST_ENTRY InLoadOrderLinks;
-    LIST_ENTRY InMemoryOrderLinks;
-    LIST_ENTRY InInitializationOrderLinks;
-    void* DllBase;  // the only field read; the rest of LDR_DATA_TABLE_ENTRY is not needed
-  };
-  // TEB -> PEB -> Ldr, at the offsets the x64 ABI fixes: gs:[0x30] is the TEB, TEB+0x60 the PEB,
-  // PEB+0x18 the PEB_LDR_DATA.
-  const auto* const teb = reinterpret_cast<const unsigned char*>(__readgsqword(0x30));
-  if (teb != nullptr) {
-    const auto* const peb = *reinterpret_cast<const unsigned char* const*>(teb + 0x60);
-    if (peb != nullptr) {
-      const auto* const ldr = *reinterpret_cast<const PebLdrData* const*>(peb + 0x18);
-      if (ldr != nullptr) {
-        const LIST_ENTRY* const head = &ldr->InLoadOrderModuleList;
-        for (const LIST_ENTRY* node = head->Flink; node != head && node != nullptr && modules.size() < 4096u;
-             node = node->Flink) {
-          const auto* const entry = reinterpret_cast<const LdrEntry*>(node);
-          if (entry->DllBase != nullptr) modules.push_back(static_cast<HMODULE>(entry->DllBase));
-        }
-        if (!modules.empty()) return modules;
-      }
-    }
-  }
-  return modules;  // the PEB chain was unreadable or empty: nothing to report
-#else
-  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-  if (snapshot == INVALID_HANDLE_VALUE) {
-    nr::Logf(nr::LogLevel::WARN, "could not snapshot this process's modules ({}); no NGX library can be seen", GetLastError());
-    return modules;
-  }
-  MODULEENTRY32W entry{};
-  entry.dwSize = sizeof(entry);
-  if (Module32FirstW(snapshot, &entry) != FALSE) {
-    do {
-      modules.push_back(entry.hModule);
-    } while (Module32NextW(snapshot, &entry) != FALSE);
-  }
-  CloseHandle(snapshot);
-  return modules;
-#endif
-}
-
-}  // namespace
 
 size_t HookInstaller::ScanLocked() {
   if (!started_) return 0u;
