@@ -31,7 +31,6 @@
 #include <utility>
 #include <vector>
 
-#include "NrPassBorrowTables.h"      // the runtime builds whose kernels and weights have been audited
 #include "Nvfp4Support.h"             // the asset reader, buffer allocation and error checks every loader shares
 
 #include "NrFfnV2.h"
@@ -47,8 +46,6 @@ using nvfp4::NvCheck;
 using nvfp4::ReadAsset;
 namespace fs = std::filesystem;
 
-constexpr unsigned kCreateModule = 0xad1a677d, kCreateFunction = 0xe2436e22, kLaunch = 0x24973538,
-                   kDestroyModule = 0x41c65285, kDestroyFunction = 0xdf295ea6;
 constexpr uint64_t kWqBytes = 2359296;      // either weight matrix in the kernels' layout
 constexpr unsigned kAqUnit = 576, kWqHalf = 2304;
 constexpr unsigned kMaxShared = 101376;     // the driver drops the device on a larger request instead of refusing the launch
@@ -742,16 +739,9 @@ void RecordingScope::Pin(const std::shared_ptr<void>& resource) {
 
 void* WrapNvapi(unsigned id, void* original) {
     if (!original) return original;
-    auto& s = S();
-    std::lock_guard guard(s.mutex);
-    switch (id) {
-    case kCreateModule: s.createModule = static_cast<decltype(s.createModule)>(original); return static_cast<void*>(&CreateModule);
-    case kCreateFunction: s.createFunction = static_cast<decltype(s.createFunction)>(original); return static_cast<void*>(&CreateFunction);
-    case kLaunch: s.launch = static_cast<decltype(s.launch)>(original); return static_cast<void*>(&Launch);
-    case kDestroyModule: s.destroyModule = static_cast<decltype(s.destroyModule)>(original); return static_cast<void*>(&DestroyModule);
-    case kDestroyFunction: s.destroyFunction = static_cast<decltype(s.destroyFunction)>(original); return static_cast<void*>(&DestroyFunction);
-    default: return original;
-    }
+    return nvfp4::WrapKernelNvapi(S(), id, original,
+        {static_cast<void*>(&CreateModule), static_cast<void*>(&CreateFunction), static_cast<void*>(&Launch),
+         static_cast<void*>(&DestroyModule), static_cast<void*>(&DestroyFunction)});
 }
 
 void SetLog(void (*log)(const char*)) {

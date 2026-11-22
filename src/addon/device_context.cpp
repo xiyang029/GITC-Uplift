@@ -73,11 +73,7 @@ DeviceContext::~DeviceContext() {
 }
 
 void DeviceContext::SetBlockedReason(std::string reason) {
-  if (reason == blocked_reason_) return;
-  if (!reason.empty()) {
-    nr::Logf(nr::LogLevel::WARN, "NR blocked: {}", reason);
-  }
-  blocked_reason_ = std::move(reason);
+  UpdateBlockedReason(blocked_reason_, std::move(reason));
 }
 
 void DeviceContext::SetDlssUnavailableReason(std::string reason) {
@@ -667,18 +663,9 @@ void DeviceContext::NotePlacementChange() {
 }
 
 sources::WorkLayout DeviceContext::SettleLayout(nr::Size output, Stage stage, std::chrono::steady_clock::time_point now) {
-  // Split chain: pass 1's group works at Setup's Resolution; a later group at its stage's own (Before upscaling is always pass 1's).
   const bool pass1 = Pass1Group(chain_, stage);
-  const LayoutTarget target = StageLayoutTarget(settings_, output, stage, pass1, main_snapshot_, dlss_off_.Off());
   StageState& state = stages_[static_cast<size_t>(stage)];
-  const nr::Size settled = state.settle.Update(sources::WorkSize(target.width, target.height, output), now, target.slider_held);
-  const nr::Size uniform = sources::WorkSize(settled.width, settled.height, output);  // a held/stale size cannot bypass the floor or the source bounds
-  // Foveated edge scaling (2026-10-21): NR works a grid that keeps the output centre at full density and thins toward the edges. Every NR stage warps,
-  // before upscaling included, so the player's shares of the output are carried onto `uniform`, the grid the warp lands on.
-  const nr::foveation::Plan plan = sources::FoveatedWorkPlan(
-      settings_.foveation,
-      {settings_.foveation_width, settings_.foveation_height, settings_.foveation_falloff_x, settings_.foveation_falloff_y, settings_.foveation_edge_x, settings_.foveation_edge_y},
-      output, uniform);
+  const nr::foveation::Plan plan = SettleStagePlan(settings_, output, stage, pass1, main_snapshot_, dlss_off_.Off(), state.settle, now);
   const nr::Size image = {plan.width, plan.height};
   state.work = image;
   if (pass1) work_size_ = image;
@@ -1121,7 +1108,6 @@ ContextStatus DeviceContext::Status() const {
   status.placement_line = FormatPlacementLine(placement_, main_snapshot_);
   status.frame_generation = frame_generation_.ReportedState(IsBeforeFg(facts_.fg_present_path));
   status.dlss_seen = dlss_seen_;
-  status.dlss_latch_tripped = dlss_latch_tripped_;
   status.work = work_size_;
   // The pieces of `message`, flattened for the status card ladder.
   status.blocked = blocked_reason_;

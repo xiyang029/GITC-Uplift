@@ -1,5 +1,7 @@
 #include "client/vk_client.hpp"
 
+#include "client/timeout.hpp"
+
 #include <chrono>
 #include <format>
 #include <limits>
@@ -99,9 +101,8 @@ void VkClient::Stop(std::string_view reason, NrLink& link, vk::GameHost& host) {
 }
 
 void VkClient::NoteTimeout(uint32_t* consecutive, std::string_view what, NrLink& link, vk::GameHost& host) {
-  if (++*consecutive >= bridge::MAX_CONSECUTIVE_TIMEOUTS) {
-    Stop(uplift::text::ConsecutiveTimeoutsText(what, std::chrono::milliseconds{WAIT_CAP_MS}, bridge::MAX_CONSECUTIVE_TIMEOUTS), link, host);
-  }
+  CountTimeout(*consecutive, what, std::chrono::milliseconds{WAIT_CAP_MS},
+               [&](std::string reason) { Stop(std::move(reason), link, host); });
 }
 
 bool VkClient::Import(vk::GameHost& host, HANDLE handle, nr::Size size, DXGI_FORMAT format, uint32_t bytes_per_pixel, Shared* shared,

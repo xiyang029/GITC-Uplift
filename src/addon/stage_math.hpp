@@ -7,7 +7,9 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include "addon/chain_plan.hpp"
 #include "addon/frame_config.hpp"
@@ -309,6 +311,27 @@ void ApplySessionOptions(SessionSink& session, const FrameSettings& settings, co
     settings_generation = settings.settings_generation;
     session.ResetRetries();
   }
+}
+
+// Both contexts settle and floor-limit the uniform size before applying the same foveated plan.
+[[nodiscard]] inline nr::foveation::Plan SettleStagePlan(const FrameSettings& settings, nr::Size output, Stage stage, bool pass1,
+                                                       const std::optional<ngx_hooks::CreateSnapshot>& snapshot, bool dlss_off,
+                                                       sources::WorkSizeSettle& settle, std::chrono::steady_clock::time_point now) {
+  const LayoutTarget target = StageLayoutTarget(settings, output, stage, pass1, snapshot, dlss_off);
+  const nr::Size settled = settle.Update(sources::WorkSize(target.width, target.height, output), now, target.slider_held);
+  // A held/stale size cannot bypass the floor or the source bounds.
+  const nr::Size uniform = sources::WorkSize(settled.width, settled.height, output);
+  // Every stage warps, including Before upscaling: output shares apply to the uniform grid the warp lands on.
+  return sources::FoveatedWorkPlan(settings.foveation,
+      {settings.foveation_width, settings.foveation_height, settings.foveation_falloff_x, settings.foveation_falloff_y,
+       settings.foveation_edge_x, settings.foveation_edge_y}, output, uniform);
+}
+
+// Log only a changed, nonempty block reason; an empty reason clears the previous one.
+inline void UpdateBlockedReason(std::string& current, std::string reason) {
+  if (reason == current) return;
+  if (!reason.empty()) nr::Logf(nr::LogLevel::WARN, "NR blocked: {}", reason);
+  current = std::move(reason);
 }
 
 }  // namespace uplift::addon

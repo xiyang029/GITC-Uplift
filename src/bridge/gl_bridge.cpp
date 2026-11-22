@@ -445,17 +445,7 @@ void GlBridge::ReleaseMask(gl::GameHost& host) {
 }
 
 void GlBridge::Stop(std::string reason) {
-  if (latch_.empty()) {
-    latch_ = std::move(reason);
-  }
-  // Each fence up to the highest value a wait on it was queued for; nothing waits beyond those. A refused signal (a removed private device) needs no retry:
-  // that fence already reads UINT64_MAX, above every wait. CPU-ordered has no fence, so nothing to release.
-  if (to11_ && to11_->GetCompletedValue() < waited11_) {
-    to11_->Signal(waited11_);
-  }
-  if (to12_ && to12_->GetCompletedValue() < waited12_) {
-    to12_->Signal(waited12_);
-  }
+  StopCrossApiWaits(latch_, std::move(reason), to11_.Get(), waited11_, to12_.Get(), waited12_);
 }
 
 void GlBridge::ReleaseGl(gl::GameHost& host) {

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace uplift::bridge {
 
@@ -42,5 +43,14 @@ class PrivateDeviceBridge {
   PrivateDeviceBridge() = default;
   ~PrivateDeviceBridge() = default;
 };
+
+// Release precisely the highest queued waits; removed fences already report UINT64_MAX and need no signal.
+// CPU-ordered transports have no fences. Resource teardown remains with each backend.
+inline void StopCrossApiWaits(std::string& latch, std::string reason, ID3D12Fence* to11, uint64_t waited11,
+                             ID3D12Fence* to12, uint64_t waited12) {
+  if (latch.empty()) latch = std::move(reason);
+  if (to11 && to11->GetCompletedValue() < waited11) to11->Signal(waited11);
+  if (to12 && to12->GetCompletedValue() < waited12) to12->Signal(waited12);
+}
 
 }  // namespace uplift::bridge

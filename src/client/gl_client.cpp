@@ -1,5 +1,7 @@
 #include "client/gl_client.hpp"
 
+#include "client/timeout.hpp"
+
 #include <array>
 #include <chrono>
 #include <format>
@@ -110,9 +112,8 @@ void GlClient::Stop(std::string_view reason, NrLink& link, gl::GameHost& host) {
 }
 
 void GlClient::NoteTimeout(uint32_t* consecutive, std::string_view what, NrLink& link, gl::GameHost& host) {
-  if (++*consecutive >= bridge::MAX_CONSECUTIVE_TIMEOUTS) {
-    Stop(uplift::text::ConsecutiveTimeoutsText(what, std::chrono::milliseconds{WAIT_CAP_MS}, bridge::MAX_CONSECUTIVE_TIMEOUTS), link, host);
-  }
+  CountTimeout(*consecutive, what, std::chrono::milliseconds{WAIT_CAP_MS},
+               [&](std::string reason) { Stop(std::move(reason), link, host); });
 }
 
 bool GlClient::Import(gl::GameHost& host, HANDLE handle, uint64_t allocation_bytes, nr::Size size, DXGI_FORMAT format, uint32_t bytes_per_pixel, Shared* shared,

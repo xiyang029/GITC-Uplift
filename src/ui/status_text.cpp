@@ -175,7 +175,6 @@ SetupView ResolveSetup(const SetupFacts& facts) {
     const SourcePick pass_before = runs[pass - 1u];
     row.runs = runs[pass];
     row.starts_group = (facts.split_capable && runs[pass] != pass_before);
-    view.chain_split = view.chain_split || (runs[pass] != runs[0]);
     const PassStage stored = facts.stored_stages[pass - 1u];
     const auto runs_pick = static_cast<PassStage>(static_cast<uint32_t>(runs[pass]) + 1u);
     const bool runs_as_stored = (stored == runs_pick || (stored == PassStage::SAME && runs[pass] == pass_before));

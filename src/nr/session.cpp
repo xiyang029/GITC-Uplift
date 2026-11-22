@@ -912,7 +912,6 @@ SessionStatus Session::Status() const {
   status.state = state_;
   status.legacy_runtime = host_.LegacyRuntime();
   status.passes_requested = pass_count_;
-  status.passes_live = LiveFeatureCount();
   if (const auto first = std::ranges::find_if(features_, [](const auto& feature) { return feature != nullptr; }); first != features_.end()) {
     status.capacity = (*first)->Capacity();
   }

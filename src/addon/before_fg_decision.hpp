@@ -64,7 +64,6 @@ struct BeforeFgInputs {
 struct BeforeFgDecision {
   BeforeFgState state = BeforeFgState::ORDINARY;
   bool active = false;  // Primary route activation, including measured cadence only on DX12.
-  bool outer_motion_candidate = false;
   bool clear_pending = false;
   OuterInputAction inputs = OuterInputAction::UNCHANGED;
   // nullopt retains the current note; NONE clears it.

@@ -120,4 +120,14 @@ struct ExposureReport {
 // gives, and `held_move` (AutoExposure::HeldThroughMove) when there is one.
 [[nodiscard]] std::string AutoDebugMessage(const ExposureSample& sample, color::AutoExposureMode mode, float blend, std::optional<float> held_move);
 
+// A new stage, encoding, resolved primaries or input scale invalidates the meter's previous basis.
+inline bool UpdateMeterBasis(std::optional<MeterBasis>& current, bool& snap, uint8_t stage, color::Encoding encoding,
+                             color::Primaries primaries, float input_scale) {
+  const MeterBasis next = {.stage = stage, .encoding = encoding, .primaries = color::ResolvePrimaries(primaries, encoding), .input_scale = input_scale};
+  if (current == next) return false;
+  current = next;
+  snap = true;
+  return true;
+}
+
 }  // namespace uplift::sources

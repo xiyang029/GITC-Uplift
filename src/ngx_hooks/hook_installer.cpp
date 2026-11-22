@@ -239,7 +239,6 @@ NVSDK_NGX_Result RunCreate(size_t slot, CreateCall call, NVSDK_NGX_Handle** out_
   if (!call.saved.empty() && NVSDK_NGX_FAILED(result)) {
     // A DLSS-SR override NGX rejects must never cost the game its DLSS: ask again with its own values.
     restore_quietly(parameters, &call);
-    call.override_rejected = true;
     result = create();
   } else {
     restore_quietly(parameters, &call);
@@ -1110,11 +1109,7 @@ size_t HookInstaller::ScanLocked() {
                                      .evaluate_c = with_evaluate_c,
                                      .d3d12 = hook_d3d12,
                                      .vulkan = vulkan_hooked,
-                                     .vulkan_shutdown = with_vulkan_shutdown,
-                                     .d3d12_shutdown = with_d3d12_shutdown,
-                                     .d3d11 = d3d11_hooked,
-                                     .d3d11_shutdown = with_d3d11_shutdown,
-                                     .d3d11_shutdown_all = with_d3d11_shutdown_all},
+                                     .d3d11 = d3d11_hooked},
                           .targets = std::move(created),
                           .slot = slot});
     nr::Logf(nr::LogLevel::INFO, "NGX hooks installed on {} ({} entry points; EvaluateFeature_C {}{}{}{})", name, HookedApis(installed_.back().module),

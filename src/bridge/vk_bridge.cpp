@@ -456,21 +456,11 @@ void VkBridge::ReleaseMask(vk::GameHost& host) {
 }
 
 void VkBridge::Stop(std::string reason) {
-  if (latch_.empty()) {
-    latch_ = std::move(reason);
-  }
-  // Each fence up to the highest value a wait on it was queued for; nothing waits beyond those. A refused signal (a removed private device) needs
-  // no retry: that fence already reads UINT64_MAX, above every wait. CPU-ordered has no fence, so nothing to release.
   // `to12` is the fence the game's Vulkan queue signals (imported as a timeline semaphore), so a Vulkan signal of
   // `waited12_` that is still pending then finds the value reached already, while Vulkan wants a timeline signal to exceed the current value
   // (VUID-VkSubmitInfo-pSignalSemaphores-03242). With a D3D12 fence underneath that is benign on NVIDIA's driver, and it only happens here, after a
   // latch, a device loss or destroy_device; the alternative is a private queue that waits for a signal that never comes.
-  if (to11_ && to11_->GetCompletedValue() < waited11_) {
-    to11_->Signal(waited11_);
-  }
-  if (to12_ && to12_->GetCompletedValue() < waited12_) {
-    to12_->Signal(waited12_);
-  }
+  StopCrossApiWaits(latch_, std::move(reason), to11_.Get(), waited11_, to12_.Get(), waited12_);
 }
 
 void VkBridge::RetireAll(vk::GameHost& host) {

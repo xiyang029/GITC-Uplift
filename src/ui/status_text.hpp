@@ -175,10 +175,9 @@ struct SetupView {
   std::string motion_note;
   bool stopped = false;  // SetupFacts::stopped; the highlights stay greyed too (SetupSettle never un-greys them)
   // Split chain: passes 2..10's rows ([0] is pass 2; only those below the pass count are resolved), whether passes can run at several stages
-  // here (otherwise every row is greyed with ONE_STAGE_REASON), and whether some pass runs at another stage than pass 1 (the pass trees name the stage).
+  // here (otherwise every row is greyed with ONE_STAGE_REASON); each row's starts_group marks a change of stage.
   std::array<PassStageRow, MAX_PASSES - 1u> pass_stages = {};
   bool split_capable = false;
-  bool chain_split = false;
   // The game's DLSS is Ray Reconstruction and Before upscaling may run on it here: its tip says what NR then works on.
   bool before_upscaling_on_rr = false;
 };

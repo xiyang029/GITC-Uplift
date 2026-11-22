@@ -38,7 +38,6 @@ struct SessionGroupStatus {
 struct SessionStatus {
   SessionState state = SessionState::OFF;
   uint32_t passes_requested = 1u;
-  uint32_t passes_live = 0u;
   Size capacity;
   std::optional<uint64_t> runtime_bytes;
   uint64_t bytes_per_megapixel = 0u;  // the budget's calibrated per-megapixel cost (k)

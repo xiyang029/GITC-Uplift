@@ -203,13 +203,6 @@ enum class ExposureAdapt : uint32_t {
   SMOOTH = 1u,
 };
 
-// Pedestal removal remains unavailable in the panel pending in-game validation.
-enum class PedestalRemoval : uint32_t {
-  OFF = 0u,
-  AUTO = 1u,
-  ALWAYS = 2u,
-};
-
 enum class Language : uint32_t { ENGLISH = 0u, SIMPLIFIED_CHINESE = 1u };
 
 // Split chain: pass n >= 2's "Runs at", in stored-index order. SAME runs it where the pass before it runs.
@@ -361,7 +354,6 @@ struct Settings {
   color::NeuralTransfer neural_transfer = color::NeuralTransfer::BOUNDED_RATIO;
   float chroma_clamp = 0.f;
   bool near_black_guard = false;
-  PedestalRemoval pedestal_removal = PedestalRemoval::OFF;
   bool dlss_placement_blocked = false;       // hidden: the device-removal latch
   uint32_t config_version = CONFIG_VERSION;  // hidden: the version the loaded file declared
   bool auto_retry = true;                    // retry a failed session on the backoff

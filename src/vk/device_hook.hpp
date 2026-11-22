@@ -28,10 +28,9 @@ struct DeviceRecord {
   bool ngx_ready = false;
   bool ext_buffer_device_address = false;  // native NR must resolve the EXT query and use its allocation rules on this device
   std::string ngx_missing;
-  // shaderStorageImageExtendedFormats: supported by the physical device, and on the device (the game enabled
-  // it, or Uplift's adjustment did). Native NR's encode shaders write an RG16F storage image, one of the extended formats.
+  // Physical-device support for shaderStorageImageExtendedFormats. Native NR's encode shaders write an RG16F storage image;
+  // device_hook.cpp enables the feature in the creation request when an adjustment is needed and possible.
   bool storage_extended_supported = false;
-  bool storage_extended_enabled = false;
   // The first queue family the game created a queue in that supports graphics, the family of ReShade's effect queue (its primary graphics
   // queue, vulkan_hooks_device.cpp:138-152, 762-767); UINT32_MAX when there is none or the loader could not tell.
   uint32_t graphics_family = UINT32_MAX;

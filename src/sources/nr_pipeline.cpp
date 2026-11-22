@@ -1,4 +1,8 @@
 #include "sources/nr_pipeline.hpp"
+
+#include "d3d12_barrier.hpp"
+
+#include "sources/stage_sets.hpp"
 #include "sources/after_dlss_source.hpp"
 
 #include <algorithm>
@@ -14,6 +18,7 @@
 #include "sources/pipeline_rules.hpp"
 
 namespace uplift::sources {
+using d3d::Transition;
 namespace {
 
 // Superior Scaling's fallback rule (PR #237): a degradation the card only names tersely warns once in the
@@ -39,13 +44,6 @@ constexpr uint32_t LOOK_STATE_BYTES_PER_PIXEL = 16u;
 // One readback slot per placed footprint of the 2x1 state (512 B apart, a 256 B row).
 constexpr uint64_t CHECK_STRIDE = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
 
-void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
-                D3D12_RESOURCE_STATES after) {
-  D3D12_RESOURCE_BARRIER barrier = {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE};
-  barrier.Transition = {.pResource = resource, .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                        .StateBefore = before, .StateAfter = after};
-  list->ResourceBarrier(1u, &barrier);
-}
 
 void UavBarrier(ID3D12GraphicsCommandList* list, ID3D12Resource* resource) {
   D3D12_RESOURCE_BARRIER written = {.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV, .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE};
@@ -143,13 +141,8 @@ void NrPipeline::ReleaseIntermediates() {
 }
 
 void NrPipeline::RetireSetsFrom(uint32_t first) {
-  for (uint32_t index = first; index < STAGE_SETS; ++index) {
-    StageSet* const set = &sets_[index];
-    RetireSet(set);
-    RetireLook(set);
-    RetireFaces(set);
-    RetireExposure(set);
-  }
+  RetireStageSets(*this, sets_, first, &NrPipeline::RetireSet, &NrPipeline::RetireLook,
+                  &NrPipeline::RetireFaces, &NrPipeline::RetireExposure);
 }
 
 void NrPipeline::RetireSet(StageSet* set) {
@@ -426,21 +419,7 @@ bool NrPipeline::EnsureChange(bool required) {
 }
 
 void NrPipeline::SetLookConfig(const LookConfig& config) {
-  // A new Detail radius or Stabilize mode starts the stabiliser afresh. Split chain: in every set.
-  const bool restart_stabilizer = (config.look.detail_radius != config_.look.detail_radius || config.look.stabilize != config_.look.stabilize
-                                   || config.look.stabilize_detail != config_.look.stabilize_detail);
-  // The change stabiliser's own: its τ may change freely, but switching it or reshaping with it restarts it too.
-  const bool restart_change = (!config.look.stabilize_change || !config_.look.stabilize_change
-                               || config.look.shape != config_.look.shape);
-  for (StageSet& set : sets_) {
-    if (restart_stabilizer) {
-      set.look.history_valid = false;
-    }
-    if (restart_change) {
-      set.look.change_valid = false;
-    }
-  }
-  config_ = config;
+  ApplyLookConfig(config_, config, sets_);
 }
 
 LookPlan NrPipeline::LookPlanFor(nr::Size image) const {
@@ -489,11 +468,9 @@ bool NrPipeline::EnsureLook(const LookPlan& plan) {
 }
 
 void NrPipeline::NoteMeterBasis(uint8_t stage, color::Encoding encoding, float input_scale) {
-  const MeterBasis basis = {.stage = stage, .encoding = encoding, .primaries = color::ResolvePrimaries(config_.fixes.primaries, encoding), .input_scale = input_scale};
-  if (set_->exposure.basis == basis) return;
-  set_->exposure.basis = basis;
-  set_->exposure.snap = true;
-  RetireExposureCheck(set_);
+  if (UpdateMeterBasis(set_->exposure.basis, set_->exposure.snap, stage, encoding, config_.fixes.primaries, input_scale)) {
+    RetireExposureCheck(set_);
+  }
 }
 
 NrPipeline::ExposureChoice NrPipeline::ChooseExposure(color::Encoding encoding, ID3D12Resource* game_texture, float game_factor) {

@@ -214,11 +214,7 @@ VkDlssContext::~VkDlssContext() {
 }
 
 void VkDlssContext::SetBlockedReason(std::string reason) {
-  if (reason == blocked_reason_) return;
-  if (!reason.empty()) {
-    nr::Logf(nr::LogLevel::WARN, "NR blocked: {}", reason);
-  }
-  blocked_reason_ = std::move(reason);
+  UpdateBlockedReason(blocked_reason_, std::move(reason));
 }
 
 void VkDlssContext::SetDlssUnavailableReason(std::string reason) {
@@ -672,18 +668,9 @@ nr::Size VkDlssContext::SessionFrameSize() const {
 }
 
 sources::WorkLayout VkDlssContext::SettleLayout(nr::Size output, Stage stage, std::chrono::steady_clock::time_point now) {
-  // As DeviceContext::SettleLayout: settle the target, then clamp the effective work size and FOV compression. Pass 1's group works at Setup's Resolution,
-  // a later group at its stage's own.
   const bool pass1 = Pass1Group(chain_, stage);
-  const LayoutTarget target = StageLayoutTarget(settings_, output, stage, pass1, main_snapshot_, dlss_off_.Off());
   StageState& state = stages_[static_cast<size_t>(stage)];
-  const nr::Size settled = state.settle.Update(sources::WorkSize(target.width, target.height, output), now, target.slider_held);
-  const nr::Size uniform = sources::WorkSize(settled.width, settled.height, output);
-  // Foveated edge scaling (2026-10-21), as DeviceContext::SettleLayout.
-  const nr::foveation::Plan plan = sources::FoveatedWorkPlan(
-      settings_.foveation,
-      {settings_.foveation_width, settings_.foveation_height, settings_.foveation_falloff_x, settings_.foveation_falloff_y, settings_.foveation_edge_x, settings_.foveation_edge_y},
-      output, uniform);
+  const nr::foveation::Plan plan = SettleStagePlan(settings_, output, stage, pass1, main_snapshot_, dlss_off_.Off(), state.settle, now);
   const nr::Size image = {plan.width, plan.height};
   state.work = image;
   if (pass1) work_size_ = image;
@@ -1622,7 +1609,6 @@ ContextStatus VkDlssContext::Status() const {
     status.placement_line += " (Ray Reconstruction's input)";  // NR runs before RR denoises and upscales
   }
   status.dlss_seen = dlss_seen_;
-  status.dlss_latch_tripped = dlss_latch_tripped_;
   status.work = work_size_;  // both placements settle a work size (SettleLayout)
   status.blocked = blocked_reason_;
   status.claimed_elsewhere = claimed_elsewhere;

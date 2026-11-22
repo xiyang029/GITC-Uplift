@@ -57,7 +57,6 @@ void ApplyOuterInputs(FrameSettings& settings, FrameFacts& facts, OuterInputActi
 BeforeFgDecision DecideBeforeFg(const BeforeFgInputs& inputs) {
   BeforeFgDecision decision;
   decision.active = BeforeFgActive(inputs);
-  decision.outer_motion_candidate = BeforeFgOuterMotionCandidate(inputs);
 
   if (inputs.route == BeforeFgRoute::UNSUPPORTED_BRIDGE) {
     decision.state = decision.active ? BeforeFgState::UNAVAILABLE : BeforeFgState::ORDINARY;

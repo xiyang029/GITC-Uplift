@@ -31,7 +31,6 @@ struct CreateCall {
   // that called the export: the game, an interposer, or a runtime Uplift loaded itself.
   const void* caller = nullptr;
   std::vector<SavedParameter> saved;  // BeforeCreate records every value it changes here
-  bool override_rejected = false;     // the create failed with the overrides, so it ran again without them
   std::optional<CreateSnapshot> submitted;  // dimensions submitted for the final original-call attempt; other metadata is read after creation
 };
 
@@ -115,11 +114,7 @@ struct HookedModule {
   bool evaluate_c = false;  // the module exports D3D12 EvaluateFeature_C, and it is hooked too
   bool d3d12 = false;       // the D3D12 entry points are hooked
   bool vulkan = false;      // the Vulkan entry points are hooked
-  bool vulkan_shutdown = false;  // NVSDK_NGX_VULKAN_Shutdown1 is hooked (Uplift releases NR on a device before it)
-  bool d3d12_shutdown = false;   // NVSDK_NGX_D3D12_Shutdown1 is hooked (the same, on the game's Direct3D 12 device)
   bool d3d11 = false;               // the Direct3D 11 entry points are hooked
-  bool d3d11_shutdown = false;      // NVSDK_NGX_D3D11_Shutdown1 is hooked
-  bool d3d11_shutdown_all = false;  // the device-less NVSDK_NGX_D3D11_Shutdown is hooked (Final Fantasy XV's DLSS 1 SDK has no Shutdown1)
 };
 
 // 1.1.2 (RTX40MFG-Unlock): where another tool's Windows hotpatch on `entry` leads, or null. The hotpatch is the classic one: `jmp short -7` (EB F9) at

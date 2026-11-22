@@ -67,6 +67,7 @@ Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnin
       warnings->push_back(std::move(line));
     }
   };
+  // Unknown keys are ignored, including the retired PedestalRemoval placeholder (it never affected rendering).
   for (const SettingDescriptor& descriptor : SettingsSchema()) {
     const std::optional<std::string> text = store.Get(descriptor.key);
     if (!text) continue;

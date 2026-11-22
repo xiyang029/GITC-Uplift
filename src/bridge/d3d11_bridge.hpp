@@ -1,5 +1,8 @@
 #pragma once
 
+#include "d3d12_barrier.hpp"
+#include "d3d11_texture.hpp"
+
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -34,8 +37,7 @@ inline constexpr D3D12_RESOURCE_STATES SHADER_READ =
 inline constexpr std::string_view D3D11_BRIDGE_LABEL = "Direct3D 11";
 
 // A whole-resource transition barrier.
-void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
-                D3D12_RESOURCE_STATES after);
+using d3d::Transition;
 
 // The FrameHost of a bridged recording. The private list, with the shared back buffer as the target.
 class ListFrameHost final : public addon::FrameHost {
@@ -128,8 +130,8 @@ struct DlssHandoff {
   DlssSkip skipped = DlssSkip::NONE;
   std::string problem;              // UNSUPPORTED_FORMAT: why, for Setup and the log
 };
-// A 2D texture's description; nullopt for anything else (was d3d11_bridge.cpp's TextureDesc).
-[[nodiscard]] std::optional<D3D11_TEXTURE2D_DESC> TextureDesc11(ID3D11Resource* resource);
+// A 2D texture's description; nullopt for anything else.
+using d3d::TextureDesc11;
 // `region` inside `texture`, or its whole size when `region` is empty; empty when it is not a 2D texture or the region lies outside it.
 [[nodiscard]] nr::Rect ResolveRegion11(ID3D11Resource* texture, nr::Rect region);
 

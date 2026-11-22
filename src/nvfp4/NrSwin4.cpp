@@ -39,8 +39,6 @@ using nvfp4::NvCheck;
 using nvfp4::ReadAsset;
 namespace fs = std::filesystem;
 
-constexpr unsigned kCreateModule = 0xad1a677d, kCreateFunction = 0xe2436e22, kLaunch = 0x24973538,
-                   kDestroyModule = 0x41c65285, kDestroyFunction = 0xdf295ea6;
 constexpr unsigned kLayers = 44;            // fused Swin blocks of one Model A evaluation
 constexpr size_t kMaxKnown = kLayers * 16;  // weight-record addresses remembered per device
 constexpr unsigned kMaxSets = 14;            // weight sets: swin4.bin, swin4_trained.bin, swin4_set2.bin ... swin4_set13.bin
@@ -140,14 +138,6 @@ struct Device {
     std::array<std::array<Kernel, 5>, 4> smallKernels{};    // ... one-wave small-map builds
     std::array<std::array<Kernel, 5>, 4> partialKernels{};
     std::map<unsigned, Kernel> levelKernels;              // Level4 / PrePair4 / PostPair4, hidden, stages
-    ComPtr<ID3D12Resource> probe, probeReadback;
-    ComPtr<ID3D12Resource> probeSamples, probeSamplesReadback, probeProjection;
-    uint64_t probeSampleCapacity = 0, probeSampleBytes = 0;
-    std::array<unsigned char, 184> probeParams{};
-    std::array<unsigned char, 272> probePreParams{};
-    bool probeCaptured = false;
-    bool probeProjectionDiagnostic = true;
-    uint64_t probePreHistory = 0, probePreMotion = 0;
     std::map<uint64_t, unsigned> known;         // address of a runtime weight record -> block number (0..43, kPost, kPre)
 };
 // What one command list is in the middle of. An evaluation of the model starts with cc_cb_clear.
@@ -175,22 +165,10 @@ struct ListState {
 struct Target { ID3D12Device* device; NVDX_ObjectHandle module; Kind kind; unsigned refs; };
 
 struct State {
-    bool probeEnabled = false;
-    struct LaunchTrace {
-        struct Row { std::string name; int plan = -1; unsigned grid[3]{}, block[3]{}; };
-        bool enabled = false, active = false, pending = false;
-        ID3D12GraphicsCommandList* commands = nullptr;
-        ComPtr<ID3D12QueryHeap> heap; ComPtr<ID3D12Resource> readback;
-        uint64_t frequency = 0;
-        std::map<NVDX_ObjectHandle, std::string> names;
-        std::vector<Row> rows;
-    } trace;
     std::recursive_mutex mutex;
     bool enabled = false;
     bool paused = false;                        // Pause(): this evaluation is the runtime's
     unsigned passSet = kDefaultSet;             // UseSet(): the set of the evaluations that follow
-    std::vector<unsigned> evaluationSets;       // optional harness overrides, consumed by UseSet
-    size_t evaluationSetAt = 0;
     Options options;
     Manifest manifest;
     std::string waiting = "off", notice;        // what Status() says before anything was replaced; why launches were last left alone
@@ -848,7 +826,6 @@ NvAPI_Status __cdecl CreateFunction(ID3D12Device* device, NVDX_ObjectHandle modu
     if (result == NVAPI_OK && name && out) {
         const Kind kind = KindOf(name);
         std::lock_guard guard(s.mutex);
-        if (s.trace.enabled) s.trace.names[*out] = name;
         const auto found = s.targets.find(*out);
         if (!kind.swin && !kind.clear && !kind.post && !kind.pre && !kind.probePost) {
             if (found != s.targets.end()) s.targets.erase(found);      // a handle value can be reused after its function was destroyed
@@ -867,80 +844,6 @@ NvAPI_Status __cdecl CreateFunction(ID3D12Device* device, NVDX_ObjectHandle modu
         }
     }
     return result;
-}
-
-void RecordPostProbe(State& s, ID3D12GraphicsCommandList* commands, ID3D12Device* device, const NVAPI_CU_KERNEL_LAUNCH_PARAMS& native) {
-    if (!s.probeEnabled || !native.pParams || (native.paramSize != 184 && native.paramSize!=312)) return;
-    auto& d=s.devices[device];auto& k=d.levelKernels[0xff040000u];
-    if (!k.function) {
-        auto cubin=ReadAsset(s.options.assets/"post_probe.cubin");
-        NvCheck(s.createModule(device,cubin.data(),unsigned(cubin.size()),&k.module),"post probe module");
-        NvCheck(s.createFunction(device,k.module,"nr_post_probe",&k.function),"post probe function");
-    }
-    if (!d.probe) {
-        d.probe=CreateBuffer(device,256,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        d.probeReadback=CreateBuffer(device,256,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
-    }
-    struct alignas(8) P { unsigned char original[184]; uint64_t out; } p{};
-    memcpy(p.original,native.pParams,184);memcpy(d.probeParams.data(),native.pParams,184);p.out=d.probe->GetGPUVirtualAddress();
-    d.probeProjectionDiagnostic=native.paramSize==184;
-    NVAPI_CU_KERNEL_LAUNCH_PARAMS launch{};launch.hFunction=k.function;launch.pParams=&p;launch.paramSize=sizeof p;
-    launch.gridDim={1,1,1};launch.blockDim={1,1,1};LeaveWide(s,commands);UavBarrier(commands);
-    NvCheck(s.launch(commands,&launch,1),"post probe launch");UavBarrier(commands);
-    D3D12_RESOURCE_BARRIER transition{};transition.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    transition.Transition={d.probe.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE};
-    commands->ResourceBarrier(1,&transition);commands->CopyBufferRegion(d.probeReadback.Get(),0,d.probe.Get(),0,32);
-    std::swap(transition.Transition.StateBefore,transition.Transition.StateAfter);commands->ResourceBarrier(1,&transition);
-    d.probeCaptured=true;
-    d.probeSampleBytes=0;
-    uint64_t history,motion;int32_t clamp,width,height;
-    memcpy(&history,p.original+88,8);memcpy(&motion,p.original+96,8);memcpy(&clamp,p.original+52,4);
-    memcpy(&width,p.original+172,4);memcpy(&height,p.original+176,4);
-    if (!clamp || width<=0 || height<=0 || width>8192 || height>8192) return;
-    auto& sample=d.levelKernels[0xff040001u];
-    if (!sample.function) {
-        auto cubin=ReadAsset(s.options.assets/"post_probe.cubin");
-        NvCheck(s.createModule(device,cubin.data(),unsigned(cubin.size()),&sample.module),"post sample module");
-        NvCheck(s.createFunction(device,sample.module,"nr_post_sample",&sample.function),"post sample function");
-    }
-    if (!d.probeProjection) {
-        auto bytes=ReadAsset(s.options.assets/"post_probe_projection.bin");
-        d.probeProjection=CreateBuffer(device,(bytes.size()+255)/256*256,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
-        void* dst=nullptr;Check(d.probeProjection->Map(0,nullptr,&dst),"post probe projection upload");memcpy(dst,bytes.data(),bytes.size());d.probeProjection->Unmap(0,nullptr);
-    }
-    const uint64_t count=uint64_t((width+3)/4)*((height+3)/4),bytes=count*64;
-    if (d.probeSampleCapacity<bytes) {
-        // Harness drains every frame before another capture; old buffers cannot still be in use.
-        d.probeSamples=CreateBuffer(device,(bytes+255)/256*256,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        d.probeSamplesReadback=CreateBuffer(device,(bytes+255)/256*256,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
-        d.probeSampleCapacity=bytes;
-    }
-    struct alignas(8) Sample {unsigned char original[184];uint64_t out;uint32_t phase,pad;} sp{};
-    memcpy(sp.original,p.original,184);sp.out=d.probeSamples->GetGPUVirtualAddress();
-    auto capture=launch;capture.hFunction=sample.function;capture.pParams=&sp;capture.paramSize=sizeof sp;
-    capture.gridDim={unsigned((count+255)/256),1,1};capture.blockDim={256,1,1};
-    unsigned char rawParams[184];memcpy(rawParams,p.original,184);
-    const float one=1.f;const uint64_t zero=0;const uint32_t off=0;
-    memcpy(rawParams+48,&one,4);memcpy(rawParams+52,&off,4);memcpy(rawParams+56,&zero,8);
-    auto raw=native;raw.pParams=rawParams;
-    if(native.paramSize==312) {
-        // The extended kernel writes raw temporal history at common surface +16,
-        // then intensity-composed output at +192. Observe the actual raw surface;
-        // do not reinterpret the extended parameter block or its projection.
-        NvCheck(s.launch(commands,&native,1),"post intensity diagnostic replay");UavBarrier(commands);
-        for(unsigned phase:{0u,2u}) {
-            sp.phase=phase;NvCheck(s.launch(commands,&capture,1),"post intensity history sample");UavBarrier(commands);
-        }
-    } else for (unsigned phase=0;phase<3;++phase) {
-        if (phase==1) {const uint64_t w=d.probeProjection->GetGPUVirtualAddress();memcpy(rawParams+24,&w,8);}
-        NvCheck(s.launch(commands,phase==2?&native:&raw,1),"post diagnostic replay");UavBarrier(commands);
-        sp.phase=phase;NvCheck(s.launch(commands,&capture,1),"post diagnostic sample");UavBarrier(commands);
-    }
-    transition.Transition={d.probeSamples.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE};
-    commands->ResourceBarrier(1,&transition);commands->CopyBufferRegion(d.probeSamplesReadback.Get(),0,d.probeSamples.Get(),0,bytes);
-    std::swap(transition.Transition.StateBefore,transition.Transition.StateAfter);commands->ResourceBarrier(1,&transition);
-    d.probeSampleBytes=bytes;
-    // The caller now records the actual POST launch again before any consumer.
 }
 
 NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count) {
@@ -969,23 +872,12 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
     ListState* list = known != s.lists.end() ? &known->second : nullptr;
     if(kind.probePost) {
         if(list && list->thinPreUsed) { Notice(s,"Thin4 requires the common 184-byte POST; extended intensity variant refused"); return NVAPI_ERROR; }
-        if(s.probeEnabled)RecordPostProbe(s,commands,target->device,*kernels);
         LeaveWide(s,commands);
         return s.launch(commands,kernels,count);
     }
     if (kind.post || kind.pre) {
         if (kind.pre && list && kernels->pParams && kernels->paramSize == 272) {
             memcpy(list->thinPreParams.data(),kernels->pParams,272); list->thinPreCaptured = true;
-        }
-        if (kind.pre && s.probeEnabled && kernels->pParams && kernels->paramSize==272) {
-            auto& d=s.devices[target->device];
-            memcpy(d.probePreParams.data(),kernels->pParams,272);
-            memcpy(&d.probePreHistory,static_cast<const unsigned char*>(kernels->pParams)+8,8);
-            memcpy(&d.probePreMotion,static_cast<const unsigned char*>(kernels->pParams)+16,8);
-        }
-        if (kind.post && s.probeEnabled) {
-            try { RecordPostProbe(s,commands,target->device,*kernels); }
-            catch (const std::exception& error) { Notice(s,std::string("post probe failed: ")+error.what()); }
         }
         // Each end may have a Pre/PostPair4 record; otherwise either can use its native FP8 record.
         // The input block's parameter block grew by 8 bytes in 310.9.16 (264 -> 272), moving its weight pointer.
@@ -1039,25 +931,6 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                     auto own=*kernels; own.hFunction=function; own.pParams=params; own.paramSize=sizeThin;
                     own.gridDim={unsigned((w/8+3)/4),unsigned(h/8),1}; own.blockDim={32,4,1};
                     LeaveWide(s,commands); UavBarrier(commands);
-                    // Checker-only isolated comparison. The enclosing trace frame is the
-                    // last measured frame; the ordinary chosen launch below always runs last.
-                    // This uses the native process so other GPU work yields during timing.
-                    char bench[8]{}; GetEnvironmentVariableA("NR_THIN_ABBA",bench,sizeof bench);
-                    if (bench[0]=='1' && s.trace.active && s.trace.commands==commands) {
-                        auto& trace=s.trace;
-                        for(unsigned pair=0;pair<16;++pair)for(unsigned part=0;part<2;++part) {
-                            const bool custom=((pair&1u)^part)!=0;
-                            if(trace.rows.size()>=500)throw std::runtime_error("Thin4 benchmark trace capacity");
-                            State::LaunchTrace::Row row;row.name=std::string("ThinAB ")+(kind.pre?"PRE ":"POST ")+(custom?"Thin4":"FP8");row.plan=-2;
-                            const auto& launch=custom?own:*kernels;
-                            row.grid[0]=launch.gridDim.x;row.grid[1]=launch.gridDim.y;row.grid[2]=1;
-                            row.block[0]=launch.blockDim.x;row.block[1]=launch.blockDim.y;row.block[2]=1;
-                            const unsigned q=unsigned(trace.rows.size());trace.rows.push_back(std::move(row));
-                            commands->EndQuery(trace.heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,1+2*q);
-                            NvCheck(s.launch(commands,&launch,1),"Thin4 benchmark launch");UavBarrier(commands);
-                            commands->EndQuery(trace.heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,2+2*q);
-                        }
-                    }
                     const auto status=s.launch(commands,&own,1); UavBarrier(commands);
                     if (status==NVAPI_OK) { ++(kind.pre?s.preReplaced:s.postReplaced); if(kind.pre)list->thinPreUsed=true; }
                     return status;
@@ -1205,31 +1078,6 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
     }
 }
 
-NvAPI_Status __cdecl TraceLaunch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count) {
-    auto& s=S(); std::lock_guard guard(s.mutex); auto& t=s.trace;
-    if (!t.active || commands!=t.commands) return Launch(commands,kernels,count);
-    if (!kernels || count!=1 || t.rows.size()>=500) throw std::runtime_error("Checker launch trace capacity/chain mismatch");
-    State::LaunchTrace::Row row;
-    const auto name=t.names.find(kernels->hFunction);row.name=name==t.names.end()?"unmapped":name->second;
-    row.grid[0]=kernels->gridDim.x;row.grid[1]=kernels->gridDim.y;row.grid[2]=kernels->gridDim.z;
-    row.block[0]=kernels->blockDim.x;row.block[1]=kernels->blockDim.y;row.block[2]=kernels->blockDim.z;
-    const auto target=s.targets.find(kernels->hFunction);
-    if (target!=s.targets.end()) {
-        if (target->second.kind.pre) row.plan=0;
-        else if (target->second.kind.post || target->second.kind.probePost) row.plan=151;
-        else if (target->second.kind.swin && kernels->pParams && kernels->paramSize>=24) {
-            uint64_t weights=0;memcpy(&weights,static_cast<const unsigned char*>(kernels->pParams)+16,8);
-            const auto& known=s.devices[target->second.device].known;const auto found=known.find(weights);
-            if(found!=known.end() && found->second<kLayers) row.plan=int(s.manifest.layers[found->second].index);
-        }
-    }
-    const unsigned index=unsigned(t.rows.size());t.rows.push_back(std::move(row));
-    commands->EndQuery(t.heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,1+2*index);
-    const auto result=Launch(commands,kernels,count);
-    commands->EndQuery(t.heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,2+2*index);
-    return result;
-}
-
 NvAPI_Status __cdecl DestroyFunction(ID3D12Device* device, NVDX_ObjectHandle function) {
     auto& s = S();
     const auto result = s.destroyFunction(device, function);
@@ -1254,16 +1102,9 @@ NvAPI_Status __cdecl DestroyModule(ID3D12Device* device, NVDX_ObjectHandle modul
 
 void* WrapNvapi(unsigned id, void* original) {
     if (!original) return original;
-    auto& s = S();
-    std::lock_guard guard(s.mutex);
-    switch (id) {
-    case kCreateModule: s.createModule = static_cast<decltype(s.createModule)>(original); return static_cast<void*>(&CreateModule);
-    case kCreateFunction: s.createFunction = static_cast<decltype(s.createFunction)>(original); return static_cast<void*>(&CreateFunction);
-    case kLaunch: s.launch = static_cast<decltype(s.launch)>(original); return s.trace.enabled ? static_cast<void*>(&TraceLaunch) : static_cast<void*>(&Launch);
-    case kDestroyModule: s.destroyModule = static_cast<decltype(s.destroyModule)>(original); return static_cast<void*>(&DestroyModule);
-    case kDestroyFunction: s.destroyFunction = static_cast<decltype(s.destroyFunction)>(original); return static_cast<void*>(&DestroyFunction);
-    default: return original;
-    }
+    return nvfp4::WrapKernelNvapi(S(), id, original,
+        {static_cast<void*>(&CreateModule), static_cast<void*>(&CreateFunction), static_cast<void*>(&Launch),
+         static_cast<void*>(&DestroyModule), static_cast<void*>(&DestroyFunction)});
 }
 
 void SetLog(void (*log)(const char*)) {
@@ -1309,8 +1150,7 @@ void Pause(bool paused) {
 unsigned UseSet(unsigned set) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
-    const unsigned overrideSet = s.evaluationSetAt < s.evaluationSets.size() ? s.evaluationSets[s.evaluationSetAt++] : kDefaultSet;
-    s.passSet = overrideSet == kDefaultSet ? set : overrideSet;
+    s.passSet = set;
     return s.passSet;
 }
 

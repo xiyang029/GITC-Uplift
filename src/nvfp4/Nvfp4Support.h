@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -48,6 +49,32 @@ inline Microsoft::WRL::ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device,
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     Check(device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&resource)), "NVFP4 buffer allocation");
     return resource;
+}
+
+// Three full model wrappers share these entry points; their state and detours remain independent.
+struct KernelDetours {
+    void* createModule;
+    void* createFunction;
+    void* launch;
+    void* destroyModule;
+    void* destroyFunction;
+};
+
+inline constexpr unsigned kCreateModule = 0xad1a677d, kCreateFunction = 0xe2436e22, kLaunch = 0x24973538,
+                          kDestroyModule = 0x41c65285, kDestroyFunction = 0xdf295ea6;
+
+template <typename State>
+void* WrapKernelNvapi(State& s, unsigned id, void* original, const KernelDetours& detours) {
+    if (!original) return original;
+    std::lock_guard guard(s.mutex);
+    switch (id) {
+    case kCreateModule: s.createModule = static_cast<decltype(s.createModule)>(original); return detours.createModule;
+    case kCreateFunction: s.createFunction = static_cast<decltype(s.createFunction)>(original); return detours.createFunction;
+    case kLaunch: s.launch = static_cast<decltype(s.launch)>(original); return detours.launch;
+    case kDestroyModule: s.destroyModule = static_cast<decltype(s.destroyModule)>(original); return detours.destroyModule;
+    case kDestroyFunction: s.destroyFunction = static_cast<decltype(s.destroyFunction)>(original); return detours.destroyFunction;
+    default: return original;
+    }
 }
 
 }  // namespace nvfp4

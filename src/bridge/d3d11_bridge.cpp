@@ -19,22 +19,6 @@ constexpr ULONGLONG PENDING_WAIT_MS = 2000u;  // the destructor's wait for the g
 // Bytes per texel of the motion share: DXGI_FORMAT_R16G16_FLOAT, two 16-bit channels.
 constexpr uint32_t MOTION_BYTES_PER_TEXEL = 4u;
 
-// The description behind a D3D11 resource; nullopt for anything that is not a 2D texture. Public (the DLSS hand-off reads DLSS's textures).
-std::optional<D3D11_TEXTURE2D_DESC> TextureDesc11(ID3D11Resource* resource) {
-  ComPtr<ID3D11Texture2D> texture;
-  if (resource == nullptr || FAILED(resource->QueryInterface(IID_PPV_ARGS(&texture)))) return std::nullopt;
-  D3D11_TEXTURE2D_DESC description = {};
-  texture->GetDesc(&description);
-  return description;
-}
-
-void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
-                D3D12_RESOURCE_STATES after) {
-  D3D12_RESOURCE_BARRIER barrier = {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE};
-  barrier.Transition = {.pResource = resource, .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, .StateBefore = before, .StateAfter = after};
-  list->ResourceBarrier(1u, &barrier);
-}
-
 // Only the CPU unit target defines UPLIFT_D3D11_BRIDGE_CPU_TEST and supplies Create; add-on builds use this factory.
 #if !defined(UPLIFT_D3D11_BRIDGE_CPU_TEST)
 std::unique_ptr<D3D11Bridge> D3D11Bridge::Create(ID3D11Device* device, ComPtr<ID3D12Device>* created,

@@ -392,12 +392,10 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       loader->get_physical_device_features(physical, &supported);
     }
     record.storage_extended_supported = (supported.shaderStorageImageExtendedFormats == VK_TRUE);
-    record.storage_extended_enabled = storage_extended_by_game;
     if (config.adjust && record.ngx_ready && record.storage_extended_supported && !storage_extended_by_game && !features2) {
       features = (info->pEnabledFeatures != nullptr ? *info->pEnabledFeatures : VkPhysicalDeviceFeatures{});
       features.shaderStorageImageExtendedFormats = VK_TRUE;
       adjusted.pEnabledFeatures = &features;
-      record.storage_extended_enabled = true;
       features_added = true;
       added_text += (added_text.empty() ? "" : ", ");
       added_text += "shaderStorageImageExtendedFormats";
@@ -413,7 +411,6 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
       without_ngx_record.ngx_ready = lacks.empty();
       without_ngx_record.ext_buffer_device_address = (game_ext_address && buffer_device_address);
       without_ngx_record.ngx_missing = std::move(lacks);
-      without_ngx_record.storage_extended_enabled = (storage_extended_by_game || without_ngx_features);
       without_ngx_added_text = added_text;
       if (features_added && !without_ngx_features) {
         without_ngx_added_text.resize(without_ngx_added_text.size() - std::string_view("shaderStorageImageExtendedFormats").size());
@@ -480,7 +477,6 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     record.timeline = false;
     record.ngx_ready = false;
     record.ext_buffer_device_address = false;
-    record.storage_extended_enabled = false;
     added_text.clear();
 #if defined(_WIN64)
     ngx_added = false;
@@ -527,7 +523,6 @@ VkResult VKAPI_CALL CreateDeviceDetour(VkPhysicalDevice physical, const VkDevice
     record.ext_buffer_device_address = false;
     record.ngx_ready = false;  // without the timeline feature it may have added, native NR is not known to work here
     record.ngx_missing = "Uplift's device adjustment (the driver refused it)";
-    record.storage_extended_enabled = false;
   }
   if (reservation.counted) {
     g_creations_under_way.fetch_sub(1u, std::memory_order_acq_rel);  // the original (and its retry) returned: no creation is under way for NoteProcessExit

@@ -40,8 +40,6 @@ using nvfp4::NvCheck;
 using nvfp4::ReadAsset;
 namespace fs = std::filesystem;
 
-constexpr unsigned kCreateModule = 0xad1a677d, kCreateFunction = 0xe2436e22, kLaunch = 0x24973538,
-                   kDestroyModule = 0x41c65285, kDestroyFunction = 0xdf295ea6;
 constexpr unsigned kMaxParams = 512;        // a parameter block, the runtime's or ours
 constexpr unsigned kMaxPartners = 8;
 // The output block's history blend weight, float16 0.7397, the value the 4-bit models expect. The runtime
@@ -128,9 +126,6 @@ struct Device {
     std::vector<ComPtr<IUnknown>> parked;       // what an upload that did not finish may still be using; freed with the device
     std::map<uint64_t, std::pair<unsigned, unsigned>> known;            // address of a runtime weight record -> family, slot
     NVDX_ObjectHandle poolModule = nullptr, poolKernel = nullptr, unpoolKernel = nullptr;
-    NVDX_ObjectHandle poolCapture = nullptr;
-    Buffer poolProbeFull, poolProbe, poolReadback;
-    unsigned poolProbeH=0, poolProbeW=0;
     // Stable per-runtime-buffer and pooled-count allocations, retained for recorded command lists.
     std::map<std::pair<uint64_t, unsigned>, Buffer> poolBuffers;
     struct SideNative { Buffer weights; ComPtr<ID3D12Resource> upload; NVDX_ObjectHandle module=nullptr,function=nullptr; };
@@ -809,19 +804,6 @@ int PoolRewrite(State& s, ListState& list, Target& target, ID3D12GraphicsCommand
         p.h=r.h; p.w=r.w; p.tokens=((r.h+1)/2)*((r.w+1)/2); p.full=r.input;
         p.base=PoolBuffer(d,target.device,r.input,p.tokens);
         struct Params { uint64_t full,stream,base,out; unsigned h,w; } args{p.full,PoolBuffer(d,target.device,r.output,p.tokens),p.base,0,p.h,p.w};
-        if (GetEnvironmentVariableA("NR_VIT_POOL_PROBE",nullptr,0)) {
-            if (!d.poolProbeFull.resource || d.poolProbeH!=p.h || d.poolProbeW!=p.w) {
-                if(d.poolProbeFull.resource)throw std::runtime_error("pool probe supports one size per checker process");
-                d.poolProbeH=p.h;d.poolProbeW=p.w;
-                d.poolProbeFull.bytes=uint64_t(p.h)*p.w*1024;
-                d.poolProbe.bytes=2*d.poolProbeFull.bytes+uint64_t((p.tokens+127)/128)*128*1024*2;
-                d.poolProbeFull.resource=CreateBuffer(target.device,d.poolProbeFull.bytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                d.poolProbe.resource=CreateBuffer(target.device,d.poolProbe.bytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                d.poolReadback.resource=CreateBuffer(target.device,d.poolProbe.bytes,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST);
-                NvCheck(s.createFunction(target.device,d.poolModule,"nr_vit_pool_capture",&d.poolCapture),"pool capture");
-            }
-            args.out=d.poolProbeFull.Address();
-        }
         out=in;out.hFunction=d.poolKernel;out.pParams=&args;out.paramSize=sizeof args;
         out.gridDim={unsigned((p.tokens+127)/128*128*1024/256),1,1};out.blockDim={256,1,1};out.dynSharedMemBytes=0;
         PoolBarrier(commands);NvCheck(s.launch(commands,&out,1),"pooled repack");PoolBarrier(commands);
@@ -837,15 +819,6 @@ int PoolRewrite(State& s, ListState& list, Target& target, ID3D12GraphicsCommand
         out=in;out.hFunction=d.unpoolKernel;out.pParams=&args;out.paramSize=sizeof args;
         out.gridDim={unsigned((uint64_t(p.h)*p.w*1024+255)/256),1,1};out.blockDim={256,1,1};out.dynSharedMemBytes=0;
         PoolBarrier(commands);NvCheck(s.launch(commands,&out,1),"unpooled repack");PoolBarrier(commands);
-        if (d.poolProbe.resource) {
-            struct Capture { uint64_t full,stream,base,dump;unsigned h,w;uint64_t result; } capture{d.poolProbeFull.Address(),args.stream,p.base,d.poolProbe.Address(),p.h,p.w,ptr[1]};
-            auto launch=out;launch.hFunction=d.poolCapture;launch.pParams=&capture;launch.paramSize=sizeof capture;
-            NvCheck(s.launch(commands,&launch,1),"pool diagnostic");PoolBarrier(commands);
-            D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            b.Transition={d.poolProbe.resource.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE};
-            commands->ResourceBarrier(1,&b);commands->CopyBufferRegion(d.poolReadback.resource.Get(),0,d.poolProbe.resource.Get(),0,d.poolProbe.bytes);
-            std::swap(b.Transition.StateBefore,b.Transition.StateAfter);commands->ResourceBarrier(1,&b);
-        }
         p.active=false;return 2;
     }
     unsigned dims=0;
@@ -1089,16 +1062,9 @@ std::string Groups(unsigned family, unsigned mask) {
 
 void* WrapNvapi(unsigned id, void* original) {
     if (!original) return original;
-    auto& s = S();
-    std::lock_guard guard(s.mutex);
-    switch (id) {
-    case kCreateModule: s.createModule = static_cast<decltype(s.createModule)>(original); return static_cast<void*>(&CreateModule);
-    case kCreateFunction: s.createFunction = static_cast<decltype(s.createFunction)>(original); return static_cast<void*>(&CreateFunction);
-    case kLaunch: s.launch = static_cast<decltype(s.launch)>(original); return static_cast<void*>(&Launch);
-    case kDestroyModule: s.destroyModule = static_cast<decltype(s.destroyModule)>(original); return static_cast<void*>(&DestroyModule);
-    case kDestroyFunction: s.destroyFunction = static_cast<decltype(s.destroyFunction)>(original); return static_cast<void*>(&DestroyFunction);
-    default: return original;
-    }
+    return nvfp4::WrapKernelNvapi(S(), id, original,
+        {static_cast<void*>(&CreateModule), static_cast<void*>(&CreateFunction), static_cast<void*>(&Launch),
+         static_cast<void*>(&DestroyModule), static_cast<void*>(&DestroyFunction)});
 }
 
 void SetLog(void (*log)(const char*)) {
@@ -1220,7 +1186,6 @@ void ReleaseDevice(ID3D12Device* device) {
         // On a lost device these calls fail, which is fine: the objects die with it.
         if (s.destroyFunction && found->second.poolKernel) s.destroyFunction(device,found->second.poolKernel);
         if (s.destroyFunction && found->second.unpoolKernel) s.destroyFunction(device,found->second.unpoolKernel);
-        if (s.destroyFunction && found->second.poolCapture) s.destroyFunction(device,found->second.poolCapture);
         if (s.destroyModule && found->second.poolModule) s.destroyModule(device,found->second.poolModule);
         for(auto& [key,side]:found->second.sides) {
             if(s.destroyFunction && side.function)s.destroyFunction(device,side.function);

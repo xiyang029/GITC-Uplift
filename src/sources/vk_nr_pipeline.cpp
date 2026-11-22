@@ -1,5 +1,7 @@
 #include "sources/vk_nr_pipeline.hpp"
 
+#include "sources/stage_sets.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -160,31 +162,12 @@ bool VkNrPipeline::MotionFormatReadable(VkFormat format) {
 }
 
 void VkNrPipeline::SetLookConfig(const LookConfig& config) {
-  // A new Detail radius or Stabilize mode starts the stabiliser afresh. Split chain: in every set.
-  const bool restart_stabilizer = (config.look.detail_radius != config_.look.detail_radius || config.look.stabilize != config_.look.stabilize
-                                   || config.look.stabilize_detail != config_.look.stabilize_detail);
-  // The change stabiliser's own: its τ may change freely, but switching it or reshaping with it restarts it too.
-  const bool restart_change = (!config.look.stabilize_change || !config_.look.stabilize_change
-                               || config.look.shape != config_.look.shape);
-  for (StageSet& set : sets_) {
-    if (restart_stabilizer) {
-      set.look.history_valid = false;
-    }
-    if (restart_change) {
-      set.look.change_valid = false;
-    }
-  }
-  config_ = config;
+  ApplyLookConfig(config_, config, sets_);
 }
 
 void VkNrPipeline::RetireSetsFrom(uint32_t first) {
-  for (uint32_t index = first; index < STAGE_SETS; ++index) {
-    StageSet* const set = &sets_[index];
-    RetireSet(set);
-    RetireLook(set);
-    RetireFaces(set);
-    RetireExposure(set);
-  }
+  RetireStageSets(*this, sets_, first, &VkNrPipeline::RetireSet, &VkNrPipeline::RetireLook,
+                  &VkNrPipeline::RetireFaces, &VkNrPipeline::RetireExposure);
 }
 
 void VkNrPipeline::RetireSet(StageSet* set) {
@@ -676,11 +659,9 @@ color::VkSampledView VkNrPipeline::GameExposureView(const NVSDK_NGX_Resource_VK*
 }
 
 void VkNrPipeline::NoteMeterBasis(uint8_t stage, color::Encoding encoding, float input_scale) {
-  const MeterBasis basis = {.stage = stage, .encoding = encoding, .primaries = color::ResolvePrimaries(config_.fixes.primaries, encoding), .input_scale = input_scale};
-  if (set_->exposure.basis == basis) return;
-  set_->exposure.basis = basis;
-  set_->exposure.snap = true;
-  RetireExposureCheck(set_);
+  if (UpdateMeterBasis(set_->exposure.basis, set_->exposure.snap, stage, encoding, config_.fixes.primaries, input_scale)) {
+    RetireExposureCheck(set_);
+  }
 }
 
 VkNrPipeline::ExposureChoice VkNrPipeline::ChooseExposure(color::Encoding encoding, const NVSDK_NGX_Resource_VK* game_texture, float game_factor) {

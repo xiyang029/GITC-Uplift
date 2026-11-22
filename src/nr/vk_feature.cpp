@@ -1,5 +1,7 @@
 #include "nr/vk_feature.hpp"
 
+#include "nr/feature_state.hpp"
+
 #include "nr/keys.hpp"
 #include "nr/log.hpp"
 #include "nvfp4/NrNvfp4.h"
@@ -118,22 +120,11 @@ NVSDK_NGX_Result VkFeature::Evaluate(ID3D12GraphicsCommandList* list, const Eval
 }
 
 std::string VkFeature::Diagnostic(uint32_t pass) const {
-  if (handle_ == nullptr) return {};
-  const std::string_view network = network_.empty() ? "unconfirmed (no native creation message)" : std::string_view(network_);
-  if (!has_evaluation_) return std::format("NR pass {} network: {} | awaiting evaluation", pass, network);
-  return std::format("NR pass {} network: {} | enabled calls recorded: {} | {} | style {} | native mask mode {}",
-                     pass, network, enabled_evaluations_, last_enabled_ ? "enabled" : "bypassed / zero intensity", last_style_, last_mask_mode_);
+  return FeatureDiagnostic(pass, handle_ != nullptr, network_, has_evaluation_, enabled_evaluations_, last_enabled_, last_style_, last_mask_mode_);
 }
 
 NVSDK_NGX_Result VkFeature::Release() {
-  if (handle_ == nullptr) return NVSDK_NGX_Result_Success;
-  const NVSDK_NGX_Result result = snippet_.ReleaseFeature(handle_);
-  if (NVSDK_NGX_FAILED(result)) {
-    Logf(LogLevel::ERR, "ReleaseFeature failed: {:#010x}", static_cast<uint32_t>(result));
-  }
-  handle_ = nullptr;
-  capacity_ = {};
-  return result;
+  return ReleaseFeatureState(snippet_, handle_, capacity_);
 }
 
 void VkFeature::Abandon() {

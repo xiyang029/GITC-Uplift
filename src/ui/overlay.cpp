@@ -230,7 +230,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         // The render scales are shares of the output, so their number carries the sign: the label names the row
         // ("Quality render scale"), the value says what it is in.
         const char* const format = IntPercentSetting(descriptor.key) ? "%d %%" : "%d";
-        const bool edited = typed ? widgets::NumberField(label.c_str(), &value, 64, 512, &active)
+        const bool edited = typed ? widgets::NumberField(label.c_str(), &value, descriptor.step, descriptor.fast_step, &active)
                                   : widgets::SliderInt(label.c_str(), &value, low, high, &active, format);
         if (!on_release) {
           if (edited) {

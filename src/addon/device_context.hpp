@@ -77,7 +77,6 @@ struct ContextStatus {
   std::string placement_line;  // FormatPlacementLine
   ngx_hooks::FrameGenState frame_generation;
   bool dlss_seen = false;           // a main-handle evaluate reached this context
-  bool dlss_latch_tripped = false;  // removed within DLSS_LATCH_WINDOW of a game-list recording
   nr::Size work;                    // the settled work image of the chosen placement
   std::string work_line;            // "Working at 1920x1080 of 3840x2160 (Edge-aware)"; empty before a frame
   std::string exposure_line;        // "Input exposure: the game's" (sources::ExposureLine); empty unless NR ran on the latest frame and used one

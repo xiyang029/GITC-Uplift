@@ -1,5 +1,7 @@
 #include "client/d3d11_client.hpp"
 
+#include "d3d11_texture.hpp"
+
 #include <dxgi.h>
 
 #include <chrono>
@@ -17,20 +19,13 @@
 #include "text/nr_messages.hpp"
 
 namespace uplift::client {
+using d3d::TextureDesc11;
 namespace {
 
 using Microsoft::WRL::ComPtr;
 
 constexpr auto GPU_CAP = std::chrono::seconds(2);  // the cap on the game thread's waits
 
-// The description behind a D3D11 resource; nullopt for anything that is not a 2D texture.
-std::optional<D3D11_TEXTURE2D_DESC> TextureDesc(ID3D11Resource* resource) {
-  ComPtr<ID3D11Texture2D> texture;
-  if (resource == nullptr || FAILED(resource->QueryInterface(IID_PPV_ARGS(&texture)))) return std::nullopt;
-  D3D11_TEXTURE2D_DESC description = {};
-  texture->GetDesc(&description);
-  return description;
-}
 
 std::string ShareFailureText(const char* what, DXGI_FORMAT format, HRESULT result) {
   return std::format("{} could not be shared with Uplift's helper (DXGI_FORMAT {}, HRESULT {:#010x})", what, static_cast<int>(format),
@@ -139,7 +134,7 @@ bool D3D11Client::Open(HANDLE handle, Shared* shared, HRESULT* result) {
 }
 
 ipc::Target D3D11Client::Describe(ID3D11Resource* back_buffer, bool enabled, bool running) {
-  return Describe(TextureDesc(back_buffer), enabled, running);
+  return Describe(TextureDesc11(back_buffer), enabled, running);
 }
 
 ipc::Target D3D11Client::Describe(const std::optional<D3D11_TEXTURE2D_DESC>& description, bool enabled, bool running) {
@@ -311,7 +306,7 @@ bool D3D11Client::Apply(const ipc::Reply& reply, NrLink& link) {
 bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon::TriggerPoint point, NrLink& link) {
   run_sent_ = false;
   if (!latch_.empty() || in_flight_ || back_buffer == nullptr) return false;
-  const std::optional<D3D11_TEXTURE2D_DESC> description = TextureDesc(back_buffer);
+  const std::optional<D3D11_TEXTURE2D_DESC> description = TextureDesc11(back_buffer);
   if (!description || description->SampleDesc.Count != 1u) return false;
   const nr::Size size = {description->Width, description->Height};
   ipc::Run run = {.point = static_cast<uint32_t>(point)};
@@ -376,7 +371,7 @@ bool D3D11Client::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, addon
     pending_out_ = 0u;
   }
   // LaunchPad's UPLIFT_MV, shared like the mask (RG16F). Retired when a recording comes without one.
-  const std::optional<D3D11_TEXTURE2D_DESC> motion_description = TextureDesc(motion);
+  const std::optional<D3D11_TEXTURE2D_DESC> motion_description = TextureDesc11(motion);
   ID3D11Resource* shared_motion_source = nullptr;
   if (motion_description && motion_description->Format == DXGI_FORMAT_R16G16_FLOAT && motion_description->SampleDesc.Count == 1u) {
     const nr::Size motion_size = {motion_description->Width, motion_description->Height};
@@ -503,7 +498,7 @@ MaskCopy D3D11Client::CopyMask(ID3D11Resource* mask, NrLink& link) {
   if (!fenced_) return {.unsupported = true};  // no mask or motion on the CPU-ordered path (the notes say so)
   if (!latch_.empty() || to11_11_ == nullptr) return {};
   if (in_flight_ || (pending_out_ != 0u && to11_11_->GetCompletedValue() < pending_out_)) return {.busy = true};
-  const std::optional<D3D11_TEXTURE2D_DESC> description = TextureDesc(mask);
+  const std::optional<D3D11_TEXTURE2D_DESC> description = TextureDesc11(mask);
   const std::optional<color::MaskFormatInfo> format =
       (description ? color::DescribeMaskFormat(description->Format) : std::nullopt);
   if (!format || description->SampleDesc.Count != 1u) {

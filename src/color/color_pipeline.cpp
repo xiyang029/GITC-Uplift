@@ -1,5 +1,7 @@
 #include "color/color_pipeline.hpp"
 
+#include "color/faces_constants.hpp"
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -76,13 +78,6 @@ uint32_t Bits(float value) {
   return std::bit_cast<uint32_t>(value);
 }
 
-// faces_cs.hlsl's constants. A level dispatch's `first` matters at level 1 only.
-std::array<uint32_t, 16> FacesConstants(nr::Size size, uint32_t levels, uint32_t mode, uint32_t level, uint32_t flags,
-                                        const look::FacesParameters& parameters) {
-  return {size.width, size.height, levels, mode, level, flags, Bits(parameters.low_level), Bits(parameters.mask_level),
-          Bits(parameters.edge_level), Bits(parameters.dead_zone), Bits(parameters.full_weight), Bits(parameters.coverage_gain), Bits(parameters.density),
-          parameters.speck_radius, Bits(parameters.fill_level), Bits(parameters.fill_tolerance)};
-}
 
 // shaders/encode_cs.hlsl's constants; `change_mode` selects its change-field pass, `second_output` its u1 write.
 std::array<uint32_t, PASS_CONSTANTS> EncodeConstants(const EncodePass& pass, uint32_t change_mode, bool second_output) {

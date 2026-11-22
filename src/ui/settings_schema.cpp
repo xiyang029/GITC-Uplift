@@ -73,7 +73,6 @@ constexpr std::array<std::string_view, 2> AUTO_EXPOSURE_MODES = {"Blend", "Switc
 constexpr std::array<std::string_view, 2> ADAPT_MODES = {"Off", "Smooth"};
 constexpr std::array<std::string_view, 4> PRIMARIES = {"Auto", "BT.709", "BT.2020", "AP1 (ACEScg)"};
 constexpr std::array<std::string_view, 2> NEURAL_TRANSFERS = {"Bounded ratio", "Consistent"};
-constexpr std::array<std::string_view, 3> PEDESTAL_MODES = {"Off", "Auto", "Always"};
 
 constexpr std::string_view FG_MULTIPLIER_TOOLTIP =
     "The frame-generation multiplier, forced through the game's own DLSS-G options (Streamline games). Applies live at the game's next "
@@ -1396,18 +1395,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
                    "specks.",
         .get = [](const Settings& s) { return Flag(s.near_black_guard); },
         .set = [](Settings& s, double v) { s.near_black_guard = (v != 0.0); },
-    },
-    {
-        .key = "PedestalRemoval",
-        .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
-        .label = "Dark pedestal removal",
-        .tooltip = "Not needed so far: Uplift's HDR transfer applies NR's change as a ratio, so black stays black. It "
-                   "is checked in game before anything is built.",
-        .choices = PEDESTAL_MODES,
-        .flags = GREYED,
-        .get = [](const Settings& s) { return Index(s.pedestal_removal); },
-        .set = [](Settings& s, double v) { s.pedestal_removal = FromIndex<PedestalRemoval>(v); },
     },
     {
         .key = "MotionScaleX",
