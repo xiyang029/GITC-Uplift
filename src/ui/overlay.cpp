@@ -418,7 +418,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     if (!saved_note.empty()) {
       tooltip += "\n" + saved_note;
     }
-    widgets::MouseTooltip("%s", tooltip.c_str());
+    widgets::MouseTooltip(ImGui::GetID("##row-tooltip"), "%s", tooltip.c_str());
   }
   if (descriptor.key == "Mask") {
     deferred_note = view.mask_note;

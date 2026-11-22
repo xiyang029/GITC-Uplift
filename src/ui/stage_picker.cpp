@@ -123,8 +123,9 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     if (ImGui::CalcTextSize(label.c_str()).x > room) label = widgets::Ellipsize(gui::Display(compact[i]).c_str(), room);
     CenterText(draw, c, style::ToU32(inactive ? style::tokens::kTextSecondary : style::tokens::kTextPrimary), label);
     if (gui::IsWindowHovered() && gui::IsMouseHoveringRect(lo, hi)) {
-      if (i == 1) widgets::MouseTooltip("Ray Reconstruction denoises and upscales together when used in place of DLSS Super Resolution.");
-      else widgets::MouseTooltip("%s", gui::Display(nodes[i]).c_str());
+      const ImGuiID node = ImGui::GetID(nodes[i]);
+      if (i == 1) widgets::MouseTooltip(node, "Ray Reconstruction denoises and upscales together when used in place of DLSS Super Resolution.");
+      else widgets::MouseTooltip(node, "%s", gui::Display(nodes[i]).c_str());
     }
   }
 
@@ -171,7 +172,7 @@ bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* 
     if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || (gui::GetIO().NavVisible && gui::IsItemFocused())) {
       const char* tip = i == 0 && view.setup.before_upscaling_on_rr ? "NR works on Ray Reconstruction's input." : TIPS[i];
       const std::string details = why.empty() ? gui::Display(tip) : gui::Display(why);
-      if (gui::IsItemFocused() && gui::GetIO().NavVisible) widgets::MouseTooltip("%s\n%s", full_label.c_str(), details.c_str());
+      if (gui::IsItemFocused() && gui::GetIO().NavVisible) widgets::MouseTooltip(ImGui::GetItemID(), "%s\n%s", full_label.c_str(), details.c_str());
       else widgets::ItemTooltip("%s\n%s", full_label.c_str(), details.c_str());
     }
     gui::PopID();

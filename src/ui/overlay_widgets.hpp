@@ -58,52 +58,67 @@ inline void Wrapped(const char* fmt, ...) {
   gui::TextWrapped("%s", text.c_str());
 }
 
-// The frame a control last drew a tooltip in. A row asks for its own bubble once the whole row is drawn
-// (overlay.cpp's row end), so without this a segment group inside that row opened a second one beside the
-// control's: ImGui opens one window per BeginTooltip call, and both were the same text twice.
-inline int tooltip_frame = -1;  // ImGui's frame count is an int, and starts above -1
+// A tooltip opens only once the pointer has rested kTooltipDelay on the same target: sweeping the panel used
+// to open a bubble on every row and diagram node it crossed, and close it again in the gaps between them.
+inline constexpr float kTooltipDelay = 0.4f;
 
-// True once anything has drawn a tooltip this frame.
+// The target being rested on, since when, and the frame it last asked in: a frame without a request (the
+// pointer between two rows) starts the wait over.
+inline ImGuiID tooltip_target = 0;
+inline double tooltip_since = 0.0;
+inline int tooltip_target_frame = -1;
+
+inline bool TooltipReady(ImGuiID target) {
+  const int frame = ImGui::GetFrameCount();
+  const double now = ImGui::GetTime();
+  if (target != tooltip_target || frame - tooltip_target_frame > 1) {
+    tooltip_target = target;
+    tooltip_since = now;
+  }
+  tooltip_target_frame = frame;
+  return now - tooltip_since >= kTooltipDelay;
+}
+
+// The frame a tooltip was last drawn in: a row asks for its own bubble once the row is drawn, and this keeps a
+// segment group inside it from opening a second one with the same text.
+inline int tooltip_frame = -1;
+
 inline bool TooltipDrawnThisFrame() { return tooltip_frame == ImGui::GetFrameCount(); }
 
-// The contents of a tooltip: wrapped after kTooltipEm font sizes, as the panel's own tooltips do.
-inline void TooltipBody(const std::string& text) {
+// The bubble itself, at the pointer and wrapped after kTooltipEm. An empty string draws nothing: ImGui would
+// otherwise show an empty bubble.
+inline void Tooltip(ImGuiID target, const std::string& text) {
+  if (text.empty() || !TooltipReady(target) || !ImGui::BeginTooltip()) {
+    return;
+  }
   tooltip_frame = ImGui::GetFrameCount();
   ImGui::PushTextWrapPos(ImGui::GetFontSize() * tokens::kTooltipEm);
   ImGui::TextUnformatted(text.c_str());
   ImGui::PopTextWrapPos();
+  ImGui::EndTooltip();
 }
 
-// A tooltip on the item just drawn. The message is drawn from what the format came out as; nothing to say, no
-// bubble: ImGui draws an empty one for an empty string, which reads as a glitch.
+// A tooltip on the item just drawn. Greyed items answer too: their tooltip is what explains the grey.
 inline void ItemTooltip(const char* fmt, ...) {
+  if (!ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    return;
+  }
   va_list args;
   va_start(args, fmt);
   const std::string text = gui::Formatted(fmt, args);
   va_end(args);
-  if (text.empty()) {
-    return;
-  }
-  if (!ImGui::BeginItemTooltip()) {
-    return;
-  }
-  TooltipBody(text);
-  ImGui::EndTooltip();
+  Tooltip(ImGui::GetItemID(), text);
 }
 
-// The same bubble, anchored to the pointer rather than to an item: a row asks for its tooltip once the whole
-// row is drawn, and the last item by then is the control's own value label, which the pointer is usually not
-// on -- BeginItemTooltip would then refuse to show it.
-inline void MouseTooltip(const char* fmt, ...) {
+// The same bubble, anchored to the pointer: a row asks once the whole row is drawn and the last item is the
+// control's value label, which the pointer is usually not on -- BeginItemTooltip would refuse. The target is
+// what the pointer rests on, so moving onto another row or node starts the wait over.
+inline void MouseTooltip(ImGuiID target, const char* fmt, ...) {
   va_list args;
   va_start(args, fmt);
   const std::string text = gui::Formatted(fmt, args);
   va_end(args);
-  if (text.empty() || !ImGui::BeginTooltip()) {
-    return;
-  }
-  TooltipBody(text);
-  ImGui::EndTooltip();
+  Tooltip(target, text);
 }
 
 // `text` cut to fit `width` with "..." at the end, or whole when it fits. The cut falls between UTF-8
