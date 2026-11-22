@@ -1,11 +1,4 @@
 // Exact-build, process-local research only. Restore metadata after context teardown.
-#include <windows.h>
-#include <array>
-#include <cstdint>
-#include <cstring>
-#include <stdexcept>
-#include <string>
-#include <vector>
 #include <map>
 #include <memory>
 #include <set>

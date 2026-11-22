@@ -35,6 +35,11 @@ refuse. At 0.67 the game also hands over a 1368x1024 depth for a few seconds at 
 picture against the motion vectors' 16:9, so a declared shared area would give XeFG two inputs that agree on
 size and disagree on geometry: a wrong picture instead of a refusal, and much harder to notice.
 
+Upstream 1.10.1 dropped that gate and always shares the declared area (`xmx_generator.hpp`'s
+`MatchDepthAndMotion` is three lines there now). This port keeps it: the gate is the difference between a
+‑‑4 this port can read in the log and a wrong picture at a resolution the detector never sees. The sweep and
+the rest of the comparison are in `docs/xmx-upstream-port.md`.
+
 ## Open: the short-lived 1368x1024 depth
 
 One session (2026-11-03, 09:57:05-09:57:19) logged 24 frames whose depth was 1368x1024 against 1367x769
@@ -64,4 +69,5 @@ not a local measurement. `docs/xmx-upstream-port.md` has the sweep that evaluate
 ## Against upstream
 
 Every rule here came from upstream `MFGAdaUnlock-RenoDx` @ `3b8889f`; `docs/xmx-upstream-port.md` carries the
-sweep log and the current comparison base (1.10.0, `c25358c`).
+sweep log and the current comparison base (1.10.1 source, `8b854ff` -- the commits after `395ed32` are
+README/CI only).

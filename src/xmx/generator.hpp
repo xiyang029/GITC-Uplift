@@ -112,8 +112,15 @@ struct State {
   uint64_t pairs{};
   uint64_t lastCaptureMs{};
   bool lastGenerated{};
+  // The pair whose frames one Execute call generated, and how many of them are in outputs: a later
+  // evaluate of that pair only copies its own frame out of them (see Generate's batch).
+  uint64_t batchPair{};
+  uint32_t batchFrames{};
   uint32_t contexts{};
   uint32_t maxFrames{1};
+  // The list Prepare last made a context on: the same list and shape answers without a driver call
+  // (Prepare runs once per evaluate, six times per pair at 6x).
+  ID3D12GraphicsCommandList* preparedList{};
   D3D12_RESOURCE_DESC outputDesc{};
   bool published{};
   bool failed{};
@@ -156,6 +163,9 @@ inline std::atomic_bool g_preflight_passed{false};
 // need opposite fixes. Rates, not totals: only an interval's delta says which one is happening now.
 struct Stats {
   std::atomic<uint32_t> asked{0}, generated{0}, repeated{0}, refused{0}, errored{0}, pairs{0};
+  // Execute calls, and how many of them asked for more than one frame: with the batch the second
+  // number is the pairs and the first is one per pair, not one per frame.
+  std::atomic<uint32_t> executes{0}, batched{0};
   std::atomic<uint64_t> gapTotalMs{0}, executeTotalUs{0};
   std::atomic<uint32_t> gapMaxMs{0}, executeMaxUs{0};
   std::array<std::atomic<uint32_t>, static_cast<size_t>(policy::Idle::Count)> idle{};
@@ -216,6 +226,8 @@ inline void ReportRates() {
   const auto gapMax = counters.gapMaxMs.exchange(0, std::memory_order_relaxed);
   const auto executeTotal = counters.executeTotalUs.exchange(0, std::memory_order_relaxed);
   const auto executeMax = counters.executeMaxUs.exchange(0, std::memory_order_relaxed);
+  const auto executes = counters.executes.exchange(0, std::memory_order_relaxed);
+  const auto batched = counters.batched.exchange(0, std::memory_order_relaxed);
   const auto span = now - start;
   const auto perSecond = [span](uint64_t count) { return span == 0 ? 0ull : count * 1000ull / span; };
   auto& state = Get();
@@ -225,8 +237,11 @@ inline void ReportRates() {
                      std::to_string(refused) + " errored " + std::to_string(errored);
   text += " | pairs " + std::to_string(pairs) + " (" + std::to_string(perSecond(pairs)) + "/s) every " +
           std::to_string(pairs == 0 ? 0 : gapTotal / pairs) + "ms (max " + std::to_string(gapMax) + "ms)";
-  text += " | execute " + std::to_string(asked == 0 ? 0 : executeTotal / asked) + "us avg " +
-          std::to_string(executeMax) + "us max";
+  // Per call, not per asked frame: with the batch one call covers a pair, and dividing by the
+  // presented frames would report a fifth of what the library actually spent.
+  text += " | execute " + std::to_string(executes == 0 ? 0 : executeTotal / executes) + "us avg " +
+          std::to_string(executeMax) + "us max over " + std::to_string(executes) + " calls (" +
+          std::to_string(batched) + " batched)";
   text += " | " + std::to_string(state.width) + "x" + std::to_string(state.height) + " format " +
           std::to_string(static_cast<int>(state.format)) + " model frames " + std::to_string(state.maxFrames) +
           " asked for " + std::to_string(g_requested.load(std::memory_order_relaxed));
@@ -447,17 +462,18 @@ class CopyBatch {
     // kMaxBatch pairs: both fall back to the one-at-a-time path, which is correct either way. So does
     // a pair CopyResource cannot express: the batch records its copies itself, so it makes the same
     // check the one-at-a-time path makes, or the guard only covers the rare path.
-    if (Duplicated(target) || Duplicated(source) || targets_.size() >= kMaxBatch || !SameShape(target, source)) {
+    if (Duplicated(target) || Duplicated(source) || count_ >= kMaxBatch || !SameShape(target, source)) {
       Copy(list_, target, targetState, source, sourceState);
       return;
     }
-    targets_.push_back({target, targetState});
-    sources_.push_back({source, sourceState});
-    copies_.push_back({target, source});
+    targets_[count_] = {target, targetState};
+    sources_[count_] = {source, sourceState};
+    copies_[count_] = {target, source};
+    ++count_;
   }
 
   void Flush() {
-    if (copies_.empty()) return;
+    if (count_ == 0) return;
     D3D12_RESOURCE_BARRIER barriers[kMaxBatch * 2]{};
     UINT count = 0;
     const auto push = [&](ID3D12Resource* resource, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
@@ -469,17 +485,15 @@ class CopyBatch {
       barrier.Transition.StateBefore = from;
       barrier.Transition.StateAfter = to;
     };
-    for (const auto& entry : targets_) push(entry.resource, entry.state, D3D12_RESOURCE_STATE_COPY_DEST);
-    for (const auto& entry : sources_) push(entry.resource, entry.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    for (size_t i = 0; i < count_; ++i) push(targets_[i].resource, targets_[i].state, D3D12_RESOURCE_STATE_COPY_DEST);
+    for (size_t i = 0; i < count_; ++i) push(sources_[i].resource, sources_[i].state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     list_->ResourceBarrier(count, barriers);
-    for (const auto& copy : copies_) list_->CopyResource(copy.target, copy.source);
+    for (size_t i = 0; i < count_; ++i) list_->CopyResource(copies_[i].target, copies_[i].source);
     count = 0;
-    for (const auto& entry : sources_) push(entry.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, entry.state);
-    for (const auto& entry : targets_) push(entry.resource, D3D12_RESOURCE_STATE_COPY_DEST, entry.state);
+    for (size_t i = 0; i < count_; ++i) push(sources_[i].resource, D3D12_RESOURCE_STATE_COPY_SOURCE, sources_[i].state);
+    for (size_t i = 0; i < count_; ++i) push(targets_[i].resource, D3D12_RESOURCE_STATE_COPY_DEST, targets_[i].state);
     list_->ResourceBarrier(count, barriers);
-    targets_.clear();
-    sources_.clear();
-    copies_.clear();
+    count_ = 0;
   }
 
  private:
@@ -491,13 +505,17 @@ class CopyBatch {
     return policy::CanCopy(to.Width, to.Height, to.Format, from.Width, from.Height, from.Format);
   }
   bool Duplicated(ID3D12Resource* resource) const {
-    for (const auto& entry : targets_) if (entry.resource == resource) return true;
-    for (const auto& entry : sources_) if (entry.resource == resource) return true;
+    for (size_t i = 0; i < count_; ++i) {
+      if (targets_[i].resource == resource || sources_[i].resource == resource) return true;
+    }
     return false;
   }
   ID3D12GraphicsCommandList* list_;
-  std::vector<Entry> targets_, sources_;
-  std::vector<Pair> copies_;
+  // Fixed storage, not three vectors: this object is built once per evaluate, and a heap allocation
+  // per copy costs more than the barriers it batches.
+  std::array<Entry, kMaxBatch> targets_{}, sources_{};
+  std::array<Pair, kMaxBatch> copies_{};
+  size_t count_{};
 };
 // The one rule an output resource must satisfy before XeFG may dispatch into it: this module created
 // it, it started life in UNORDERED_ACCESS, and it carries the UAV flag. Nothing that DLSS-G hands over
@@ -641,18 +659,42 @@ inline void NoteArguments(const NVSDK_NGX_Parameter* params, ID3D12Resource* bac
                           ID3D12Resource* motion, ID3D12Resource* hudless, ID3D12Resource* interpolated,
                           uint32_t requested, uint32_t frames) {
   auto& state = Get();
-  // Only a change in what the mode is handed is worth a line.
+  // Only a change in what the mode is handed is worth a line, and the check comes first as plain
+  // numbers: this runs once per evaluate -- six times per pair at 6x -- and building the line to
+  // compare it against the last one spent nine GetDesc calls and thirty string allocations on the
+  // render thread for every one of them, to be thrown away.
+  struct Key {
+    const void* resources[5];
+    uint32_t areas[8];
+    uint32_t requested, frames, width, height, format, flags;
+  };
+  Key key{};
+  const void* const pointers[5] = {backbuffer, depth, motion, hudless, interpolated};
+  std::memcpy(key.resources, pointers, sizeof(pointers));
+  const policy::Area depthArea = RawArea(params, "DLSSG.Depth");
+  const policy::Area motionArea = RawArea(params, "DLSSG.MVecs");
+  const uint32_t declared[8] = {depthArea.x, depthArea.y, depthArea.width, depthArea.height,
+                                motionArea.x, motionArea.y, motionArea.width, motionArea.height};
+  std::memcpy(key.areas, declared, sizeof(declared));
+  key.requested = requested;
+  key.frames = frames;
+  key.width = state.width;
+  key.height = state.height;
+  key.format = static_cast<uint32_t>(state.format);
+  key.flags = state.flags;
+  static Key lastKey{};
+  static bool seen = false;
+  if (seen && std::memcmp(&key, &lastKey, sizeof(Key)) == 0) return;
+  lastKey = key;
+  seen = true;
   const std::string shapes = "backbuffer " + Shape(backbuffer) + " depth " + Shape(depth) + " motion " + Shape(motion) +
                              " hudless " + Shape(hudless) + " interpolated " + Shape(interpolated) +
-                             " depth-declared " + AreaText(RawArea(params, "DLSSG.Depth")) +
-                             " mvec-declared " + AreaText(RawArea(params, "DLSSG.MVecs")) + " frames " +
+                             " depth-declared " + AreaText(depthArea) +
+                             " mvec-declared " + AreaText(motionArea) + " frames " +
                              std::to_string(frames) + " requested " + std::to_string(requested) + " context " +
                              std::to_string(state.width) + "x" +
                              std::to_string(state.height) + " format " +
                              std::to_string(static_cast<int>(state.format)) + " flags " + std::to_string(state.flags);
-  static std::string last;
-  if (shapes == last) return;
-  last = shapes;
   xess_mod::WriteLog("arguments", shapes);
 }
 // What XeFG was handed when it refused: the frame's own numbers, not just the resources.
@@ -682,6 +724,13 @@ inline bool Prepare(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* 
   if (Value<int>(params, "DLSSG.DepthInverted", 0) != 0) flags |= kFlagDepthInverted;
   if (Value<int>(params, "DLSSG.MvecJittered", 0) != 0) flags |= kFlagMotionJittered;
   const auto width = static_cast<uint32_t>(output.Width);
+  // The common call costs no driver work: every evaluate of every pair asks for the same shape on the
+  // same list, and list->GetDevice is an AddRef/Release round trip into the runtime -- six of them per
+  // pair at 6x. A command list never changes devices, so a different list takes the full path below,
+  // and that is what notices a device replaced with one of the same shape.
+  if (state.context != nullptr && list == state.preparedList && width == state.width &&
+      output.Height == state.height && output.Format == state.format && flags == state.flags)
+    return true;
   ComPtr<ID3D12Device> device;
   if (FAILED(list->GetDevice(IID_PPV_ARGS(&device)))) return false;
   // A new device needs a new context even with the same shape.
@@ -712,10 +761,13 @@ inline bool Prepare(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* 
       frame = {};
     }
     for (auto& texture : state.outputs) retire(texture);
+    // The pair's generated frames went with the old context: no evaluate of it may reuse them.
+    state.batchFrames = 0;
     state.context = nullptr;  // its commands may be in flight, so it stays alive
     state.lastGenerated = false;
   }
   state.device = device;
+  state.preparedList = list;
   ++state.contexts;
   if (!LoadContext(state.device.Get())) {
     state.failed = true;
@@ -730,14 +782,32 @@ inline bool Prepare(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter* 
   init.maxFrames = state.maxFrames;
   init.creationMask = 1;
   init.visibleMask = 1;
-  const auto result = Guarded(reinterpret_cast<unsigned char*>(state.fg) + kInitRva, state.context, &init, nullptr);
-  Log("init " + std::to_string(width) + "x" + std::to_string(output.Height) + " format " +
-      std::to_string(static_cast<int>(output.Format)) + " flags " + std::to_string(init.flags) + " frames " +
-      std::to_string(init.maxFrames) + " result " + std::to_string(result));
+  // Upstream 1.8.3 also starts Intel's own 2x model when the ported multi-frame model throws inside
+  // Init (-1000) on inputs Intel's model takes (HZD Remastered's jittered motion vectors, flags 17):
+  // that retry runs on a second context, with the game's real flags and maxFrames 1. The log names
+  // both attempts, so a game left at 2x says whether it was asked for 2x or fell back to it.
+  const auto initialize = [&] {
+    const auto result = Guarded(reinterpret_cast<unsigned char*>(state.fg) + kInitRva, state.context, &init, nullptr);
+    Log("init " + std::to_string(width) + "x" + std::to_string(output.Height) + " format " +
+        std::to_string(static_cast<int>(output.Format)) + " flags " + std::to_string(init.flags) + " frames " +
+        std::to_string(init.maxFrames) + " result " + std::to_string(result));
+    return result;
+  };
+  auto result = initialize();
   if (strip && result == 0)
     Log("the multi-frame model runs without the jittered-motion flag (XmxJitter=0 under [Uplift] restores Intel's 2x model)");
-  // Upstream also resets init.flags to the game's values for its same-frame 2x retry; this add-on
-  // refuses the shape and lets a later call rebuild instead, so there is no second reader here.
+  if (result != 0 && init.maxFrames > 1 && state.contexts < policy::kMaxContexts) {
+    ++state.contexts;
+    if (LoadContext(state.device.Get())) {
+      init.flags = flags;
+      init.maxFrames = 1;
+      result = initialize();
+      if (result == 0) {
+        state.maxFrames = 1;
+        Log("the multi-frame model refused these inputs; Intel's 2x model runs instead");
+      }
+    }
+  }
   if (result != 0) {
     // Found out only here: the hook into NVIDIA's generation is gone long before this, so a game
     // whose output format XeFG cannot take has to be told what to change.
@@ -859,12 +929,23 @@ inline bool Generate(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter*
   auto& previous = state.frames[state.current ^ 1];
   // Without a pair the real frame is shown again.
   bool generated = false;
+  // This pair's frames were all generated by one call already (see the batch below): this evaluate
+  // only copies the frame it was asked for. A refused batch leaves this false, and the frames are
+  // generated one call at a time exactly as before.
+  const bool reuse = state.batchPair == state.pairs && state.batchFrames >= frameIndex &&
+                     state.outputs[frameIndex - 1] != nullptr;
   // One reason, not a chain of conditions: the panel and the log say which wait this is.
   auto idle = policy::Idle::None;
   if (!previous.valid) idle = policy::Idle::NoPair;
   else if (next.data.reset != 0) idle = policy::Idle::GameReset;
   else if ((next.hudless != nullptr) != (previous.hudless != nullptr)) idle = policy::Idle::HudlessChanged;
-  else {
+  else if (reuse) {
+    // Already in outputs[frameIndex - 1]; counted like any other generated frame so that the rates
+    // line keeps meaning "of the frames the game presented, this many were new".
+    generated = true;
+    Counters().generated.fetch_add(1, std::memory_order_relaxed);
+    g_last_generated_tick.store(GetTickCount64(), std::memory_order_relaxed);
+  } else {
     ExecuteParams execute{};
     execute.previous = previous.data;
     execute.next = next.data;
@@ -872,10 +953,12 @@ inline bool Generate(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter*
     // Every slot is a texture of ours, created in UNORDERED_ACCESS: XeFG dispatches into it by UAV,
     // and a buffer NGX owns cannot be given that state from here (its current state is not knowable,
     // and a wrong barrier is a device removal). Writing straight into DLSS-G's own buffer was tried
-    // twice and reverted twice: once the frames arrived with the buffer in the wrong state, and once
-    // -- with the flag checked first and no barrier at all -- every frame generated and the picture
-    // still stuttered. Handing XeFG that buffer is not where the smoothness is, whatever the panel
-    // and the counters say. The copy back below is the price of frames the GPU can actually see.
+    // three times and reverted three times: once the frames arrived with the buffer in the wrong
+    // state; once, with the flag checked and no barrier at all, every frame generated while the
+    // picture still stuttered; and once with a UAV barrier behind the write, which read fine in one
+    // game and was not smooth in another. Handing XeFG that buffer is not where the smoothness is,
+    // whatever the panel and the counters say. The copy back below is the price of frames the GPU can
+    // actually see.
     for (uint32_t i = 0; i < frameCount; ++i) {
       if (!state.outputs[i])
         state.outputs[i] = Texture(device, state.outputDesc, kOutputState, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
@@ -890,8 +973,14 @@ inline bool Generate(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter*
     execute.outputs = outputs;
     execute.outputBases = bases;
     execute.outputCount = static_cast<uint8_t>(frameCount);
-    execute.firstFrame = frameIndex - 1;
-    execute.frameCount = 1;
+    // One call per pair instead of one per frame: the call starting at frame 0 does the pair-level
+    // work (optical flow, the network's first half) and then each frame's own pass, so asking for
+    // all the pair's frames at once saves the extra call shells, flushes and gaps that 5x/6x
+    // otherwise place on the pair's critical path. firstFrame still says where this call's frames
+    // go in outputs.
+    const bool makeBatch = frameIndex == 1 && frameCount > 1;
+    execute.firstFrame = makeBatch ? 0 : frameIndex - 1;
+    execute.frameCount = makeBatch ? frameCount : 1;
     // Execute reads the captured inputs: they must be barriered and copied before it records.
     batch.Flush();
 
@@ -899,6 +988,8 @@ inline bool Generate(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter*
     const auto result = Guarded(reinterpret_cast<unsigned char*>(state.fg) + kExecuteRva, state.context, list, &execute);
     {
       auto& counters = Counters();
+      counters.executes.fetch_add(1, std::memory_order_relaxed);
+      if (makeBatch) counters.batched.fetch_add(1, std::memory_order_relaxed);
       const auto spent = static_cast<uint32_t>(Microseconds() - executeStarted);
       counters.executeTotalUs.fetch_add(spent, std::memory_order_relaxed);
       RaisePeak(counters.executeMaxUs, spent);
@@ -926,6 +1017,12 @@ inline bool Generate(ID3D12GraphicsCommandList* list, const NVSDK_NGX_Parameter*
       } else {
         Counters().generated.fetch_add(1, std::memory_order_relaxed);
         g_last_generated_tick.store(GetTickCount64(), std::memory_order_relaxed);
+        if (makeBatch) {
+          // The pair's remaining evaluates copy out of outputs; this is set only on success, so a
+          // refused batch is retried one frame at a time.
+          state.batchPair = state.pairs;
+          state.batchFrames = frameCount;
+        }
       }
     }
   }
