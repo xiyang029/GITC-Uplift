@@ -37,8 +37,31 @@ class RetireQueue {
 struct ContextShape {
   const void* device;
   uint32_t width, height, format, flags;
+  // The model capacity the context was built with: 2x asks for one generated frame and gets Intel's
+  // one-frame model (see ModelFrames), so the same output shape can carry a different value here.
+  uint32_t frames;
   friend constexpr bool operator==(const ContextShape&, const ContextShape&) = default;
 };
+
+// True when a context built for `have` serves a request for `want` without being rebuilt: the same
+// device and output shape, and a model capacity at least what is asked for. A 2x request against a
+// five-frame context is served as it was before ModelFrames -- that model's t=1/2 frame -- rather than
+// spending a context on every multiplier switch in the panel.
+constexpr bool Serves(const ContextShape& have, const ContextShape& want) {
+  return have.device == want.device && have.width == want.width && have.height == want.height &&
+         have.format == want.format && have.flags == want.flags && have.frames >= want.frames;
+}
+
+// The model capacity a multiplier asks for. XeFG builds its model for a capacity: 2x asks for a single
+// generated frame, which the five-frame model serves as its t=1/2 output, while Intel's one-frame
+// model (maxFrames 1, the context the fallback already built) costs about 170 us less per pair --
+// 1043 us against 1214 us of GPU work measured on one title. 2x is the only multiplier where the model
+// itself can be asked for less work. twoFrameModel goes false once Intel's 2x model has refused this
+// game's inputs, and every multiplier then asks for the five-frame model.
+constexpr uint32_t ModelFrames(uint32_t requested, uint32_t modelMax, bool twoFrameModel) {
+  if (modelMax <= 1 || !twoFrameModel) return modelMax;
+  return requested <= 1 ? 1u : modelMax;
+}
 
 constexpr bool PairIsStale(uint64_t lastCaptureMs, uint64_t nowMs) {
   return lastCaptureMs != 0 && nowMs - lastCaptureMs > kStalePairMs;
