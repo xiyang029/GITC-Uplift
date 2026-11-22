@@ -195,9 +195,6 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
     present_source_->Pipeline().ReleaseLaunchpadMotion();
   }
   // 2026-11-05 (Depth input): the depth copies go the same way once a later group at Present cannot bind them.
-  if (!present_group) {
-    present_source_->Pipeline().ReleaseDepthCopies();
-  }
 
   std::string message;
   encoding_.reset();
@@ -224,6 +221,8 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
   if (!present_size.Empty()) {
     present_layout_ = SettleLayout(present_size, Stage::PRESENT, now);  // before UpdateSession, so its Tick sees the size
   }
+
+  if (!present_group || PresentFoveated()) present_source_->Pipeline().ReleaseDepthCopies();
 
   ApplySessionOptions(*session_, settings, chain_, settings_generation_);
   // The four-bit models replace the runtime's Model A launches on this D3D12 path. Configuring the
@@ -266,9 +265,20 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
   return trigger_.OnPresent(marker_expected, facts.effects_on, facts.marker_rendered_early);
 }
 
+nr::SkipReason DeviceContext::PresentWorkSkip() const {
+  const auto group = GroupAt(chain_, Stage::PRESENT);
+  if (!group) return nr::SkipReason::INACTIVE;
+  if (!session_->SliceRuns(slices_[*group])) return SliceSkipReason(settings_, slices_[*group]);
+  // The face debug overlay can draw even on a zero-intensity slice.
+  if (!settings_.look.keep_faces.show_mask && !session_->SliceHasIntensity(slices_[*group], controls_, settings_.look.later_controls)) {
+    return nr::SkipReason::INTENSITY_ZERO;
+  }
+  return nr::SkipReason::NONE;
+}
+
 sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES entry_state, TriggerPoint point,
                                           ID3D12Resource* motion, bool motion_is_dlss, float dlss_scale_x, float dlss_scale_y,
-                                          nr::Rect dlss_motion_region, uint64_t dlss_motion_age) {
+                                          nr::Rect dlss_motion_region, uint64_t dlss_motion_age, ID3D12Resource* shared_mask) {
   if (point == TriggerPoint::NONE || !frame_ready_) return {};
   frame_ready_ = false;
   ran_since_present_ = true;
@@ -292,7 +302,10 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   const bool frame_generation_on = frame_generation_.ObservedState().active;
   if (FrameGenerationSkipsPresent(frame_generation_on, facts_.fg_present_path)) return skip(nr::SkipReason::FRAME_GENERATION_ON);
   // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before its source copy and encode.
-  if (group > 0u && !session_->SliceRuns(slices_[group])) return skip(SliceSkipReason(settings_, slices_[group]));
+  if (const auto reason = PresentWorkSkip(); reason != nr::SkipReason::NONE) {
+    present_reset_owed_ = true;
+    return skip(reason);
+  }
   // Default: keep distinct queues apart until UpdateChain remaps Present. The experimental opt-in uses the game's existing image handoff; it adds no wait.
   if (group > 0u && !facts_.game_facing_present && !settings_.allow_cross_queue_passes && !timeline_->StageWorkDone(dlss_stage_token_, present_queue_)) {
     return skip(nr::SkipReason::WAITING_EARLIER_STAGES);
@@ -318,6 +331,7 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   frame_target_.dlss_motion_flip = (frame_target_.dlss_motion_raw && facts_.dlss_motion_upside_down);  // 1.1.6 (Vulkan's copies are flipped by theirs)
   frame_target_.dlss_motion_age = dlss_motion_age;
   frame_target_.motion_enabled = settings_.motion_vectors || settings_.launchpad_motion;
+  frame_target_.shared_mask = shared_mask;
   const sources::PresentResult result = present_source_->Record(host->NativeList(), frame_target_, controls_, present_reset_owed_, present_layout_,
                                                                 {.slice = slices_[group], .set = group}, present_queue_);
   host->TargetBarrier(D3D12_RESOURCE_STATE_COPY_SOURCE, entry_state);
@@ -398,9 +412,7 @@ bool DeviceContext::NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chr
     if (!present_group || !settings_.launchpad_motion) {
       present_source_->Pipeline().ReleaseLaunchpadMotion();
     }
-    if (!present_group) {
-      present_source_->Pipeline().ReleaseDepthCopies();
-    }
+    if (!present_group || PresentFoveated()) present_source_->Pipeline().ReleaseDepthCopies();
     UpdateSession(now);
   }
   return true;
@@ -426,54 +438,37 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
   NoteDlssFeature(frame.serial);
   const std::optional<bool> before_reset = std::exchange(before_reset_, std::nullopt);  // this evaluate's, from BeforeDlssEvaluate
   const ngx_hooks::MotionJitterOffset jitter = present_jitter_.Update(frame);
+  sources::DlssRecordingBatch recording_host(host, settings_.restore);
   // Copy the game's motion vectors on its list for the present that closes this frame: with Source = Present, and (split
   // chain) for a later group at Present.
-  const auto copy_motion = [&]() -> sources::PipelineResult {
-    ID3D12GraphicsCommandList* const list = host.NativeList();
-    if (!settings_.motion_vectors || frame.motion_vectors == nullptr || session_->State() != nr::SessionState::ACTIVE || list == nullptr
-        || !host.StateKnown() || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+  const auto copy_present_inputs = [&]() -> sources::PipelineResult {
+    ID3D12GraphicsCommandList* const list = recording_host.NativeList();
+    const bool wants_motion = settings_.motion_vectors && frame.motion_vectors != nullptr;
+    const bool wants_depth = !PresentFoveated() && frame.depth != nullptr;
+    if ((!wants_motion && !wants_depth) || PresentWorkSkip() != nr::SkipReason::NONE
+        || session_->State() != nr::SessionState::ACTIVE || list == nullptr
+        || !recording_host.StateKnown() || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
       return {.reason = nr::SkipReason::NOT_AFTER_DLSS};
     }
-    const sources::PipelineResult copied = sources::RecordOnGameList(host, *timeline_, settings_.restore, [&] {
-      return sources::PipelineResult{
-          .recorded = present_source_->Pipeline().RecordMotionCopy(list, {.resource = frame.motion_vectors, .rect = frame.motion_region},
-                                                                   frame.mv_scale_x * settings_.motion_scale_x,
-                                                                   frame.mv_scale_y * settings_.motion_scale_y, facts_.dlss_motion_upside_down,
-                                                                   jitter.x * static_cast<float>(frame.motion_region.width) * settings_.motion_scale_x,
-                                                                   jitter.y * static_cast<float>(frame.motion_region.height) * settings_.motion_scale_y),
-      };
-    });
-    if (copied.recorded) {
-      last_game_list_recording_ = now;
-    }
-    return copied;
-  };
-  // 2026-11-05 (Depth input): the game's depth for the present that closes this frame, copied here -- at the evaluate that has it -- rather than at the
-  // present, so the present side never has to reach back into DLSS's frame (which is what the motion ring solves for the vectors). Same ring, same slot.
-  const auto copy_depth = [&]() {
-    ID3D12GraphicsCommandList* const list = host.NativeList();
-    if (frame.depth == nullptr || session_->State() != nr::SessionState::ACTIVE || list == nullptr || !host.StateKnown()
-        || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
-      return;
-    }
-    const sources::PipelineResult copied = sources::RecordOnGameList(host, *timeline_, settings_.restore, [&] {
-      return sources::PipelineResult{
-          .recorded = present_source_->Pipeline().RecordDepthCopy(list, {.resource = frame.depth, .rect = frame.depth_region}),
-      };
+    const sources::PipelineResult copied = sources::RecordOnGameList(recording_host, *timeline_, settings_.restore, [&](uint64_t token) {
+      auto producer = timeline_->TrackSubmission(token);
+      auto& pipeline = present_source_->Pipeline();
+      const bool depth = wants_depth && pipeline.RecordDepthCopy(list, {.resource = frame.depth, .rect = frame.depth_region},
+          settings_.depth_inverted.value_or(frame.snapshot.DepthInverted()), producer);
+      const bool motion = wants_motion && pipeline.RecordMotionCopy(list, {.resource = frame.motion_vectors, .rect = frame.motion_region},
+          frame.mv_scale_x * settings_.motion_scale_x, frame.mv_scale_y * settings_.motion_scale_y, facts_.dlss_motion_upside_down,
+          jitter.x * static_cast<float>(frame.motion_region.width) * settings_.motion_scale_x,
+          jitter.y * static_cast<float>(frame.motion_region.height) * settings_.motion_scale_y, producer);
+      return sources::PipelineResult{.recorded = depth || motion};
     });
     if (copied.recorded) last_game_list_recording_ = now;
+    return copied;
   };
   if (placement_.placement == Placement::PRESENT) {
     if (settings_.source != ui::PlacementSource::PRESENT) return {.reason = nr::SkipReason::NOT_AFTER_DLSS};
-    copy_depth();  // its own recording: the present binds it, not this evaluate's result
-    return copy_motion();
+    return copy_present_inputs();
   }
-  // Pass 1 runs inside the game's frame here, so a Present group can only be a later one.
-  sources::PipelineResult motion_copy = {.reason = nr::SkipReason::NOT_AFTER_DLSS};
-  if (const std::optional<uint32_t> present = GroupAt(chain_, Stage::PRESENT); present && session_->SliceRuns(slices_[*present])) {
-    copy_depth();  // only for a Present group that runs, as the motion copy (fix round 1, M4)
-    motion_copy = copy_motion();
-  }
+  const sources::PipelineResult motion_copy = copy_present_inputs();
   const std::optional<uint32_t> group = GroupAt(chain_, Stage::AFTER_DLSS);
   if (!group || dlss_idle_) {
     descriptors_busy_since_.reset();
@@ -499,20 +494,15 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
     stages_[static_cast<size_t>(Stage::AFTER_DLSS)].skip_reason = SliceSkipReason(settings_, slices_[*group]);
     return {.reason = SliceSkipReason(settings_, slices_[*group])};
   }
-  return RecordAfterDlss(frame, host, layout, now, *group, before_reset);
+  return RecordAfterDlss(frame, recording_host, layout, now, *group, before_reset);
 }
 
 sources::PipelineResult DeviceContext::RecordAfterDlss(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                        const sources::WorkLayout& layout, std::chrono::steady_clock::time_point now, uint32_t group,
                                                        std::optional<bool> before_reset) {
   ApplyLookConfig(now, group);
-  // The game's reset, filtered once per evaluate: behind a Before upscaling group, the answer that group's recording got.
-  bool reset = false;
-  if (before_reset) {
-    reset = *before_reset;
-  } else {
-    reset = reset_merger_.Filter(frame.reset, now);
-  }
+  // Honour every game reset; successive frames can both start new history.
+  const bool reset = before_reset.value_or(frame.reset);
   const sources::PipelineResult result = after_dlss_->Run(host, frame, reset, DlssConfig(layout, group));
   if (result.recorded) {
     last_game_list_recording_ = now;
@@ -732,7 +722,7 @@ ID3D12Resource* DeviceContext::BeforeDlssEvaluate(const ngx_hooks::DlssFrame& fr
 sources::PipelineResult DeviceContext::RecordBeforeUpscaling(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                              const sources::WorkLayout& layout, std::chrono::steady_clock::time_point now) {
   ApplyLookConfig(now, 0u);  // Before upscaling is always pass 1's group
-  const bool reset = reset_merger_.Filter(frame.reset, now);
+  const bool reset = frame.reset;
   const sources::PipelineResult result = pre_sr_->Run(host, frame, reset, DlssConfig(layout, 0u));
   if (chain_.Split()) {
     before_reset_ = reset;  // the After DLSS group behind it in this evaluate takes the same answer
@@ -842,7 +832,7 @@ BridgedDlssDecision DeviceContext::DecideAfterEvaluate(const ngx_hooks::DlssFram
 sources::PipelineResult DeviceContext::RecordBridgedStage(BridgedDlssWork work, const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                           std::chrono::steady_clock::time_point now) {
   // Split chain: After DLSS records its own group (pass 1's, or a later one behind Before upscaling, which then takes the reset that group's
-  // recording filtered in this evaluate); Before upscaling is always pass 1's.
+  // recording received in this evaluate); Before upscaling is always pass 1's.
   switch (work) {
     case BridgedDlssWork::AFTER_DLSS:
       return RecordAfterDlss(frame, host, bridged_layouts_[1], now, GroupAt(chain_, Stage::AFTER_DLSS).value_or(0u), std::exchange(before_reset_, std::nullopt));
@@ -909,9 +899,9 @@ void DeviceContext::SubmitTokens(std::span<const uint64_t> tokens, ID3D12Command
   timeline_->Submit(tokens, queue, thread_id, now);
 }
 
-void DeviceContext::ResubmitTokens(uint64_t first_token, ID3D12CommandQueue* queue, uint32_t thread_id,
+void DeviceContext::ResubmitTokens(std::span<const uint64_t> recordings, ID3D12CommandQueue* queue, uint32_t thread_id,
                                    std::chrono::steady_clock::time_point now) {
-  timeline_->Resubmit(first_token, queue, thread_id, now);
+  if (!recordings.empty()) timeline_->Resubmit(recordings.front(), queue, thread_id, now, recordings);
 }
 
 void DeviceContext::DropTokens(std::span<const uint64_t> tokens) {

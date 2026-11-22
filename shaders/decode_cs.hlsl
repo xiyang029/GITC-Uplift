@@ -1,7 +1,7 @@
 #include "decode_common.hlsli"
 
 // With UPLIFT_VK_SOURCE_STORAGE decode_common.hlsli has declared it (the in-place target).
-#if !UPLIFT_VK_SOURCE_STORAGE
+#if !UPLIFT_VK_SOURCE_STORAGE && !UPLIFT_DX_SOURCE_STORAGE
 UPLIFT_IMAGE_FORMAT(UPLIFT_VK_TARGET_FORMAT) RWTexture2D<float4> target_texture : register(u0);
 #endif
 

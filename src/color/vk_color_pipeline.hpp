@@ -74,6 +74,7 @@ struct VkDecodePass {
   float guided_low_gain = 1.f;           // Edge-aware: the base band's gain
   VkSampledView mask;                    // Plan 14 (§3.13): the mask copy, SHADER_READ_ONLY_OPTIMAL; null = none
   nr::foveation::Grid foveation;
+  VkImageView model_input = VK_NULL_HANDLE;
 };
 
 // Amendment 7 and v2 design §3.9: the game's motion vectors into an Uplift RG16F image, in destination pixels (Before upscaling's canvas).
@@ -131,6 +132,7 @@ struct VkStabilizePass {
   bool motion_mode = false;  // Stabilize = Motion
   bool reset = false;
   VkStabilizeMotion motion;
+  bool packed_history = false;
 };
 
 // Plan 14 (v2 design §3.11/§3.12): C rewritten in place with the shaped change. Every image GENERAL.
@@ -145,6 +147,7 @@ struct VkShapePass {
   look::Bands bands;
   look::ShapeSettings settings;
   bool sdr = false;
+  bool packed_history = false;
 };
 
 // The change field's own stabiliser (Change stabilisation): NR's field, after the shape, averaged along the vectors so a residue the network is unsure of

@@ -62,8 +62,7 @@ PipelineResult AfterDlssSource::Run(DlssFrameHost& host, const ngx_hooks::DlssFr
   const nr::Rect region = ResolveOutputRegion(frame);
   if (!nr::MeetsNrFloor({region.width, region.height})) return {.reason = nr::SkipReason::FRAME_TOO_SMALL};
   if (!pipeline_.SupportsUavTarget(frame.output->GetDesc().Format)) return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
-  // Exact pass-through: nothing is recorded, so the Output stays bit-identical.
-  if (config.controls.intensity <= 0.f) return {.reason = nr::SkipReason::INTENSITY_ZERO};
+  // RecordUav checks every effective pass, including later passes with their own controls.
   const GameFrame game = ReadGameFrame(frame, frame.output, region, (reset_hint || reset_was_owed), config);
   const PipelineResult result = RecordOnGameList(host, timeline_, config.restore, [&] {
     return pipeline_.RecordUav(list, game.target, game.inputs, config.controls, config.layout, config.part, &host);

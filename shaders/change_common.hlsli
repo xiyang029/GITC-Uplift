@@ -18,6 +18,7 @@ static const float CLAMP_CHANNEL_FLOOR = 0.05f;  // channels below 5 % of the lu
 static const uint OPTION_PRIMARIES_MASK = 3u;    // bits 0-1: PRIMARIES_* (0 = automatic)
 static const uint OPTION_NEAR_BLACK_GUARD = 4u;  // the change pass fades NR's colour change near black
 static const uint OPTION_CONSISTENT = 8u;        // the rebuild undoes Neutwo's compression
+static const uint OPTION_FUSED_CHANGE = 32u;     // direct compose computes its own change
 static const uint OPTION_MASK = 16u;             // the compose multiplies the change by the NR mask
 
 bool IsSdr(uint encoding) {

@@ -1,6 +1,8 @@
 #include "vk/interop.hpp"
 
 #include <bit>
+#include <algorithm>
+#include <iterator>
 #include <utility>
 
 #include "vk/format.hpp"
@@ -218,6 +220,7 @@ void Interop::FreeNow(SharedImage* image, GameHost& host) {
 }
 
 bool Interop::Idle() {
+  if (!dependencies_.empty() || dependency_failed_) return false;
   if (!retired_.empty()) return false;
   for (WaitFence& wait : waits_) {
     if (wait.pending && wait.fence != VK_NULL_HANDLE) {
@@ -231,6 +234,7 @@ bool Interop::Idle() {
 }
 
 void Interop::FreeAll(GameHost& host) {
+  DestroyQueueDependencies();
   for (Retired& retired : retired_) {
     if (retired.fence != VK_NULL_HANDLE) {
       device_.vkDestroyFence(device_.handle, retired.fence, nullptr);
@@ -282,6 +286,52 @@ WaitResult Interop::FlushAndWait(WaitSlot slot, GameHost& host, uint32_t timeout
   if (waited == VK_TIMEOUT) return WaitResult::TIMEOUT;
   Note(waited);
   return WaitResult::FAILED;
+}
+
+WaitResult Interop::OrderQueues(GameHost& producer, GameHost& consumer, uint32_t timeout_ms) {
+  if (producer.Queue() != VK_NULL_HANDLE && producer.Queue() == consumer.Queue()) return WaitResult::DONE;
+  if (!device_.record.timeline || producer.Queue() == VK_NULL_HANDLE || consumer.Queue() == VK_NULL_HANDLE) {
+    return FlushAndWait(WaitSlot::PRESENT_QUEUE, producer, timeout_ms);
+  }
+  if (dependency_failed_) return WaitResult::FAILED;
+  auto found = std::ranges::find_if(dependencies_, [&](const QueueDependency& d) {
+    return d.queue == producer.Queue() && d.consumer == consumer.Queue();
+  });
+  if (found == dependencies_.end()) {
+    const VkSemaphoreTypeCreateInfo type{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE};
+    const VkSemaphoreCreateInfo create{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &type};
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    const auto result = device_.vkCreateSemaphore(device_.handle, &create, nullptr, &semaphore);
+    if (result != VK_SUCCESS) { Note(result); return WaitResult::FAILED; }
+    dependencies_.push_back({producer.Queue(), consumer.Queue(), semaphore, 0u});
+    found = std::prev(dependencies_.end());
+  }
+  // One monotonically signalled semaphore per queue pair. Its retirement fence must cover every wait.
+  if (!producer.Signal(found->semaphore, ++found->value)) {
+    dependency_failed_ = true;
+    return WaitResult::FAILED;  // never queue a wait for a signal whose submission was refused
+  }
+  return consumer.Wait(found->semaphore, found->value) ? WaitResult::DONE : WaitResult::FAILED;
+}
+
+bool Interop::RetireQueueDependencies(GameHost& consumer) {
+  if (dependency_failed_) return false;
+  for (auto& dependency : dependencies_) {
+    if (dependency.semaphore == VK_NULL_HANDLE) continue;
+    // A fence on this queue cannot retire waits previously submitted to a different consumer. Such
+    // a route stays parked until that consumer returns, or until device-idle teardown.
+    if (dependency.consumer != consumer.Queue()) continue;
+    if (!consumer.Wait(dependency.semaphore, dependency.value)) return false;
+    RetireSemaphore(&dependency.semaphore, consumer);
+  }
+  std::erase_if(dependencies_, [](const QueueDependency& d) { return d.semaphore == VK_NULL_HANDLE; });
+  return dependencies_.empty();
+}
+
+void Interop::DestroyQueueDependencies() {
+  for (auto& dependency : dependencies_) DestroySemaphore(&dependency.semaphore);
+  dependencies_.clear();
+  dependency_failed_ = false;
 }
 
 uint64_t Interop::Counter(VkSemaphore semaphore) {

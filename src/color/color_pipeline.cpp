@@ -7,6 +7,8 @@
 #include <format>
 
 #include "decode_cs.h"
+#include "decode_in_place_cs.h"
+#include "depth_cs.h"
 #include "decode_ps.h"
 #include "decode_vs.h"
 #include "encode_cs.h"
@@ -101,7 +103,7 @@ std::array<uint32_t, PASS_CONSTANTS> StabilizeConstants(uint32_t mode, const Sta
   const StabilizeMotion& motion = pass.motion;
   const bool vectors = (motion.vectors.resource != nullptr);
   const uint32_t flags = (pass.reset ? STABILIZE_FLAG_RESET : 0u) | (pass.motion_mode ? STABILIZE_FLAG_MOTION : 0u)
-                         | (vectors ? STABILIZE_FLAG_VECTORS : 0u);
+                         | (vectors ? STABILIZE_FLAG_VECTORS : 0u) | (pass.packed_history ? UPLIFT_STABILIZE_FLAG_PACKED_HISTORY : 0u);
   return {
       pass.atlas.image.width, pass.atlas.image.height, pass.atlas.levels, mode, pass.bands.stable_level, flags,
       Bits(pass.rate), Bits(pass.bands.low_level), Bits(motion.scale_x), Bits(motion.scale_y), motion.vectors.rect.x,
@@ -201,6 +203,12 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
     nr::Logf(nr::LogLevel::ERR, "CreateComputePipelineState (motion) failed: {:#010x}", static_cast<uint32_t>(result));
     return false;
   }
+  // Optional: if unavailable, Present uses NR's internal depth estimate.
+  const D3D12_COMPUTE_PIPELINE_STATE_DESC depth = {
+      .pRootSignature = root_signature_.Get(),
+      .CS = {.pShaderBytecode = g_depth_cs, .BytecodeLength = sizeof(g_depth_cs)},
+  };
+  if (FAILED(device->CreateComputePipelineState(&depth, IID_PPV_ARGS(&depth_pipeline_)))) depth_pipeline_.Reset();
   // Plan 5: the look, meter and resolve pipelines.
   const auto build_compute = [&](const void* bytecode, size_t length, Microsoft::WRL::ComPtr<ID3D12PipelineState>* pipeline,
                                  const char* name) {
@@ -232,6 +240,11 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
   D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
   uav_loads_ = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options)))
                && options.TypedUAVLoadAdditionalFormats != FALSE;
+  if (uav_loads_) {
+    D3D12_COMPUTE_PIPELINE_STATE_DESC in_place = compute_decode;
+    in_place.CS = {.pShaderBytecode = g_decode_in_place_cs, .BytecodeLength = sizeof(g_decode_in_place_cs)};
+    if (FAILED(device->CreateComputePipelineState(&in_place, IID_PPV_ARGS(&in_place_decode_pipeline_)))) in_place_decode_pipeline_.Reset();
+  }
   if (!uav_loads_) {
     nr::Log(nr::LogLevel::WARN, "this GPU has no typed UAV loads: Shape result, Metered exposure, pass strengths and Keep faces are unavailable");
   }
@@ -355,6 +368,16 @@ bool ColorPipeline::RecordChange(ID3D12GraphicsCommandList* list, uint32_t slot,
   return true;
 }
 
+bool ColorPipeline::RecordDepth(ID3D12GraphicsCommandList* list, uint32_t slot, ID3D12Resource* source,
+                                DXGI_FORMAT view_format, nr::Rect region, ID3D12Resource* target) {
+  if (!depth_pipeline_ || !SlotInRange(slot, "RecordDepth")) return false;
+  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + MOTION_TABLE;  // dedicated slot from the depth recording
+  WriteTable(base, {{source, view_format}}, {{target, DXGI_FORMAT_R32_FLOAT}});
+  const std::array<uint32_t, 4> constants = {region.x, region.y, region.width, region.height};
+  DispatchCompute(list, depth_pipeline_.Get(), constants, base, region.width, region.height);
+  return true;
+}
+
 bool ColorPipeline::RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const MotionPass& pass) {
   if (!SlotInRange(slot, "RecordMotion")) return false;
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + MOTION_TABLE;
@@ -377,7 +400,7 @@ bool ColorPipeline::RecordDecode(ID3D12GraphicsCommandList* list, uint32_t slot,
 
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + DECODE_TABLE;
   WriteTable(base, {{pass.source, pass.source_view_format}, {pass.nr_output}, ExposureView(pass.exposure),
-                    {pass.mask, pass.mask_view_format}},
+                    {pass.mask, pass.mask_view_format}, {pass.model_input}},
              {});
   D3D12_RENDER_TARGET_VIEW_DESC target_view = {};
   target_view.Format = pass.target_view_format;
@@ -393,7 +416,7 @@ bool ColorPipeline::RecordDecode(ID3D12GraphicsCommandList* list, uint32_t slot,
       (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u), 0u, 0u,
       pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u), Bits(pass.chroma_clamp),
       pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
-      Bits(pass.guided_low_gain),
+      Bits(pass.guided_low_gain), (pass.model_input != nullptr ? 1u : 0u),
   };
   const D3D12_VIEWPORT viewport = {.TopLeftX = 0.f, .TopLeftY = 0.f, .Width = static_cast<float>(pass.width),
                                    .Height = static_cast<float>(pass.height), .MinDepth = 0.f, .MaxDepth = 1.f};
@@ -416,7 +439,7 @@ bool ColorPipeline::RecordComputeDecode(ID3D12GraphicsCommandList* list, uint32_
   if (!SlotInRange(slot, "RecordComputeDecode")) return false;
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + DECODE_TABLE;
   WriteTable(base, {{pass.source, pass.source_view_format}, {pass.nr_output}, ExposureView(pass.exposure),
-                    {pass.mask, pass.mask_view_format}},
+                    {pass.mask, pass.mask_view_format}, {pass.model_input}},
              {{pass.target, pass.target_uav_format}});
   const std::array<uint32_t, PASS_CONSTANTS> constants = {
       static_cast<uint32_t>(pass.encoding), 0u, Bits(pass.input_scale), Bits(pass.transfer_strength),
@@ -425,9 +448,11 @@ bool ColorPipeline::RecordComputeDecode(ID3D12GraphicsCommandList* list, uint32_
       (pass.upsampling ? static_cast<uint32_t>(*pass.upsampling) + 1u : 0u),
       pass.source_x, pass.source_y, pass.options | (pass.mask != nullptr ? shader_options::MASK : 0u), Bits(pass.chroma_clamp),
       pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
-      Bits(pass.guided_low_gain),
+      Bits(pass.guided_low_gain), (pass.model_input != nullptr ? 1u : 0u),
   };
-  DispatchCompute(list, compute_decode_pipeline_.Get(), constants, base, pass.width, pass.height);
+  ID3D12PipelineState* const pipeline = pass.source != nullptr ? compute_decode_pipeline_.Get() : in_place_decode_pipeline_.Get();
+  if (pipeline == nullptr) return false;
+  DispatchCompute(list, pipeline, constants, base, pass.width, pass.height);
   return true;
 }
 
@@ -491,7 +516,7 @@ bool ColorPipeline::RecordShape(ID3D12GraphicsCommandList* list, uint32_t slot, 
                     {pass.detail}},
              {{pass.change}});
   const look::ShapeSettings& shape = pass.settings;
-  const uint32_t flags = (pass.sdr ? 1u : 0u) | (pass.history != nullptr ? 2u : 0u) | (pass.detail != nullptr ? 4u : 0u);
+  const uint32_t flags = (pass.sdr ? 1u : 0u) | (pass.history != nullptr ? 2u : 0u) | (pass.detail != nullptr ? 4u : 0u) | (pass.packed_history ? UPLIFT_SHAPE_FLAG_PACKED_HISTORY : 0u);
   const std::array<uint32_t, 20> constants = {
       pass.atlas.image.width, pass.atlas.image.height, pass.atlas.levels, flags,
       Bits(pass.bands.low_level), pass.bands.peak_level, Bits(shape.tone), Bits(shape.detail),
@@ -609,6 +634,16 @@ bool ColorPipeline::SupportsTypedUavStore(DXGI_FORMAT format) const {
                          && (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
   typed_uav_store_.emplace(format, supported);
   return supported;
+}
+
+bool ColorPipeline::CanDecodeInPlace(DXGI_FORMAT format) const {
+  if (!in_place_decode_pipeline_) return false;
+  if (const auto found = in_place_formats_.find(format); found != in_place_formats_.end()) return found->second;
+  D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {.Format = format};
+  const bool supported = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support)))
+      && (support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_LOAD) != 0u
+      && (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0u;
+  return in_place_formats_.emplace(format, supported).first->second;
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE ColorPipeline::CpuDescriptor(uint32_t index) const {

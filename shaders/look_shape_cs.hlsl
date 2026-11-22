@@ -46,7 +46,8 @@ void main(uint3 id : SV_DispatchThreadID) {
   const float4 low = LowPass(gauss_atlas, image, levels, low_level, id.xy, true);
   float4 stable_low = low;
   if ((flags & SHAPE_FLAG_STABILIZED) != 0u) {
-    stable_low = LowPass(history_atlas, image, levels, low_level, id.xy, true);
+    stable_low = LowPass(history_atlas, image, levels, low_level, id.xy, true,
+                         (flags & UPLIFT_SHAPE_FLAG_PACKED_HISTORY) != 0u);
   }
   float4 high = float4(change.xyz - low.xyz, 0.f);
   if ((flags & SHAPE_FLAG_DETAIL) != 0u) {

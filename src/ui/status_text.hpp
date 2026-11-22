@@ -170,6 +170,9 @@ struct SetupView {
   MotionPick motion = MotionPick::OFF;
   ResolutionMode resolution = ResolutionMode::FULL;
   std::string why;  // without "Why: "; empty unless a highlight is a temporary fallback from the preference
+  // The Motion vectors row kept the preference because a Present copy is only in flight this frame (MotionGap::NO_COPY):
+  // the row's tooltip says so, where the highlight does not move to Off.
+  std::string motion_note;
   bool stopped = false;  // SetupFacts::stopped; the highlights stay greyed too (SetupSettle never un-greys them)
   // Split chain: passes 2..10's rows ([0] is pass 2; only those below the pass count are resolved), whether passes can run at several stages
   // here (otherwise every row is greyed with ONE_STAGE_REASON), and whether some pass runs at another stage than pass 1 (the pass trees name the stage).

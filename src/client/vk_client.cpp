@@ -258,7 +258,7 @@ bool VkClient::Apply(const ipc::Reply& reply, NrLink& link, vk::GameHost& host) 
 
 bool VkClient::SyncPresentQueue(vk::GameHost* present_host, vk::GameHost& host, NrLink& link) {
   if (present_host == nullptr || present_synced_) return true;
-  switch (interop_.FlushAndWait(vk::WaitSlot::PRESENT_QUEUE, *present_host, WAIT_CAP_MS)) {
+  switch (interop_.OrderQueues(*present_host, host, WAIT_CAP_MS)) {
     case vk::WaitResult::DONE:
       present_queue_timeouts_ = 0u;
       present_synced_ = true;
@@ -515,6 +515,7 @@ MaskCopy VkClient::CopyMask(vk::GameHost& host, const vk::ImageInfo& mask, NrLin
 }
 
 bool VkClient::FreeRetired(vk::GameHost& host) {
+  if (!interop_.RetireQueueDependencies(host)) return false;
   interop_.FreeFinished(host);
   if (!interop_.Idle()) return false;
   interop_.FreeAll(host);  // nothing is retired any more: the wait fences, none of them in flight

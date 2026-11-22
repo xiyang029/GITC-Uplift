@@ -24,6 +24,7 @@ struct __declspec(uuid("3f2a9c64-8b0e-4f1d-9e57-c1a2b3d4e5f6")) ListState {
   state::ComputeShadow shadow;
   std::vector<std::shared_ptr<sources::NrTimingSlot>> nr_timing;  // retained while the closed list may execute again
   std::vector<uint64_t> tokens;  // completion tokens recorded on this list and not yet submitted
+  std::vector<uint64_t> recording_tokens;  // resource references until Reset/destroy, including completed executions
   uint64_t first_token = 0u;     // the first Uplift token since the last Reset; 0 = none
   bool executed = false;         // submitted at least once since the last Reset
   // SubmitEpochs::AtReset at the list's last Reset (or creation); 0 never counts as a later call. Handed over like `tokens`, `first_token` and

@@ -32,6 +32,7 @@ class GameHost {
   virtual ~GameHost() = default;
   // Reports a usable queue; the ReShade host is invalid when its immediate list could not be created or the queue was destroyed.
   [[nodiscard]] virtual bool Valid() const = 0;
+  [[nodiscard]] virtual VkQueue Queue() const { return VK_NULL_HANDLE; }
   // A null `image` is a global memory barrier (ReShade: ALL_COMMANDS to ALL_COMMANDS, with the accesses `before` and `after` name): what the queue
   // ran earlier finishes, and its writes of that kind are visible, before anything after it.
   virtual void Barrier(VkImage image, Usage before, Usage after) = 0;

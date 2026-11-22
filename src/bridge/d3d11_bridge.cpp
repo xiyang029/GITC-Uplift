@@ -237,7 +237,7 @@ void D3D11Bridge::GrowRingForSplit() {
   }
 }
 
-bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const Recorder& record, bool dlss_motion) {
+bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const Recorder& record, bool dlss_motion, uint64_t max_motion_age) {
   if (!latch_.empty() || !color_.shared.d3d12 || back_buffer == nullptr) return false;
   if (!side_->SlotFree()) {
     ++busy_skips_;  // this frame goes without NR rather than waiting
@@ -251,7 +251,7 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
     for (size_t index = 0u; index < RING_SLOTS; ++index) {
       frames[index] = (ring_[index].shared.d3d12 ? ring_[index].frame : 0u);
     }
-    if (const sources::PresentMotionPick pick = sources::PickPresentMotion(frames, presents_); pick.slot) {
+    if (const sources::PresentMotionPick pick = sources::PickPresentMotion(frames, presents_, max_motion_age); pick.slot) {
       ring_slot = &ring_[*pick.slot];
     }
   }
@@ -325,9 +325,11 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
           .motion_scale_y = (ring_slot_ != nullptr ? ring_slot_->scale_y : 1.f),
           .motion_region = (ring_slot_ != nullptr ? ring_slot_->region : nr::Rect{}),  // the slot is the vectors' whole size
           .dlss_motion_age = (ring_slot_ != nullptr ? bridge_.presents_ - ring_slot_->frame : 0u),
+          // The mask above is the bridge's fresh copy: already SHADER_READ and kept alive by the bridge, so the recorder must not copy it again.
+          .mask_sampled = bridge_.mask_fresh_,
       };
       if (targets.mask != nullptr) {
-        Transition(list, targets.mask, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Transition(list, targets.mask, D3D12_RESOURCE_STATE_COMMON, SHADER_READ);
       }
       if (targets.motion != nullptr) {
         Transition(list, targets.motion, D3D12_RESOURCE_STATE_COMMON, SHADER_READ);
@@ -345,7 +347,7 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
         Transition(list, targets.motion, SHADER_READ, D3D12_RESOURCE_STATE_COMMON);
       }
       if (targets.mask != nullptr) {
-        Transition(list, targets.mask, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+        Transition(list, targets.mask, SHADER_READ, D3D12_RESOURCE_STATE_COMMON);
       }
       if (!recorded) {
         bridge_.side_->CloseList();
@@ -385,7 +387,7 @@ bool D3D11Bridge::Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const
     color_.shared.last_use = out;
     if (steps.used_mask) {
       mask_.shared.last_use = out;
-      mask_fresh_ = false;
+      mask_fresh_ = false;  // the mask describes the frame it was recorded for; the next Run takes a new one
     }
     if (ring_slot != nullptr) {
       ring_slot->shared.last_use = out;  // the slot, in place of UPLIFT_MV's share
@@ -419,7 +421,6 @@ MaskCopy D3D11Bridge::CopyMask(ID3D11Resource* mask) {
   // does not open even then, and stays unsupported.
   if (!mask_.shared.d3d12 || mask_.shared.size != size || mask_.shared.format != format->view_format) {
     Retire(&mask_.shared);
-    mask_fresh_ = false;
     if (mask_.failure && mask_.failure->Matches(size, format->view_format)) return {};
     HRESULT share_result = S_OK;
     if (!CreateShared(size, format->view_format,
@@ -434,13 +435,11 @@ MaskCopy D3D11Bridge::CopyMask(ID3D11Resource* mask) {
     mask_.failure.reset();
   }
   context11_->CopyResource(mask_.shared.d3d11.Get(), mask);
-  mask_fresh_ = true;
   return {.size = size};
 }
 
 void D3D11Bridge::ReleaseMask() {
   Retire(&mask_.shared);
-  mask_fresh_ = false;
 }
 
 void D3D11Bridge::Stop(std::string reason) {

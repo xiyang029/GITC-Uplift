@@ -14,6 +14,7 @@
 #include <memory>
 #include <shared_mutex>
 #include <span>
+#include <set>
 #include <string_view>
 #include <vector>
 
@@ -24,6 +25,7 @@ namespace uplift::nr {
 struct Mark {
   uint64_t frame = 0u;
   uint64_t token = 0u;  // the newest token issued when the mark was taken; 0 = none
+  uint64_t recording_token = 0u;  // descriptor/query owner; 0 for a one-shot Present recording
 };
 
 // The per-queue fences completion tokens are stamped with. Timeline::CreateD3D12 installs one fence
@@ -84,8 +86,13 @@ class Timeline {
   // the shared frame fence no longer proves the old queue's work is done. Token completion is
   // cumulative, so requiring only the latest switch's barrier also covers every earlier one.
   [[nodiscard]] bool IsComplete(const Mark& mark) const;
+  // Execution progress alone does not release resources retained by executable lists.
+  [[nodiscard]] bool IsExecutionComplete(const Mark& mark) const;
+  // A descriptor slot belongs to its own recording, not every earlier executable list.
+  [[nodiscard]] bool IsReusable(const Mark& mark) const;
+  [[nodiscard]] uint32_t FindReusableSlot(std::span<const Mark> marks, uint32_t first, uint32_t ordinal = 0u) const;
   // The current frame and the newest token issued so far.
-  [[nodiscard]] Mark MarkNow() const;
+  [[nodiscard]] Mark MarkNow(bool replayable = false) const;
   // Waits for `frame` and for every token issued before this call.
   void ReleaseAfter(uint64_t frame, std::function<void()> release);
   void ReleaseAfter(const Mark& mark, std::function<void()> release);
@@ -100,6 +107,21 @@ class Timeline {
   [[nodiscard]] std::string_view WaitIdle(std::chrono::milliseconds timeout);
   [[nodiscard]] size_t PendingCount() const { return pending_.size(); }
 
+  // A producer ticket distinguishes a recorded/discarded copy from a queued copy, even after Poll prunes its token.
+  class SubmissionProof {
+    friend class Timeline;
+    ID3D12CommandQueue* queue_ = nullptr;
+    // The frame the list covering this proof was submitted in. A proof submitted in an earlier frame than the
+    // consumer's is ordered by the queue alone: its native ExecuteCommandLists returned before the consumer's frame
+    // even started, so ReShade's execute-command-list window (raised before that native call) cannot be in play.
+    uint64_t submitted_frame_ = 0u;
+    uint64_t fence_ = 0u;
+    bool complete_ = false;
+    bool replayed_ = false;
+  };
+  [[nodiscard]] std::shared_ptr<SubmissionProof> TrackSubmission(uint64_t token);
+  [[nodiscard]] bool OrderedBefore(const SubmissionProof* proof, ID3D12CommandQueue* consumer) const;
+
   // A new token, for a recording Uplift is about to make on a game command list. `now` defaults to
   // the real clock; a test wanting a deterministic issue time for the stuck-token check (StampAged)
   // passes its own.
@@ -112,9 +134,13 @@ class Timeline {
   // `queue` again without a Reset. A fresh token covers this execution, and every mark taken since
   // `first_token` was issued also waits for it: the resources those marks guard may be read again.
   // Returns the fresh token's id (a Vulkan caller maps it to the list's event).
-  uint64_t Resubmit(uint64_t first_token, ID3D12CommandQueue* queue, uint32_t thread_id, std::chrono::steady_clock::time_point now);
+  uint64_t Resubmit(uint64_t first_token, ID3D12CommandQueue* queue, uint32_t thread_id, std::chrono::steady_clock::time_point now,
+                    std::span<const uint64_t> recordings = {});
   // `tokens`' list was reset or destroyed without being submitted: those tokens are complete.
   void Drop(std::span<const uint64_t> tokens);
+  // A completed executable command list can still run again. Reset/destroy releases its recording references,
+  // independently of the fence/event proving its last execution complete.
+  void ReleaseRecordings(std::span<const uint64_t> tokens);
   // At every Uplift event on thread `thread_id` EXCEPT execute_command_list (reset, evaluate, present):
   // that thread's earlier ExecuteCommandLists calls have returned, so one Signal per queue now follows
   // them. Never from execute_command_list: ReShade raises it for every list of one ExecuteCommandLists
@@ -162,6 +188,7 @@ class Timeline {
     uint64_t submit_frame = 0u;
     std::chrono::steady_clock::time_point submit_time;
     uint64_t fence_value = 0u;
+    std::weak_ptr<SubmissionProof> proof;
     bool stage = false;  // split chain: MarkStageToken's
   };
 
@@ -183,6 +210,8 @@ class Timeline {
 
   mutable std::shared_mutex tokens_mutex_;
   std::map<uint64_t, Token> tokens_;  // outstanding tokens by id
+  std::set<uint64_t> recordings_;
+  std::map<uint64_t, std::weak_ptr<SubmissionProof>> recording_proofs_;
   uint64_t last_token_ = 0u;
   std::atomic<uint32_t> unstamped_{0u};  // SUBMITTED tokens: lets StampThread return without the lock
   std::atomic<uint64_t> thread_stamps_{0u};  // tokens StampThread stamped, cumulative

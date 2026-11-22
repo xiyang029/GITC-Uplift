@@ -90,7 +90,7 @@ bool NrCompletion::EventSet(uint64_t token) {
   if (freed_.load(std::memory_order_acquire) || lost_.load(std::memory_order_acquire) || idle_.load(std::memory_order_acquire)) return true;
   const std::scoped_lock lock(mutex_);
   const auto found = entries_.find(token);
-  // No entry: the event was not made yet (the recording is still going on) or could not be made. Not complete: DropStale decides.
+  // No entry: the event was not made yet (the recording is still going on) or could not be made. It remains outstanding.
   if (found == entries_.end() || found->second.event == VK_NULL_HANDLE) return false;
   const VkResult status = functions_.vkGetEventStatus(device_, found->second.event);
   if (status == VK_ERROR_DEVICE_LOST) {
@@ -122,60 +122,75 @@ VkEvent NrCompletion::EventFor(uint64_t token, std::chrono::steady_clock::time_p
   } else {
     const VkEventCreateInfo create = {.sType = VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
     if (const VkResult result = functions_.vkCreateEvent(device_, &create, nullptr, &event); result != VK_SUCCESS) {
-      Logf(nr::LogLevel::WARN, "vkCreateEvent returned VkResult {}; the token stays outstanding until it is dropped as stale", static_cast<int>(result));
+      Logf(nr::LogLevel::WARN, "vkCreateEvent returned VkResult {}; the token stays outstanding until the command buffer is recycled", static_cast<int>(result));
       event = VK_NULL_HANDLE;
     }
   }
-  entries_[token] = {.event = event, .issued = now, .issue_frame = timeline_->CurrentFrame()};
+  Entry& entry = entries_[token];
+  entry.event = event;
+  entry.issued = now;
+  entry.issue_frame = timeline_->CurrentFrame();
+  if (auto motion = entry.motion.lock()) motion->event_ = event;
   return event;
 }
 
-void NrCompletion::Executed(std::span<const uint64_t> tokens) {
+std::shared_ptr<NrCompletion::MotionProducer> NrCompletion::TrackMotion(uint64_t token) {
+  const std::scoped_lock lock(mutex_);
+  auto& entry = entries_[token];
+  if (auto motion = entry.motion.lock()) return motion;
+  auto motion = std::make_shared<MotionProducer>();
+  entry.motion = motion;
+  return motion;
+}
+
+bool NrCompletion::OrderedBefore(const MotionProducer& motion, VkQueue queue) const {
+  const std::scoped_lock lock(mutex_);
+  if (queue == VK_NULL_HANDLE || motion.queue_ != queue || freed_.load() || lost_.load()) return false;
+  // ReShade's callback is before the native submit. The same calling thread cannot be in both the
+  // submit and the present; on other threads require that the recorded event actually ran.
+  return motion.completed_ || motion.thread_ == GetCurrentThreadId()
+      || (motion.event_ != VK_NULL_HANDLE && functions_.vkGetEventStatus(device_, motion.event_) == VK_EVENT_SET);
+}
+
+void NrCompletion::Executed(std::span<const uint64_t> tokens, VkQueue native_queue) {
   const std::scoped_lock lock(mutex_);
   for (const uint64_t token : tokens) {
     if (const auto found = entries_.find(token); found != entries_.end()) {
-      if (found->second.dropped && !late_submit_logged_) {
-        // Late-submission limit: the token completed when it was dropped, so a release may have run before this submission:
-        // a device removal soon after is traced here.
-        late_submit_logged_ = true;
-        nr::Logf(nr::LogLevel::WARN, uplift::text::VK_LATE_SUBMISSION_LINE, STALE_AGE.count(), STALE_FRAMES);
-      }
       found->second.executed = true;
+      if (auto motion = found->second.motion.lock()) {
+        motion->queue_ = native_queue;
+        motion->thread_ = GetCurrentThreadId();
+      }
     }
   }
 }
 
-void NrCompletion::Reexecuted(std::span<const uint64_t> tokens, uint64_t first_token, void* queue) {
-  VkEvent last = VK_NULL_HANDLE;
-  bool reset_failed = false;
+void NrCompletion::Reexecuted(std::span<const uint64_t> tokens, uint64_t first_token, void* queue, VkQueue native_queue) {
+  if (freed_.load(std::memory_order_acquire) || lost_.load(std::memory_order_acquire)) return;
+  // The executable buffer may have SIMULTANEOUS_USE. Its event may still be SET from an earlier run,
+  // and resetting it from the host can race the GPU. Only recycle proves all executions ended.
+  Executed(tokens, native_queue);
   {
     const std::scoped_lock lock(mutex_);
-    if (freed_.load(std::memory_order_acquire) || lost_.load(std::memory_order_acquire)) return;
     for (const uint64_t token : tokens) {
-      const auto found = entries_.find(token);
-      if (found == entries_.end() || found->second.event == VK_NULL_HANDLE) continue;
-      // The list cannot be pending here (a command buffer without SIMULTANEOUS_USE is submitted again only after its last run finished), so
-      // the reset cannot race the earlier execution that set the event.
-      if (functions_.vkResetEvent(device_, found->second.event) != VK_SUCCESS) {
-        reset_failed = true;  // the event stays SET: it cannot tell this execution's end
+      if (const auto found = entries_.find(token); found != entries_.end()) {
+        if (const auto motion = found->second.motion.lock()) {
+          // The queue still holds: this execution is submitted there, so everything recorded before it, the copies included, is ordered before any
+          // later work on that queue -- OrderedBefore's same-thread rule covers the present, which runs after this submit on this thread. Only the
+          // event stops being a proof: it may still be SET from the earlier run and can be neither reset nor re-recorded here. Clearing the queue
+          // instead (the old behaviour) dropped every motion copy of a replayed list for good, since Recycle can only prove the replay token's
+          // event, and that token has none.
+          motion->event_ = VK_NULL_HANDLE;
+          motion->thread_ = GetCurrentThreadId();
+        }
       }
-      found->second.executed = true;
-      found->second.dropped = false;
-      last = found->second.event;
     }
   }
-  if (last == VK_NULL_HANDLE) return;
-  // Without the lock: the Timeline's probe takes it under the Timeline's own.
-  const uint64_t fresh = timeline_->Resubmit(first_token, nr::AsQueue(queue), GetCurrentThreadId(), std::chrono::steady_clock::now());
+  const auto now = std::chrono::steady_clock::now();
+  const uint64_t fresh = timeline_->Resubmit(first_token, nr::AsQueue(queue), GetCurrentThreadId(), now);
   const std::scoped_lock lock(mutex_);
   if (!freed_.load(std::memory_order_acquire)) {
-    // A failed reset leaves the fresh token without an event. DropStale applies both age guards, so a stale SET event cannot complete it immediately.
-    entries_[fresh] = {
-        .event = (reset_failed ? VK_NULL_HANDLE : last),
-        .issued = std::chrono::steady_clock::now(),
-        .issue_frame = timeline_->CurrentFrame(),
-        .executed = !reset_failed,
-    };
+    entries_[fresh] = {.issued = now, .issue_frame = timeline_->CurrentFrame(), .executed = true, .owner = first_token};
   }
 }
 
@@ -191,11 +206,17 @@ void NrCompletion::Recycle(std::span<const uint64_t> tokens) {
           events.push_back(found->second.event);
         }
       }
-      // Every entry on one of these events goes with them: the listed tokens and the fresh one a re-execution mapped to a list's event.
+      // Retire this recording and all its resubmission tokens.
       std::erase_if(entries_, [&](const auto& entry) {
         const bool listed = std::ranges::find(tokens, entry.first) != tokens.end();
-        const bool aliased = entry.second.event != VK_NULL_HANDLE && std::ranges::find(events, entry.second.event) != events.end();
+        const bool aliased = entry.second.owner != 0u && std::ranges::find(tokens, entry.second.owner) != tokens.end();
         if (!listed && !aliased) return false;
+        if (const auto motion = entry.second.motion.lock()) {
+          motion->completed_ = entry.second.executed && entry.second.event != VK_NULL_HANDLE && !lost_.load()
+              && functions_.vkGetEventStatus(device_, entry.second.event) == VK_EVENT_SET;
+          motion->event_ = VK_NULL_HANDLE;
+          motion->thread_ = 0u;
+        }
         if (!listed) {
           dropped.push_back(entry.first);
         }
@@ -217,22 +238,20 @@ void NrCompletion::Recycle(std::span<const uint64_t> tokens) {
   timeline_->Drop(dropped);
 }
 
-void NrCompletion::DropStale(std::chrono::steady_clock::time_point now, uint64_t frame) {
-  std::vector<uint64_t> stale;
+void NrCompletion::DiagnoseStale(std::chrono::steady_clock::time_point now, uint64_t frame) {
+  if (stale_logged_) return;
+  bool stale = false;
   {
     const std::scoped_lock lock(mutex_);
-    for (auto& [token, entry] : entries_) {
-      if (entry.dropped || (entry.executed && entry.event != VK_NULL_HANDLE)) continue;
-      if (now - entry.issued < STALE_AGE || frame < entry.issue_frame + STALE_FRAMES) continue;
-      entry.dropped = true;
-      stale.push_back(token);
-    }
+    stale = std::ranges::any_of(entries_, [&](const auto& item) {
+      const Entry& entry = item.second;
+      return (!entry.executed || entry.event == VK_NULL_HANDLE) && now - entry.issued >= STALE_AGE
+          && frame >= entry.issue_frame + STALE_FRAMES;
+    });
   }
-  if (stale.empty()) return;
-  timeline_->Drop(stale);
-  if (!stale_logged_) {
+  if (stale) {
     stale_logged_ = true;
-    nr::Logf(nr::LogLevel::INFO, uplift::text::VK_STALE_TOKEN_DROPPED_LINE, STALE_AGE.count());
+    nr::Logf(nr::LogLevel::INFO, uplift::text::VK_STALE_TOKEN_LINE, STALE_AGE.count());
   }
 }
 
@@ -248,7 +267,7 @@ bool NrCompletion::WaitSubmitted(std::chrono::milliseconds cap) {
       const std::scoped_lock lock(mutex_);
       if (freed_.load(std::memory_order_acquire) || lost_.load(std::memory_order_acquire) || idle_.load(std::memory_order_acquire)) return true;
       for (const auto& [token, entry] : entries_) {
-        if (!entry.executed || entry.dropped) continue;  // never submitted: it cannot be running
+        if (!entry.executed) continue;  // never submitted: it cannot be running
         // A submitted recording whose event could not be made cannot tell its end: only the cap ends the wait for it.
         const VkResult status = (entry.event == VK_NULL_HANDLE ? VK_EVENT_RESET : functions_.vkGetEventStatus(device_, entry.event));
         if (status == VK_ERROR_DEVICE_LOST) {

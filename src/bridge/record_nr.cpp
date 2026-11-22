@@ -20,6 +20,10 @@ class BridgeDlssHost final : public sources::DlssFrameHost {
   void ReplayState(state::RestoreMode /*mode*/) override {}
   void AttachToken(uint64_t token) override { tokens.push_back(token); }
   void HoldTiming(const std::shared_ptr<sources::NrTimingSlot>& slot) override { timing = slot; }
+  ID3D12Resource* SharedMask() const override { return mask; }
+  ID3D12Resource* PreSrOutput() const override { return swap; }
+  ID3D12Resource* mask = nullptr;
+  ID3D12Resource* swap = nullptr;
   ID3D12GraphicsCommandList* list = nullptr;
   std::vector<uint64_t> tokens;
   std::shared_ptr<sources::NrTimingSlot> timing;
@@ -31,15 +35,7 @@ sources::PipelineResult RecordDlssStage(addon::DeviceContext& context, addon::Br
                                         ID3D12GraphicsCommandList* list, const DlssHandoffTargets& targets, BridgeDlssHost& host,
                                         std::chrono::steady_clock::time_point now) {
   constexpr D3D12_RESOURCE_STATES READ = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;  // DLSS's input state, and NR's pipeline's
-  if (targets.mask != nullptr) {
-    const D3D12_RESOURCE_DESC description = targets.mask->GetDesc();
-    if (ID3D12Resource* const copy = context.PrepareMaskCopy(&description)) {
-      Transition(list, copy, SHADER_READ, D3D12_RESOURCE_STATE_COPY_DEST);
-      list->CopyResource(copy, targets.mask);
-      Transition(list, copy, D3D12_RESOURCE_STATE_COPY_DEST, SHADER_READ);
-      context.NoteMaskCopied();
-    }
-  }
+  host.mask = targets.mask;
   const bool after = (work == addon::BridgedDlssWork::AFTER_DLSS);
   // The game's Direct3D 11 pointers never reach a Direct3D 12 call: every resource NR reads is the bridge's copy, or null.
   ngx_hooks::DlssFrame frame = game_frame;
@@ -59,12 +55,17 @@ sources::PipelineResult RecordDlssStage(addon::DeviceContext& context, addon::Br
   for (ID3D12Resource* const input : {targets.motion, targets.exposure}) {
     if (input != nullptr) Transition(list, input, D3D12_RESOURCE_STATE_COMMON, READ);
   }
+  if (!after && targets.swap != nullptr && (targets.swap->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0u) {
+    host.swap = targets.swap;
+    Transition(list, host.swap, D3D12_RESOURCE_STATE_COMMON, READ);
+  }
   const sources::PipelineResult result = context.RecordBridgedStage(work, frame, host, now);
+  if (host.swap != nullptr) Transition(list, host.swap, READ, D3D12_RESOURCE_STATE_COMMON);
   for (ID3D12Resource* const input : {targets.motion, targets.exposure}) {
     if (input != nullptr) Transition(list, input, READ, D3D12_RESOURCE_STATE_COMMON);
   }
   Transition(list, targets.image, image_state, D3D12_RESOURCE_STATE_COMMON);
-  if (!after && result.nr_applied) {
+  if (!after && result.nr_applied && host.swap == nullptr) {
     ID3D12Resource* const color = context.PrivateColor();  // NON_PIXEL_SHADER_RESOURCE after RecordPreSr (nr_pipeline.cpp's COMPUTE_READ)
     Transition(list, color, READ, D3D12_RESOURCE_STATE_COPY_SOURCE);
     Transition(list, targets.swap, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -79,7 +80,7 @@ sources::PipelineResult RecordDlssStage(addon::DeviceContext& context, addon::Br
 
 bool RecordNr(addon::DeviceContext& context, addon::TriggerPoint point, ID3D12GraphicsCommandList* list,
               const BridgeTargets& targets) {
-  if (targets.mask != nullptr) {
+  if (targets.mask != nullptr && !targets.mask_sampled) {
     // A fresh UPLIFT_MASK into NR's own copy, which it binds from this recording on.
     const D3D12_RESOURCE_DESC description = targets.mask->GetDesc();
     if (ID3D12Resource* const copy = context.PrepareMaskCopy(&description)) {
@@ -93,7 +94,7 @@ bool RecordNr(addon::DeviceContext& context, addon::TriggerPoint point, ID3D12Gr
   // Direct3D 11's ring slot carries DLSS's scale as values (1 for every other source).
   return context
       .Run(&host, D3D12_RESOURCE_STATE_COMMON, point, targets.motion, targets.motion_is_dlss, targets.motion_scale_x, targets.motion_scale_y,
-           targets.motion_region, targets.dlss_motion_age)
+           targets.motion_region, targets.dlss_motion_age, targets.mask_sampled ? targets.mask : nullptr)
       .nr_applied;
 }
 
@@ -127,6 +128,7 @@ DlssHandoff RunDlssStage(D3D11Bridge& bridge, addon::DeviceContext& context, add
       if (host.timing) sources::NrGpuTiming::SetSubmissionQueue({&host.timing, 1u}, bridge.Queue());
       context.SubmitTokens(host.tokens, bridge.Queue(), GetCurrentThreadId(), now);  // after the native submit: stamped at once
       context.StampThread(GetCurrentThreadId());
+      context.ReleaseRecordings(host.tokens);  // private one-shot lists never replay; their execution fences still guard the resources
     } else {
       context.DropTokens(host.tokens);
     }

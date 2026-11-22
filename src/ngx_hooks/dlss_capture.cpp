@@ -101,11 +101,4 @@ MotionJitterOffset MotionJitterTracker::Update(const DlssFrame& frame) {
   return {.x = current.x - previous->x, .y = current.y - previous->y};
 }
 
-bool ResetMerger::Filter(bool game_reset, std::chrono::steady_clock::time_point now) {
-  if (!game_reset) return false;
-  if (last_passed_ && now - *last_passed_ < window_) return false;
-  last_passed_ = now;
-  return true;
-}
-
 }  // namespace uplift::ngx_hooks

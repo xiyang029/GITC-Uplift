@@ -63,6 +63,7 @@ struct BridgeTargets {
   float motion_scale_y = 1.f;
   nr::Rect motion_region;  // `motion`'s subrect (a ring slot's region, at (0, 0)); empty: the whole texture
   uint64_t dlss_motion_age = 0u;  // 0 for the current frame's vectors
+  bool mask_sampled = false;      // true: already SHADER_READ and kept alive by the bridge
 };
 
 // Records NR on `list` and says whether it wrote targets.color: the copy back to D3D11 follows only then.
@@ -172,7 +173,7 @@ class D3D11Bridge final : public PrivateDeviceBridge {
   // `motion`: this frame's UPLIFT_MV (RG16F), copied with the back buffer; null without LaunchPad.
   // `dlss_motion` (NR at Present on a DLSS game): this frame's ring slot, when an evaluate copied one (CopyPresentMotion), is bound as
   // DLSS's vectors with its scale, ahead of Launchpad's (`motion` is then not copied).
-  bool Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const Recorder& record, bool dlss_motion = false);
+  bool Run(ID3D11Resource* back_buffer, ID3D11Resource* motion, const Recorder& record, bool dlss_motion = false, uint64_t max_motion_age = sources::PRESENT_MOTION_MAX_AGE);
   // At the end of the effects: UPLIFT_MASK into the shared mask, for the next Run's targets.mask.
   MaskCopy CopyMask(ID3D11Resource* mask);
   void ReleaseMask();
@@ -279,12 +280,13 @@ class D3D11Bridge final : public PrivateDeviceBridge {
   ShareSlot mask_;
   ShareSlot motion_;         // LaunchPad's UPLIFT_MV, shared like the mask
   MotionShareKeep motion_keep_;  // the run of recordings without UPLIFT_MV while motion_ is held
-  bool mask_fresh_ = false;  // CopyMask wrote mask_ since the last recording
+  bool mask_fresh_ = false;  // CopyMask wrote mask_ since the last recording: the next Run binds it, then forgets it
   ShareSlot dlss_image_;      // After DLSS's output region
   ShareSlot dlss_pre_image_;  // split chain: Before upscaling's whole colour, its own share so a Before + After split re-makes neither per evaluate
   ShareSlot dlss_motion_;     // the motion region
   ShareSlot dlss_exposure_;   // 1x1
-  ShareSlot dlss_swap_;       // Before upscaling: RGBA16F at the colour's size, what DLSS reads
+  ShareSlot dlss_swap_;  // Before upscaling: RGBA16F at the colour's size, what DLSS reads
+  std::optional<ShareFailure> dlss_swap_uav_failure_;
   // Present-motion slots are keyed by their target present frame. The ring grows once when a slot is still read by the private
   // queue; new slots allocate on first use.
   // A present without its own copy binds the newest one within sources::PRESENT_MOTION_MAX_AGE frames.
@@ -302,7 +304,7 @@ class D3D11Bridge final : public PrivateDeviceBridge {
   // Every share's failure, the Present ring's included: BeginFrame forgets them all while NR is disabled, so re-enabling retries every share.
   [[nodiscard]] auto Failures() {
     return std::array{&color_.failure, &mask_.failure, &motion_.failure, &dlss_image_.failure, &dlss_pre_image_.failure,
-                      &dlss_motion_.failure, &dlss_exposure_.failure, &dlss_swap_.failure, &ring_failure_};
+                      &dlss_motion_.failure, &dlss_exposure_.failure, &dlss_swap_.failure, &dlss_swap_uav_failure_, &ring_failure_};
   }
   // Retire's pairs until the game's D3D11 context has passed them. The context copies into and out of the shares (the Present ring,
   // the DLSS hand-off, the Present path's copies), and the private queue's progress says nothing about that work.

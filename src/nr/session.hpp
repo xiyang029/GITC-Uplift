@@ -136,6 +136,8 @@ class Session {
   void SetChain(std::span<const StageSlice> groups);
   // Whether any pass of `slice` runs: false when the budget cut its group to 0 (or the Defaults view shows fewer passes), so its stage is skipped.
   [[nodiscard]] bool SliceRuns(const StageSlice& slice) const;
+  [[nodiscard]] bool SliceHasIntensity(const StageSlice& slice, const Controls& controls,
+                                       std::span<const std::optional<Controls>> later) const;
   // Once per presented frame, after Timeline::BeginFrame. Never blocks.
   void Tick();
   // Records `slice`'s NR passes on `list`, on `chain` (that stage's canvas and surfaces). Never blocks. The default slice is every pass.

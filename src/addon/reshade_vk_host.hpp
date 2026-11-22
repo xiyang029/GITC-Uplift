@@ -54,6 +54,7 @@ class ReshadeVkHost final : public vk::GameHost {
       : device_(device), queue_(queue), submit_(submit), list_(queue != nullptr ? queue->get_immediate_command_list() : nullptr) {}
 
   [[nodiscard]] bool Valid() const override { return list_ != nullptr; }
+  [[nodiscard]] VkQueue Queue() const override { return queue_ ? VulkanHandleOf<VkQueue>(queue_->get_native()) : VK_NULL_HANDLE; }
   void Barrier(VkImage image, vk::Usage before, vk::Usage after) override;
   void BarrierWithGlobal(VkImage image, vk::Usage before, vk::Usage after, vk::Usage global_before, vk::Usage global_after) override;
   void Copy(VkImage source, VkImage destination) override;

@@ -245,7 +245,7 @@ bool VkBridge::Run(vk::GameHost& host, const VkImageInfo& back_buffer, vk::Usage
   // Only for a frame that will go on, and before anything below can submit (a motion share's retire fence
   // flushes the immediate list, which at the technique holds the effects before the marker: they must not reach the queue ahead of the game's frame).
   if (present_host != nullptr && !present_synced_) {
-    switch (interop_.FlushAndWait(vk::WaitSlot::PRESENT_QUEUE, *present_host, WAIT_CAP_MS)) {
+    switch (interop_.OrderQueues(*present_host, host, WAIT_CAP_MS)) {
       case vk::WaitResult::DONE:
         present_queue_timeouts_ = 0u;
         present_synced_ = true;
@@ -483,6 +483,7 @@ void VkBridge::RetireAll(vk::GameHost& host) {
 }
 
 bool VkBridge::FreeRetired(vk::GameHost& host) {
+  if (!interop_.RetireQueueDependencies(host)) return false;
   side_->FreeFinished();
   interop_.FreeFinished(host);
   if (!interop_.Idle()) return false;

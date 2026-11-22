@@ -1179,7 +1179,8 @@ void NoteNativePresentFrame(api::device* device) {
 // NR at `point` natively on a Vulkan device's own VkDevice (the native route), in a command buffer of Uplift's own submitted to the effect
 // runtime's queue (ReShade's immediate command list is never recorded into, only flushed before Uplift submits). `usage`: the
 // back buffer's state in the calling event (PRESENT at the present event, RENDER_TARGET in the effects), as RunBridged's. `launchpad`: this frame's
-// UPLIFT_MV (the Uplift technique's event); none elsewhere. With the add-on's lock held; the only CPU wait is the capped one for a second present queue.
+// UPLIFT_MV (the Uplift technique's event); none elsewhere. With the add-on's lock held; a second present queue is ordered against the effect
+// queue by a timeline semaphore, and only a device without timeline semaphores waits for it on the CPU (capped).
 void RunNative(DeviceEntry& entry, api::device* device, addon::TriggerPoint point, vk::Usage usage, api::resource_view launchpad = {0u}) {
   if (point == addon::TriggerPoint::NONE || !entry.vk_dlss || !entry.vk_dlss->FrameReady() || entry.queue == nullptr) return;
   addon::VkDlssContext& native = *entry.vk_dlss;
@@ -1188,9 +1189,10 @@ void RunNative(DeviceEntry& entry, api::device* device, addon::TriggerPoint poin
       .queue = addon::VulkanHandleOf<VkQueue>(queue->get_native()),
       .flush_effects = [queue] { queue->flush_immediate_command_list(); },
   };
-  // As in RunBridged, Uplift's submission is ordered after the game's frame only on the effect queue, so a second present queue is flushed
-  // and waited for on the CPU first (2 s; a timeout skips this frame's NR).
+  // As in RunBridged, Uplift's submission is ordered after the game's frame only on the effect queue, so a second present queue is ordered
+  // against it by a timeline semaphore (a device without timeline semaphores falls back to a CPU wait capped at 2 s; a timeout skips this frame's NR).
   std::optional<addon::ReshadeVkHost> present_host;
+  addon::ReshadeVkHost effect_host(device, queue, native.QueueSubmit());
   if (entry.present_queue != nullptr && entry.present_queue != queue) {
     if (!entry.vk_second_queue_logged) {
       entry.vk_second_queue_logged = true;
@@ -1198,6 +1200,8 @@ void RunNative(DeviceEntry& entry, api::device* device, addon::TriggerPoint poin
     }
     present_host.emplace(device, entry.present_queue, native.QueueSubmit());
     queues.flush_present_queue = [&present_host](VkFence fence) { return present_host->FlushWithFence(fence); };
+    queues.present_host = &*present_host;
+    queues.effect_host = &effect_host;
   }
   addon::VkLaunchpadMotion motion;
   if (launchpad.handle != 0u) {
@@ -1271,6 +1275,10 @@ void FreeRetiredVulkanBridges(DeviceEntry& entry, api::device* device, std::vect
 void RunBridged(DeviceEntry& entry, api::device* device, addon::TriggerPoint point, uint64_t launchpad_motion, vk::Usage entry_state,
                 api::resource frame = {0u}, vk::PresentRelayHost* outer_host = nullptr, const vk::ImageInfo* outer_image = nullptr, uint32_t* completed_passes = nullptr) {
   if (point == addon::TriggerPoint::NONE || !entry.context->FrameReady()) return;
+  if (entry.context->PresentWorkSkip() != nr::SkipReason::NONE) {
+    entry.context->Run(nullptr, D3D12_RESOURCE_STATE_COMMON, point);
+    return;
+  }
   const bridge::Recorder record = [&entry, point](ID3D12GraphicsCommandList* list, const bridge::BridgeTargets& targets) {
     return bridge::RecordNr(*entry.context, point, list, targets);
   };
@@ -1299,7 +1307,9 @@ void RunBridged(DeviceEntry& entry, api::device* device, addon::TriggerPoint poi
     // DLSS's motion vectors copied in the game's frame for this present, when the native context made one (Auto's order: DLSS first);
     // otherwise the Uplift technique's UPLIFT_MV, as before.
     uint64_t dlss_motion_age = 0u;
-    const vk::NrImage dlss_motion = (entry.vk_dlss ? entry.vk_dlss->PresentMotion(dlss_motion_age) : vk::NrImage{});
+    const vk::NrImage dlss_motion = (entry.vk_dlss ? entry.vk_dlss->PresentMotion(dlss_motion_age,
+        outer_host ? outer_host->Queue() : (entry.queue ? addon::VulkanHandleOf<VkQueue>(entry.queue->get_native()) : VK_NULL_HANDLE),
+        entry.context->PresentFoveated() ? 0u : uplift::sources::PRESENT_MOTION_MAX_AGE) : vk::NrImage{});
     const bool motion_is_dlss = (dlss_motion.image != VK_NULL_HANDLE);
     const vk::ImageInfo motion = (motion_is_dlss ? vk::ImageInfo{.image = dlss_motion.image,
                                                                  .size = {dlss_motion.ngx.Resource.ImageViewInfo.Width, dlss_motion.ngx.Resource.ImageViewInfo.Height},
@@ -1333,7 +1343,8 @@ void RunBridged(DeviceEntry& entry, api::device* device, addon::TriggerPoint poi
     entry.d3d11_bridge->Run(reinterpret_cast<ID3D11Resource*>(entry.back_buffer.handle),
                             reinterpret_cast<ID3D11Resource*>(launchpad_motion), record,
                             /*dlss_motion=*/(entry.context->CurrentPlacement() == addon::Placement::PRESENT
-                                             || entry.context->RunsAt(addon::Stage::PRESENT)));  // split chain: a later group at Present too
+                                             || entry.context->RunsAt(addon::Stage::PRESENT)),  // split chain: a later group at Present too
+                            entry.context->PresentFoveated() ? 0u : uplift::sources::PRESENT_MOTION_MAX_AGE);
   }
 }
 
@@ -1546,8 +1557,13 @@ void OnDestroyCommandList(api::command_list* cmd_list) {
       }
       return;
     }
-    if (addon::FindListState(cmd_list) == nullptr) return;
+    auto* const state = addon::FindListState(cmd_list);
+    if (state == nullptr) return;
     api::device* const device = cmd_list->get_device();
+    {
+      const std::unique_lock lock(g_state->mutex);
+      if (auto* context = ContextOf(device)) context->ReleaseRecordings(state->recording_tokens);
+    }
     const std::vector<uint64_t> unsubmitted = addon::DestroyListState(cmd_list);
     if (!unsubmitted.empty()) {
       DropTokens(device, unsubmitted);
@@ -1578,6 +1594,11 @@ void OnResetCommandList(api::command_list* cmd_list) {
     if (list_state == nullptr) return;
     PollHooks();
     StampThisThread();
+    {
+      const std::unique_lock lock(g_state->mutex);
+      if (auto* context = ContextOf(list_state->device)) context->ReleaseRecordings(list_state->recording_tokens);
+    }
+    list_state->recording_tokens.clear();
     if (!list_state->tokens.empty()) {
       DropTokens(list_state->device, list_state->tokens);  // recorded, never submitted
       list_state->tokens.clear();
@@ -1602,9 +1623,9 @@ void OnExecuteCommandList(api::command_queue* queue, api::command_list* cmd_list
         const std::unique_lock lock(g_state->mutex);
         if (addon::VkDlssContext* const context = VkContextOf(vk_list->device)) {
           if (vk_list->executed) {
-            context->Reexecuted(vk_list->tokens, vk_list->first_token, queue);  // submitted again without a new recording
+            context->Reexecuted(vk_list->tokens, vk_list->first_token, queue, addon::VulkanHandleOf<VkQueue>(queue->get_native()));  // submitted again without a new recording
           } else {
-            context->Executed(vk_list->tokens, queue);  // split chain: the queue decides whether a later Present group may run beside it
+            context->Executed(vk_list->tokens, queue, addon::VulkanHandleOf<VkQueue>(queue->get_native()));  // split chain: the queue decides whether a later Present group may run beside it
           }
         }
       }
@@ -1631,7 +1652,7 @@ void OnExecuteCommandList(api::command_queue* queue, api::command_list* cmd_list
         uplift::sources::NrGpuTiming::SetSubmissionQueue(list_state->nr_timing, executed_again ? nullptr : native_queue);
       }
       if (executed_again) {
-        context->ResubmitTokens(list_state->first_token, native_queue, GetCurrentThreadId(), now);
+        context->ResubmitTokens(list_state->recording_tokens, native_queue, GetCurrentThreadId(), now);
       } else {
         context->SubmitTokens(list_state->tokens, native_queue, GetCurrentThreadId(), now);
       }
@@ -3068,6 +3089,12 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     if (entry.d3d11) {
       // Direct3D 11's ring, as the Direct3D 12 path: Source = Present.
       frame_facts.present_motion_copy = (settings.source == ui::PlacementSource::PRESENT && frame_settings.motion_vectors);
+    } else if (!Bridged(entry)) {
+      // Direct3D 12 native: the ring is filled from the game's own evaluate list, so nothing else says whether the
+      // Present pass is the one that reads it. Without this the context reported "Present without DLSS" while the
+      // copy ring was in fact what that pass was waiting on.
+      frame_facts.present_motion_copy =
+          (frame_settings.motion_vectors && entry.context->CurrentPlacement() == addon::Placement::PRESENT);
     }
     // A Direct3D 12 context held after the game's NGX shutdown resumes once this rises (the game created its DLSS again); bridged ones never hold.
     frame_facts.upscaler_creates = state.bridge.Registry().UpscalerCreates(device);
@@ -3676,6 +3703,10 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
             if (!row.count && group.stage == addon::Stage::PRESENT && entry.before_fg.note.id != BeforeFgNote::NONE) row.skip = entry.before_fg.note.Text();
             if (timing && row.count && row.count == group.passes_run) {
               row.gpu_ms = timing->Latest(static_cast<uint8_t>(group.stage), row.count, now);
+              // The same completed recording the evaluation came from, so the two numbers are never from different frames.
+              if (const auto breakdown = timing->LatestBreakdown(static_cast<uint8_t>(group.stage), row.count, now)) {
+                row.gpu_total_ms = breakdown->total_ms;
+              }
             }
           }
         }

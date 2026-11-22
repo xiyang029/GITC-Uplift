@@ -33,6 +33,7 @@
 #include "vk/command_ring.hpp"
 #include "vk/frame.hpp"
 #include "vk/game_host.hpp"
+#include "vk/interop.hpp"
 #include "vk/nr_functions.hpp"
 #include "vk/nr_timeline.hpp"
 
@@ -79,8 +80,10 @@ struct VkPresentQueues {
   VkQueue queue = VK_NULL_HANDLE;  // the effect runtime's queue (native), where Uplift's command buffers are submitted
   // Submits ReShade's immediate command list of that queue (the order is the game's frame, ReShade's work so far, then Uplift's NR).
   std::function<void()> flush_effects;
-  // The game presents from another queue: flushes that queue and has `fence` signalled there (the CPU waits for it before NR); empty otherwise.
+  // CPU fallback only: flushes the other present queue and signals `fence` when native GPU queue ordering is unavailable.
   std::function<bool(VkFence)> flush_present_queue;
+  vk::GameHost* present_host = nullptr;
+  vk::GameHost* effect_host = nullptr;
   std::span<const VkSemaphore> waits{};
 };
 
@@ -105,7 +108,7 @@ class VkDlssContext {
  public:
   // Device loss this soon after a native recording latches its route off.
   static constexpr std::chrono::seconds DLSS_LATCH_WINDOW{10};
-  // The CPU wait for the game's present queue before native NR at Present (the bridge's WAIT_CAP_MS); a timeout skips the frame.
+  // The cap on the CPU fallback for a device whose queues cannot be ordered by timeline semaphores; a timeout skips the frame.
   static constexpr std::chrono::milliseconds PRESENT_QUEUE_WAIT{2000};
   // This many present-queue timeouts in a row stop NR at Present here for good, as the bridge's timeout rule does.
   static constexpr uint32_t PRESENT_QUEUE_TIMEOUT_LIMIT = 3u;
@@ -139,7 +142,7 @@ class VkDlssContext {
   void EndFrame() { trigger_.EndFrame(); }
   // BeginFrame readied a native Present recording that RunPresent has not made yet.
   [[nodiscard]] bool FrameReady() const { return frame_ready_; }
-  // Native NR at Present at `point`, once per frame: the second-queue CPU wait (PRESENT_QUEUE_WAIT; a timeout skips the frame), a free slot of Uplift's own
+  // Native NR at Present at `point`, once per frame: GPU queue ordering (capped CPU fallback), a free slot of Uplift's own
   // command buffers (a busy one skips the frame, counted, never waited for), VkNrPipeline::RecordPresent on the swap-chain image in `usage` (PRESENT at the
   // present event, RENDER_TARGET inside the effects, as the bridge passes it), with DLSS's Present copy, else `launchpad`, else no vectors; then ReShade's
   // immediate list flushed and Uplift's buffer submitted to the effect queue with its fence. No token: the effect queue's next frame signal follows it.
@@ -187,8 +190,8 @@ class VkDlssContext {
   // The command buffer's events (the add-on's lock): its first submission, a submission again without a reset (`tokens` in recording order), and its
   // reset or destroy (also a stale VkListState replaced at init_command_list). Split chain: `queue` is where the buffer
   // goes, which decides whether a later Present group may run beside its DLSS-stage NR (no GPU waits).
-  void Executed(std::span<const uint64_t> tokens, void* queue);
-  void Reexecuted(std::span<const uint64_t> tokens, uint64_t first_token, void* queue);
+  void Executed(std::span<const uint64_t> tokens, void* queue, VkQueue native_queue);
+  void Reexecuted(std::span<const uint64_t> tokens, uint64_t first_token, void* queue, VkQueue native_queue);
   void Recycle(std::span<const uint64_t> tokens);
   // The game is about to shut the NGX core down for this device (NVSDK_NGX_VULKAN_Shutdown1, Streamline's slShutdown), which
   // comes before vkDestroyDevice. With NR not OFF: a wait of at most `cap` for NR's submitted recordings (their events only), then the NGX half of
@@ -237,7 +240,7 @@ class VkDlssContext {
   // image (none was made: the Present path's recording takes UPLIFT_MV, or none; always empty once CanCopy is false). Reading it stamps the slot's last use
   // (the bridge's copy-in follows). A present whose own copy was skipped (the GPU ran behind) gets the newest copy at most
   // sources::PRESENT_MOTION_MAX_AGE frames older, so the motion stays DLSS's; empty only with none that recent.
-  [[nodiscard]] vk::NrImage PresentMotion(uint64_t& age);
+  [[nodiscard]] vk::NrImage PresentMotion(uint64_t& age, VkQueue consumer, uint64_t max_age = sources::PRESENT_MOTION_MAX_AGE);
   // Why that copy is missing, for Setup: GAME_PASSED_NONE (the latest evaluate seen carried no readable float vectors; kept while the copies are not asked
   // for), DLSS_PAUSED (DLSS was seen, the present has none, and no evaluate came for 250 ms: a menu or a loading screen), NO_COPY (an evaluate came but no copy
   // within sources::PRESENT_MOTION_MAX_AGE frames exists: a slot or the constants ring stayed busy), else NONE. NONE while the add-on is not asking for the copies (GAME_PASSED_NONE aside) and once CanCopy is false.
@@ -321,6 +324,7 @@ class VkDlssContext {
   std::array<bool, color::VkColorPipeline::OUTPUT_VARIANTS> storage_formats_;  // each output variant's format is a storage format here
   std::unique_ptr<vk::NrCompletion> completion_;
   std::unique_ptr<vk::CommandRing> ring_;  // native Present's own command buffers; null when the effect queue's family is unknown
+  std::unique_ptr<vk::Interop> queue_order_;  // local GPU queue dependencies, destroyed only after device idle
   std::unique_ptr<nr::Host> host_;
   nr::VkHost* vk_host_ = nullptr;  // host_ as NVIDIA's runtime (null with a test's stand-in), for the per-present core initialisation
   std::unique_ptr<nr::Session> session_;
@@ -336,7 +340,6 @@ class VkDlssContext {
   std::optional<ngx_hooks::CreateSnapshot> main_snapshot_;
   NVSDK_NGX_Feature main_feature_ = NVSDK_NGX_Feature_Reserved_Unknown;
   uint64_t dlss_feature_serial_ = 0u;
-  ngx_hooks::ResetMerger reset_merger_;
   ngx_hooks::MotionJitterTracker present_jitter_;
   std::optional<std::chrono::steady_clock::time_point> last_main_evaluate_;
   std::optional<std::chrono::steady_clock::time_point> last_game_list_recording_;
@@ -365,7 +368,7 @@ class VkDlssContext {
   ChainPlan chain_;
   std::array<nr::StageSlice, STAGE_COUNT> slices_ = {};
   bool chain_passes_moved_ = false;   // this frame's chain moved a pass to another stage while its streams stayed (a reload, as a stream change's)
-  std::optional<bool> before_reset_;  // this evaluate's Before upscaling group's filtered reset, for the After DLSS group behind it
+  std::optional<bool> before_reset_;  // this evaluate's Before upscaling group's reset, for the After DLSS group behind it
   bool present_reset_owed_ = false;   // a later Present group skipped a frame or the DLSS feature changed: the next successful Present recording starts afresh
   // The DLSS-stage recordings of a split and the queues they went to (VkStageWork), the effect
   // queue (BeginFrame's), and the other queue that keeps a later group off Present (logged once per change).
@@ -400,6 +403,9 @@ class VkDlssContext {
   enum class BoundMotion : uint8_t { NONE, LAUNCHPAD, OWN_COPY, OLDER_COPY, NO_COPY };
   BoundMotion present_motion_bound_ = BoundMotion::NONE;
   uint64_t present_motion_age_ = 0u;
+  // The queue the last Present bound on (PresentMotion): PresentMotionGap asks whether a copy is ordered before that same queue, so a copy still in
+  // flight is reported as the gap it is rather than as present.
+  VkQueue present_motion_consumer_ = VK_NULL_HANDLE;
   void NotePresentMotionSecond(std::chrono::steady_clock::time_point now);
   bool device_lost_ = false;
   bool torn_down_ = false;

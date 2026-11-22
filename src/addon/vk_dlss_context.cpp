@@ -166,6 +166,7 @@ std::unique_ptr<VkDlssContext> VkDlssContext::Create(VkContextSetup setup, std::
 
   std::unique_ptr<VkDlssContext> context(new VkDlssContext(*functions, setup.binding.device, storage_formats));
   context->physical_ = setup.binding.physical;
+  if (auto device = vk::Device::Open(setup.binding.device)) context->queue_order_ = std::make_unique<vk::Interop>(std::move(*device));
   context->completion_ = vk::NrCompletion::Create(context->functions_, context->device_, std::move(setup.signal), error);
   if (!context->completion_) return nullptr;
   // False for a DLSS game, whose own core is never initialised a second time. Decided again at each present
@@ -290,7 +291,7 @@ bool VkDlssContext::BeginPresent(bool advance, void* queue, const FrameFacts& fa
   nr::Timeline& timeline = completion_->Timeline();
   timeline.BeginFrame(nr::AsQueue(queue));
   timeline.StampAged(now);
-  completion_->DropStale(now, timeline.CurrentFrame());
+  completion_->DiagnoseStale(now, timeline.CurrentFrame());
 #ifdef UPLIFT_VK_PRESENT_CPU_TEST
   ++test::VkTestVisits(device_).stale_sweeps;
 #endif
@@ -511,7 +512,14 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
   // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before anything is recorded. No GPU waits:
   // DLSS-stage NR on another queue keeps Present off for later groups (UpdateChain); until that shows, a later Present group runs only once every earlier
   // DLSS-stage recording off the effect queue has completed, else it skips this frame. On the effect queue itself the queue's order keeps them apart.
-  if (group > 0u && !session_->SliceRuns(slices_[group])) return SkipPresent(SliceSkipReason(settings_, slices_[group]), group);
+  if (!session_->SliceRuns(slices_[group])) {
+    present_reset_owed_ = true;
+    return SkipPresent(SliceSkipReason(settings_, slices_[group]), group);
+  }
+  if (!settings_.look.keep_faces.show_mask && !session_->SliceHasIntensity(slices_[group], controls_, settings_.look.later_controls)) {
+    present_reset_owed_ = true;
+    return SkipPresent(nr::SkipReason::INTENSITY_ZERO, group);
+  }
   if (group > 0u && queues.waits.empty() && !StageWorkDone()) return SkipPresent(nr::SkipReason::WAITING_EARLIER_STAGES, group);
   const auto log_failure = [this](std::string_view what) {
     if (!std::exchange(present_failure_logged_, true)) {
@@ -519,10 +527,20 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
     }
   };
   if (queues.flush_present_queue) {
-    // Uplift's submission is ordered after the game's frame only on the effect queue, so the present queue is flushed
-    // and waited for on the CPU first, before ReShade's effects so far are flushed (they must not reach the queue ahead of the game's frame either).
+    // Submit the dependency before flushing any effects. Keep the capped CPU fallback for devices without timeline support.
     second_queue_ = true;
-    switch (ring_->WaitForQueue(queues.flush_present_queue, PRESENT_QUEUE_WAIT)) {
+    vk::CommandRing::Status order;
+    if (queue_order_ && queues.present_host && queues.effect_host) {
+      switch (queue_order_->OrderQueues(*queues.present_host, *queues.effect_host, static_cast<uint32_t>(PRESENT_QUEUE_WAIT.count()))) {
+        case vk::WaitResult::DONE: order = vk::CommandRing::Status::READY; break;
+        case vk::WaitResult::BUSY: order = vk::CommandRing::Status::BUSY; break;
+        case vk::WaitResult::TIMEOUT: order = vk::CommandRing::Status::TIMEOUT; break;
+        default: order = queue_order_->DeviceLost() ? vk::CommandRing::Status::LOST : vk::CommandRing::Status::FAILED; break;
+      }
+    } else {
+      order = ring_->WaitForQueue(queues.flush_present_queue, PRESENT_QUEUE_WAIT);
+    }
+    switch (order) {
       case vk::CommandRing::Status::READY:
         present_queue_timeouts_ = 0u;
         break;
@@ -561,7 +579,7 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
   ApplyLookConfig(now, group);
   // As DeviceContext::Run: DLSS's copy for this present while MotionVectors wants DLSS's (it stamps the copy's use), else Launchpad's UPLIFT_MV.
   uint64_t dlss_motion_age = 0u;
-  const vk::NrImage dlss_motion = ((settings_.motion_vectors && facts_.present_motion_copy) ? PresentMotion(dlss_motion_age) : vk::NrImage{});
+  const vk::NrImage dlss_motion = ((settings_.motion_vectors && facts_.present_motion_copy) ? PresentMotion(dlss_motion_age, queues.queue) : vk::NrImage{});
   const bool launchpad_wanted = (settings_.launchpad_motion && launchpad.view != VK_NULL_HANDLE);
   if (!settings_.motion_vectors || !facts_.present_motion_copy) {
     present_motion_bound_ = (launchpad_wanted ? BoundMotion::LAUNCHPAD : BoundMotion::NONE);  // the per-frame trace names the motion
@@ -589,6 +607,7 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
       .layout = LayoutOf(usage),
       .size = present_frame_.back_buffer.size,
       .copy_format = copy_format_,
+      .image_format = vk::VkFormatOf(present_frame_.back_buffer.format),
       .encoding = *present_encoding_,
       .diffuse_white_nits = present_diffuse_white_nits_,
       .transfer_strength = settings_.transfer_strength,
@@ -1067,7 +1086,8 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
                                          frame.mv_scale_x * settings_.motion_scale_x, frame.mv_scale_y * settings_.motion_scale_y, current + 1u,
                                          facts_.dlss_motion_upside_down,
                                          jitter.x * static_cast<float>(motion_region.width) * settings_.motion_scale_x,
-                                         jitter.y * static_cast<float>(motion_region.height) * settings_.motion_scale_y);  // a throw leaves the token open
+                                         jitter.y * static_cast<float>(motion_region.height) * settings_.motion_scale_y,
+                                         completion_->TrackMotion(list.open_token));  // a throw leaves the token open
       const bool copied = (write == sources::PresentMotionWrite::WRITTEN);
       switch (write) {
         case sources::PresentMotionWrite::WRITTEN:   ++counters.copies; break;
@@ -1129,8 +1149,8 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
   // Pessimistic; only a frame that applies NR clears the owed reset.
   const bool reset_was_owed = std::exchange(stage.reset_owed, true);
   ApplyLookConfig(now, group);
-  // The game's reset, filtered once per evaluate: behind a Before upscaling group (split chain), the answer that group's recording got.
-  const bool game_reset = (before_reset ? *before_reset : reset_merger_.Filter(frame.reset, now));
+  // Honour every game reset, including successive cuts in the split chain.
+  const bool game_reset = before_reset.value_or(frame.reset);
   const ReadFrame game = ReadDlssFrame(frame, copies, &copies.output, region, (game_reset || reset_was_owed));
   // The token is issued before recording (every mark taken while recording includes it) and stays open on the list; EndEvaluate sets
   // its event at the end of the hooked call, on every path. A token Before upscaling (or the Present motion copy) opened in this call is reused.
@@ -1217,7 +1237,7 @@ void VkDlssContext::DropOpenToken(VkListState& list) {
   if (list.first_token == token) {
     list.first_token = 0u;
   }
-  completion_->Timeline().Drop(std::span<const uint64_t>(&token, 1u));
+  completion_->Recycle(std::span<const uint64_t>(&token, 1u));
 }
 
 const NVSDK_NGX_Resource_VK* VkDlssContext::BeforeDlssEvaluate(VkCommandBuffer buffer, const ngx_hooks::DlssFrame& frame,
@@ -1266,7 +1286,7 @@ const NVSDK_NGX_Resource_VK* VkDlssContext::BeforeDlssEvaluate(VkCommandBuffer b
   // Pessimistic; only a frame that applies NR clears the owed reset.
   const bool reset_was_owed = std::exchange(stage.reset_owed, true);
   ApplyLookConfig(now, 0u);
-  const bool game_reset = reset_merger_.Filter(frame.reset, now);
+  const bool game_reset = frame.reset;
   if (chain_.Split()) {
     before_reset_ = game_reset;  // the After DLSS group behind it in this evaluate takes the same answer
   }
@@ -1336,16 +1356,16 @@ void VkDlssContext::EndEvaluate(VkCommandBuffer buffer, VkListState& list) {
   }
 }
 
-void VkDlssContext::Executed(std::span<const uint64_t> tokens, void* queue) {
+void VkDlssContext::Executed(std::span<const uint64_t> tokens, void* queue, VkQueue native_queue) {
   if (torn_down_ || dropped_) return;
-  completion_->Executed(tokens);
+  completion_->Executed(tokens, native_queue);
   // Split chain: where a split's DLSS-stage NR goes. A queue other than the effect queue keeps later groups off Present (UpdateChain).
   stage_work_.Executed(tokens, queue);
 }
 
-void VkDlssContext::Reexecuted(std::span<const uint64_t> tokens, uint64_t first_token, void* queue) {
+void VkDlssContext::Reexecuted(std::span<const uint64_t> tokens, uint64_t first_token, void* queue, VkQueue native_queue) {
   if (torn_down_ || dropped_) return;
-  completion_->Reexecuted(tokens, first_token, queue);
+  completion_->Reexecuted(tokens, first_token, queue, native_queue);
   stage_work_.Executed(tokens, queue);  // submitted again, maybe elsewhere: the latch and the completed-work check hear of it
 }
 
@@ -1466,6 +1486,7 @@ void VkDlssContext::Teardown() {
     return;
   }
   completion_->DeviceIdle();  // the game idled the device, so the flush below finds every token and frame complete
+  if (queue_order_) queue_order_->DestroyQueueDependencies();
   if (ring_) {
     ring_->Destroy();  // the idle covers the effect queue, where Uplift's own command buffers ran
   }
@@ -1509,12 +1530,14 @@ std::string VkDlssContext::DetailsLine() const {
   return std::format("Vulkan: NR runs inside the game's frame (native Vulkan NR, {:.0f} MiB; {})", static_cast<double>(bytes) / BYTES_PER_MIB, VK_FIRST_USE_NOTE);
 }
 
-vk::NrImage VkDlssContext::PresentMotion(uint64_t& age) {
+vk::NrImage VkDlssContext::PresentMotion(uint64_t& age, VkQueue consumer, uint64_t max_age) {
   age = 0u;
   // None once the copies stopped. The frame no longer advances then, so the last slot would be bound again at every present.
   if (!CanCopy() || !pipeline_) return {};
-  const uint64_t max_age = present_layout_.foveation.active() ? 0u : sources::PRESENT_MOTION_MAX_AGE;
-  const vk::NrImage copy = pipeline_->PresentMotion(completion_->Timeline().CurrentFrame(), &age, max_age);
+  if (present_layout_.foveation.active()) max_age = 0u;
+  present_motion_consumer_ = consumer;  // PresentMotionGap judges readiness against the queue the present binds on
+  const vk::NrImage copy = pipeline_->PresentMotion(completion_->Timeline().CurrentFrame(), &age, max_age,
+      [this, consumer](const vk::NrCompletion::MotionProducer& producer) { return completion_->OrderedBefore(producer, consumer); });
   if (facts_.present_motion_copy) {
     PresentMotionCounters& counters = present_motion_counters_;
     ++counters.presents;
@@ -1555,7 +1578,15 @@ ui::MotionGap VkDlssContext::PresentMotionGap() const {
   // The latest evaluate's "no readable vectors" holds while the copies are not asked for, until an evaluate with readable ones.
   if (present_motion_gap_ != ui::MotionGap::NONE) return present_motion_gap_;
   const uint64_t max_age = present_layout_.foveation.active() ? 0u : sources::PRESENT_MOTION_MAX_AGE;
-  if (!facts_.present_motion_copy || !dlss_seen_ || pipeline_->HasPresentMotion(completion_->Timeline().CurrentFrame(), max_age)) return ui::MotionGap::NONE;
+  // The same queue the present binds with: a copy the GPU has not finished is not one this present can bind, so it reads as missing, not as present.
+  const sources::VkNrPipeline::MotionReady ready = present_motion_consumer_ == VK_NULL_HANDLE
+      ? sources::VkNrPipeline::MotionReady{}
+      : sources::VkNrPipeline::MotionReady{[this](const vk::NrCompletion::MotionProducer& producer) {
+          return completion_->OrderedBefore(producer, present_motion_consumer_);
+        }};
+  if (!facts_.present_motion_copy || !dlss_seen_ || pipeline_->HasPresentMotion(completion_->Timeline().CurrentFrame(), max_age, ready)) {
+    return ui::MotionGap::NONE;
+  }
   // No evaluate for a while is the game's DLSS pausing (a menu, a loading screen), not a busy slot or constants ring.
   return (dlss_paused_ ? ui::MotionGap::DLSS_PAUSED : ui::MotionGap::NO_COPY);
 }

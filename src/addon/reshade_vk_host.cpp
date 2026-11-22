@@ -89,7 +89,14 @@ void ReshadeVkHost::Copy(VkImage source, VkImage destination) {
 }
 
 bool ReshadeVkHost::Signal(VkSemaphore timeline, uint64_t value) {
-  return queue_ != nullptr && queue_->signal(api::fence{ReshadeHandleOf(timeline)}, value);
+  if (queue_ == nullptr) return false;
+  // The contract (vk::GameHost::Signal) is "flush what was recorded, then signal": ReShade submits its immediate command list only when asked, and
+  // the consumer queue is already waiting, so a signal left in the pending list would deadlock the frame. The flush after the signal is what submits the
+  // signal itself when ReShade queues it with the queue's work (an empty submit when it submits on its own).
+  queue_->flush_immediate_command_list();
+  const bool queued = queue_->signal(api::fence{ReshadeHandleOf(timeline)}, value);
+  queue_->flush_immediate_command_list();
+  return queued;
 }
 
 bool ReshadeVkHost::Wait(VkSemaphore timeline, uint64_t value) {

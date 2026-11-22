@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -51,7 +52,10 @@ class RemoteNr final : public NrLink {
   // The returned reply's handles include those of a reply that landed late (each NT handle is handed out exactly once, in the
   // reply of the request that made it, so a late one would be lost otherwise).
   std::optional<ipc::Reply> Present(bool enabled, const ipc::Frame& frame, std::string_view settings_text,
-                                    const std::function<void(std::string_view)>& log);
+                                    const std::function<void(std::string_view)>& log, bool combine = false);
+  [[nodiscard]] bool FrameDeferred() const { return deferred_frame_.has_value(); }
+  // After the immediate trigger: take the combined reply or send FRAME alone if the client never reached Run.
+  std::optional<ipc::Reply> FinishPresent();
   // The last Present sent a FRAME (answered or not): the helper has seen `frame.unreported_point`.
   [[nodiscard]] bool FrameSent() const { return frame_sent_; }
   void Detach();                                                       // DETACH (destroy_device, D3D9 Reset); the next Present re-ATTACHes
@@ -91,6 +95,9 @@ class RemoteNr final : public NrLink {
 
   // Send + wait `cap_ms`: the reply when it came in time; nullopt when it is pending (recorded) or the helper is gone.
   std::optional<ipc::Reply> Transact(const ipc::Request& request, uint32_t cap_ms);
+  void NoteIpcTiming(ipc::RequestKind kind, std::chrono::steady_clock::time_point start, ipc::HelperLauncher::Wait outcome);
+  std::optional<ipc::Reply> SendFrame(const ipc::Frame& frame, const ipc::Run* run);
+  std::optional<ipc::Reply> DeliverFrame(std::optional<ipc::Reply> answered);
   // A reply's effect on this side. `late`: it landed after its request's cap, so nobody holds its handles yet.
   void Consume(const Outstanding& request, const ipc::Reply& reply, bool late);
   void Fail(std::string text);  // kills the helper, keeps `text` for the card, forgets nothing else
@@ -115,6 +122,15 @@ class RemoteNr final : public NrLink {
   std::string failure_;
   Outstanding outstanding_;
   bool frame_sent_ = false;
+  std::optional<ipc::Frame> steady_frame_;
+  std::optional<ipc::Frame> deferred_frame_;
+  std::optional<ipc::Reply> combined_reply_;
+  struct IpcTiming {
+    uint64_t calls = 0u, pending = 0u, gone = 0u;
+    double total_ms = 0., max_ms = 0.;
+  };
+  std::array<IpcTiming, 3> ipc_timings_{};
+  std::chrono::steady_clock::time_point next_ipc_log_{};
   uint64_t busy_frames_ = 0u;
   ipc::Status last_status_;
   uint64_t status_generation_ = 0u;  // the settings generation the last status was produced under

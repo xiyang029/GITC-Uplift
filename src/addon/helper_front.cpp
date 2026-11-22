@@ -470,7 +470,21 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   wire.game_facing_present = frame.outer_vulkan_host ? 1u : 0u;
   entry.game_facing = frame.outer_vulkan_host != nullptr;
 
-  std::optional<ipc::Reply> reply = remote.Present(settings.enabled, wire, settings_text_, HELPER_LOG);
+  const TriggerPoint point = entry.trigger.OnPresent(frame.marker.handle != 0u, /*effects_on=*/false, early);
+  const api::resource motion = (early && entry.SharesImages() && frame.early_marker.motion.handle ? device->get_resource_from_view(frame.early_marker.motion) : api::resource{});
+  const auto run_present = [&] {
+    RunClient(entry, device, frame.queue, point, frame.back_buffer.handle, motion.handle, /*at_present=*/true,
+              frame.outer_vulkan_host, frame.outer_vulkan_host ? &frame.outer_vulkan_image : nullptr);
+  };
+  const bool combine = point != TriggerPoint::NONE && (entry.d3d11 || entry.d3d12) && entry.Kind() == ipc::Transport::FENCED;
+  std::optional<ipc::Reply> reply = remote.Present(settings.enabled, wire, settings_text_, HELPER_LOG, combine);
+  const bool prepared_run = remote.FrameDeferred();
+  if (prepared_run) {
+    entry.frame_ready = true;  // previous ready FRAME, unchanged target; the helper rechecks before taking the input fence
+    run_present();
+    entry.frame_ready = false;
+    reply = remote.FinishPresent();
+  }
   if (remote.Attached() && remote.LastStatus().device_lost != 0u) {
     // The helper's own Direct3D 12 device was removed, so its NR would stay off for the session. The helper is ended as a hung one is, and Retry
     // now starts a fresh one with a new device, under the same 2-strike rule as a bridge's private device.
@@ -525,10 +539,7 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   }
   // The first event of the frame; at PRESENT NR runs now, otherwise it waits for the marker. Direct3D 9 keeps NR before effects in the present
   // event (the helper replays this point; 1.1.6's begin-effects wait is not passed to it).
-  const TriggerPoint point = entry.trigger.OnPresent(frame.marker.handle != 0u, /*effects_on=*/false, early);
-  const api::resource motion = (early && entry.SharesImages() && frame.early_marker.motion.handle ? device->get_resource_from_view(frame.early_marker.motion) : api::resource{});
-  RunClient(entry, device, frame.queue, point, frame.back_buffer.handle, motion.handle, /*at_present=*/true,
-            frame.outer_vulkan_host, frame.outer_vulkan_host ? &frame.outer_vulkan_image : nullptr);
+  if (!prepared_run) run_present();
 }
 
 void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, bool is_marker, uint64_t rtv, const ui::Settings& settings) {

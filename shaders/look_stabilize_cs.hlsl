@@ -98,12 +98,15 @@ void main(uint3 id : SV_DispatchThreadID) {
   const uint2 size = LevelSize(image, level);
   if (id.x >= size.x || id.y >= size.y) return;
   const int2 base = int2(LevelOffset(image, level), 0);
-  current_texture[uint2(base) + id.xy] = Blend(gauss_atlas.Load(int3(base + int2(id.xy), 0)), id.xy, base, size);
+  const int2 first_offset = (flags & UPLIFT_STABILIZE_FLAG_PACKED_HISTORY) != 0u ? base : int2(0, 0);
+  const int2 history_base = base - first_offset;
+  current_texture[uint2(history_base) + id.xy] = Blend(gauss_atlas.Load(int3(base + int2(id.xy), 0)), id.xy, history_base, size);
   const uint second = min(level + 1u, levels);
   const uint2 second_size = LevelSize(image, second);
   if (second != level && id.x < second_size.x && id.y < second_size.y) {
     const int2 second_base = int2(LevelOffset(image, second), 0);
-    current_texture[uint2(second_base) + id.xy] =
-        Blend(gauss_atlas.Load(int3(second_base + int2(id.xy), 0)), id.xy, second_base, second_size);
+    const int2 history_second = second_base - first_offset;
+    current_texture[uint2(history_second) + id.xy] =
+        Blend(gauss_atlas.Load(int3(second_base + int2(id.xy), 0)), id.xy, history_second, second_size);
   }
 }

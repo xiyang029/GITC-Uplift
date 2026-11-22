@@ -19,7 +19,7 @@ PipelineResult PreSrSource::Run(DlssFrameHost& host, const ngx_hooks::DlssFrame&
   if (!nr::MeetsNrFloor({frame.color_region.width, frame.color_region.height})) return {.reason = nr::SkipReason::FRAME_TOO_SMALL};
   if (!host.StateKnown()) return {.reason = nr::SkipReason::LIST_STATE_UNKNOWN};
   if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return {.reason = nr::SkipReason::COMPUTE_QUEUE};
-  if (config.controls.intensity <= 0.f) return {.reason = nr::SkipReason::INTENSITY_ZERO};  // exact pass-through: no swap either
+  // RecordPreSr checks the whole effective slice before recording or swapping colour.
   const GameFrame game = ReadGameFrame(frame, frame.color, frame.color_region, (reset_hint || reset_was_owed), config);
   if (game.inputs.motion.resource != nullptr) {
     // The motion-vector region lies inside its texture.

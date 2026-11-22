@@ -21,8 +21,6 @@ inline constexpr char VK_RING_DRAIN_TIMEOUT_LINE[] =
     "Vulkan: Uplift's command buffers did not finish within {} s of leaving Present; NR stays off on this device until the game exits";
 inline constexpr char VK_PRESENT_DEVICE_LOST_LINE[] =
     "Vulkan: the game's device was lost within {} s of native NR at Present: native NR is off from now on (VulkanNativeNr = 0)";
-inline constexpr char VK_STALE_TOKEN_DROPPED_LINE[] = "Vulkan: a recording was never submitted; its token was dropped after {} s";
-inline constexpr char VK_LATE_SUBMISSION_LINE[] =
-    "Vulkan: a recording was submitted after its token was dropped as stale (more than {} s and {} frames after it was made)";
+inline constexpr char VK_STALE_TOKEN_LINE[] = "Vulkan: a recording has no completion proof after {} s; resources remain protected";
 
 }  // namespace uplift::text

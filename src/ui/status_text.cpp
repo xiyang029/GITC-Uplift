@@ -120,7 +120,14 @@ SetupView ResolveSetup(const SetupFacts& facts) {
              && selectable(dlss)) {
     resolved_motion = MotionPick::DLSS;  // inside the game's frame a Launchpad or Lumenite preference runs on the game's own vectors (the engine's rule)
   }
-  view.motion = facts.motion.value_or(resolved_motion);
+  // A Present copy can miss a frame or two while the GPU runs behind (MotionGap::NO_COPY). The row keeps the preference then:
+  // a highlight that moves to Off and back reads as the pick being overridden, while the copy returns by itself on the next
+  // frame. The row's tooltip carries the note; a cause that will not clear still greys DLSS above, and moves the row with it.
+  const bool copy_in_flight = (facts.motion == MotionPick::OFF && facts.dlss_motion_gap == MotionGap::NO_COPY && resolved_motion != MotionPick::OFF);
+  view.motion = (copy_in_flight ? resolved_motion : facts.motion.value_or(resolved_motion));
+  if (copy_in_flight) {
+    view.motion_note = "DLSS's copied vectors are still in flight for this frame (the GPU runs behind); the copy returns by itself";
+  }
 
   // Resolution.
   OptionState& match_game = at(view.resolution_options, ResolutionMode::MATCH_GAME);

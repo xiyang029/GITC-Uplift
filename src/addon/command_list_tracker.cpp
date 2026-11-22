@@ -255,6 +255,7 @@ void ReshadeDlssFrameHost::AttachToken(uint64_t token) {
     state_->first_token = token;
   }
   state_->tokens.push_back(token);
+  state_->recording_tokens.push_back(token);
 }
 
 }  // namespace uplift::addon

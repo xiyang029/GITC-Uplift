@@ -218,18 +218,23 @@ endif()
 set(UPLIFT_SHADER_OUTPUT "${CMAKE_BINARY_DIR}/generated/shaders")
 file(MAKE_DIRECTORY "${UPLIFT_SHADER_OUTPUT}")
 set(UPLIFT_SHADER_HEADERS)
-foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0" "decode_cs|cs_6_0" "motion_cs|cs_6_0"
+foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0" "decode_cs|cs_6_0" "decode_in_place_cs|cs_6_0" "motion_cs|cs_6_0" "depth_cs|cs_6_0"
                         "look_pyramid_cs|cs_6_0" "look_stabilize_cs|cs_6_0" "look_shape_cs|cs_6_0" "resolve_cs|cs_6_0"
                         "meter_cs|cs_6_0" "faces_cs|cs_6_0" "change_stabilize_cs|cs_6_0")
   string(REPLACE "|" ";" shader_parts "${shader}")
   list(GET shader_parts 0 shader_name)
   list(GET shader_parts 1 shader_profile)
   set(shader_header "${UPLIFT_SHADER_OUTPUT}/${shader_name}.h")
+  # Every shader's own source is its dependency; decode_in_place_cs is the only one that includes another shader file (decode_cs.hlsl).
+  set(shader_sources "${CMAKE_SOURCE_DIR}/shaders/${shader_name}.hlsl")
+  if(shader_name STREQUAL "decode_in_place_cs")
+    list(APPEND shader_sources "${CMAKE_SOURCE_DIR}/shaders/decode_cs.hlsl")
+  endif()
   add_custom_command(
     OUTPUT "${shader_header}"
     COMMAND "${UPLIFT_DXC}" -nologo -HV 2021 -T ${shader_profile} -E main -O3 -WX
             -Fh "${shader_header}" -Vn g_${shader_name} "${CMAKE_SOURCE_DIR}/shaders/${shader_name}.hlsl"
-    DEPENDS "${CMAKE_SOURCE_DIR}/shaders/${shader_name}.hlsl" "${CMAKE_SOURCE_DIR}/shaders/color_common.hlsli"
+    DEPENDS ${shader_sources} "${CMAKE_SOURCE_DIR}/shaders/color_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/change_common.hlsli" "${CMAKE_SOURCE_DIR}/shaders/decode_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/foveation.hlsli" "${CMAKE_SOURCE_DIR}/shaders/look_common.hlsli"
             "${CMAKE_SOURCE_DIR}/shaders/vk_common.hlsli" "${CMAKE_SOURCE_DIR}/src/color/shader_values.h"
@@ -537,6 +542,22 @@ if(UPLIFT_ARCH STREQUAL "x64")
 # The 64-bit NR helper, DeviceContext on D3D12Side; no UI, no window (a WIN32 executable). The
 # test build swaps NVIDIA's runtime for testing::IdentityHost (UPLIFT_HELPER_IDENTITY_NR); it never ships.
 set(UPLIFT_HELPER_SOURCES src/helper/main.cpp src/helper/helper.cpp src/helper/transports.cpp)
+add_executable(uplift_nr_regression EXCLUDE_FROM_ALL tools/nr_regression.cpp)
+target_link_libraries(uplift_nr_regression PRIVATE uplift_sources)
+add_executable(uplift_vk_nr_regression EXCLUDE_FROM_ALL tools/vk_nr_regression.cpp)
+target_link_libraries(uplift_vk_nr_regression PRIVATE uplift_sources uplift_vk)
+add_executable(uplift_nvfp4_scratch_regression EXCLUDE_FROM_ALL tools/nvfp4_scratch_regression.cpp)
+target_include_directories(uplift_nvfp4_scratch_regression SYSTEM PRIVATE "${UPLIFT_NVAPI_INCLUDE}")
+target_link_libraries(uplift_nvfp4_scratch_regression PRIVATE uplift_nr bcrypt)
+add_executable(uplift_helper64_identity_regression WIN32 EXCLUDE_FROM_ALL ${UPLIFT_HELPER_SOURCES})
+target_include_directories(uplift_helper64_identity_regression PRIVATE "${UPLIFT_GENERATED}" "${CMAKE_SOURCE_DIR}/tools")
+target_compile_definitions(uplift_helper64_identity_regression PRIVATE UPLIFT_HELPER_IDENTITY_NR)
+target_link_libraries(uplift_helper64_identity_regression PRIVATE uplift_bridge uplift_ipc)
+add_dependencies(uplift_helper64_identity_regression uplift_build_id)
+add_executable(uplift_helper_protocol_regression EXCLUDE_FROM_ALL tools/helper_protocol_regression.cpp)
+target_include_directories(uplift_helper_protocol_regression PRIVATE "${UPLIFT_GENERATED}")
+target_link_libraries(uplift_helper_protocol_regression PRIVATE uplift_ipc uplift_ui)
+add_dependencies(uplift_helper_protocol_regression uplift_helper64_identity_regression)
 add_executable(uplift_helper64 WIN32 ${UPLIFT_HELPER_SOURCES})
 set_target_properties(uplift_helper64 PROPERTIES OUTPUT_NAME "gitc-uplift-helper64")
 target_include_directories(uplift_helper64 PRIVATE "${UPLIFT_GENERATED}")

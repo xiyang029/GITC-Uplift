@@ -5,10 +5,12 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <type_traits>
 
 #include "color/encoding.hpp"
 #include "ngx_hooks/dlss_capture.hpp"
 #include "nr/timeline.hpp"
+#include "nr/log.hpp"
 #include "nr/types.hpp"
 #include "sources/nr_pipeline.hpp"
 #include "state/compute_shadow.hpp"
@@ -28,8 +30,36 @@ class DlssFrameHost {
   virtual void ReplayState(state::RestoreMode mode) = 0;
   // The recording's completion token travels with the list: submitted and stamped with it.
   virtual void AttachToken(uint64_t token) = 0;
+  [[nodiscard]] virtual uint64_t RecordingToken() const { return 0u; }
   // Keep the timing sample with this list through submission, and through Reset for a game list.
+  [[nodiscard]] virtual ID3D12Resource* SharedMask() const { return nullptr; }
+  [[nodiscard]] virtual ID3D12Resource* PreSrOutput() const { return nullptr; }
   virtual void HoldTiming(const std::shared_ptr<NrTimingSlot>& slot) = 0;
+};
+
+// Adjacent input capture and NR share one token and one restore. A skipped source cannot
+// drop a token another source has already used. The wrapper lives only for one evaluate.
+class DlssRecordingBatch final : public DlssFrameHost {
+ public:
+  DlssRecordingBatch(DlssFrameHost& host, state::RestoreMode restore) : host_(host), restore_(restore) {}
+  ~DlssRecordingBatch() override {
+    if (token_ == 0u) return;
+    try { host_.ReplayState(restore_); } catch (...) {
+      try { nr::Log(nr::LogLevel::ERR, "could not restore compute state after an NR recording batch"); } catch (...) {}
+    }
+  }
+  ID3D12GraphicsCommandList* NativeList() override { return host_.NativeList(); }
+  bool StateKnown() override { return host_.StateKnown(); }
+  void ReplayState(state::RestoreMode restore) override { restore_ = restore; }
+  void AttachToken(uint64_t token) override { host_.AttachToken(token); token_ = token; }
+  uint64_t RecordingToken() const override { return token_; }
+  ID3D12Resource* SharedMask() const override { return host_.SharedMask(); }
+  ID3D12Resource* PreSrOutput() const override { return host_.PreSrOutput(); }
+  void HoldTiming(const std::shared_ptr<NrTimingSlot>& slot) override { host_.HoldTiming(slot); }
+ private:
+  DlssFrameHost& host_;
+  state::RestoreMode restore_;
+  uint64_t token_ = 0u;
 };
 
 struct AfterDlssConfig {
@@ -67,10 +97,25 @@ struct GameFrame {
 // Split chain: a recorded result carries that token, which a later stage group's recording waits to see completed (Timeline::StageWorkDone).
 template <class Record>
 PipelineResult RecordOnGameList(DlssFrameHost& host, nr::Timeline& timeline, state::RestoreMode restore, Record&& record) {
+  if (const uint64_t shared = host.RecordingToken(); shared != 0u) {
+    PipelineResult result;
+    if constexpr (std::is_invocable_v<Record, uint64_t>) result = record(shared);
+    else result = record();
+    if (result.recorded) {
+      host.ReplayState(restore);
+      result.token = shared;
+    }
+    return result;
+  }
   const uint64_t token = timeline.IssueToken();  // before recording, so every mark taken while recording includes it
   bool attached = false;
   try {
-    PipelineResult result = record();
+    PipelineResult result;
+    if constexpr (std::is_invocable_v<Record, uint64_t>) {
+      result = record(token);
+    } else {
+      result = record();
+    }
     if (!result.recorded) {
       timeline.Drop(std::span<const uint64_t>(&token, 1u));
       return result;

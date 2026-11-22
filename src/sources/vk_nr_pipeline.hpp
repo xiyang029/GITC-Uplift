@@ -19,6 +19,7 @@
 #include "sources/look_plan.hpp"
 #include "sources/nr_pipeline.hpp"
 #include "sources/present_motion_ring.hpp"
+#include "vk/nr_timeline.hpp"
 #include "vk/nr_functions.hpp"
 #include "vk/nr_image.hpp"
 
@@ -47,6 +48,8 @@ struct VkPresentTarget {
   VkImageLayout layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
   nr::Size size;
   VkFormat copy_format = VK_FORMAT_UNDEFINED;
+  // Exact native format only; UNDEFINED for typeless/mutable images whose native format is unknown.
+  VkFormat image_format = VK_FORMAT_UNDEFINED;
   color::Encoding encoding = color::Encoding::SRGB;  // resolved, never AUTO
   float diffuse_white_nits = 100.f;
   float transfer_strength = 1.f;
@@ -165,10 +168,12 @@ class VkNrPipeline final : private nr::PassResolver {
   // 1.1.6: `flip_y` when DLSS's images are upside down against the back buffer (ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN).
   // Says why no copy was made (the per-second counters).
   PresentMotionWrite RecordPresentMotion(VkCommandBuffer buffer, const color::VkSampledView& motion, nr::Rect region, float scale_x, float scale_y,
-                                         uint64_t frame, bool flip_y = false, float offset_x = 0.f, float offset_y = 0.f);
+                                         uint64_t frame, bool flip_y = false, float offset_x = 0.f, float offset_y = 0.f, std::shared_ptr<vk::NrCompletion::MotionProducer> producer = {});
   // Pick the newest copy within `max_age` and mark it in use. Zero allows only this frame.
-  [[nodiscard]] vk::NrImage PresentMotion(uint64_t frame, uint64_t* age, uint64_t max_age);
-  [[nodiscard]] bool HasPresentMotion(uint64_t frame, uint64_t max_age) const;  // PresentMotion without the stamp
+  using MotionReady = std::function<bool(const vk::NrCompletion::MotionProducer&)>;
+  [[nodiscard]] vk::NrImage PresentMotion(uint64_t frame, uint64_t* age, uint64_t max_age, const MotionReady& ready);
+  // PresentMotion without the stamp: whether a present for `frame` would find a copy under the same readiness rule it binds with.
+  [[nodiscard]] bool HasPresentMotion(uint64_t frame, uint64_t max_age, const MotionReady& ready) const;
   // The motion copy's pipeline, built now so its first compile stays out of the hooked evaluate. False when it could not be built.
   bool PreparePresentMotion() { return color_.PrepareMotion(); }
   // The slots, freed now when the GPU has passed them, else at their marks (FreeFinished); the ring returns to PRESENT_MOTION_MIN_SLOTS.
@@ -206,6 +211,7 @@ class VkNrPipeline final : private nr::PassResolver {
     uint64_t motion_bytes = 0u;  // and for each motion image, while it exists
     bool reset_pending = true;   // a new set, or a new encoding: NR's history starts afresh
     color::Encoding encoding = color::Encoding::AUTO;
+    color::Primaries primaries = color::Primaries::AUTO;
     float input_scale = 0.f;
     nr::Mark last_use;  // the newest recording on this set: the GPU is done with it once complete
   };
@@ -213,6 +219,7 @@ class VkNrPipeline final : private nr::PassResolver {
   // As in Direct3D 12's LookSurfaces, the look stage's surfaces (sources::LookPlan), apart from the main set so that the look never restarts NR's history.
   struct LookSurfaces {
     LookPlan plan;
+    nr::Size history_size;
     look::Atlas atlas;
     vk::NrImage basis;                          // κ_M, RG16F
     vk::NrImage gauss;                          // the pyramid atlas, RGBA16F
@@ -258,6 +265,8 @@ class VkNrPipeline final : private nr::PassResolver {
     VkImageView view = VK_NULL_HANDLE;            // the (shaped) change field
     std::optional<color::Upsampling> upsampling;  // unset: direct reads; set: resample the change field
     bool ok = true;                               // false: the change pass could not be recorded
+    bool fused = false;
+    VkImageView model_input = VK_NULL_HANDLE;
   };
 
   // The governor's RGBA32F state, (2^E, E, the last anchor, set), which the encode and the decode read as their exposure. It carries across
@@ -296,9 +305,10 @@ class VkNrPipeline final : private nr::PassResolver {
     vk::NrImage image;
     uint64_t frame = 0u;
     nr::Mark last_use;
+    std::shared_ptr<vk::NrCompletion::MotionProducer> producer;
   };
   static constexpr size_t PRESENT_MOTION_SLOTS = ::uplift::sources::PRESENT_MOTION_SLOTS;  // room for 8; 4 in use until the ring grows
-  [[nodiscard]] std::array<uint64_t, PRESENT_MOTION_SLOTS> PresentMotionFrames() const;
+  [[nodiscard]] std::array<uint64_t, PRESENT_MOTION_SLOTS> PresentMotionFrames(const MotionReady& ready = {}) const;
   static constexpr size_t MAX_OPENED = 24u;              // the images one recording moves UNDEFINED -> GENERAL at its start (Before upscaling: 20)
   static constexpr uint64_t EXPOSURE_STATE_BYTES = 32u;  // the meter's 2x1 RGBA32F state
 
@@ -313,6 +323,7 @@ class VkNrPipeline final : private nr::PassResolver {
     nr::Size size;
     VkFormat format = VK_FORMAT_UNDEFINED;
     nr::Size launchpad_size;
+    bool direct_blit = false;
     uint64_t bytes = 0u;  // the staging image and the intermediate, while they exist
     uint64_t launchpad_bytes = 0u;
     nr::Mark last_use;
@@ -378,6 +389,8 @@ class VkNrPipeline final : private nr::PassResolver {
   void PrepareFaces(nr::Size canvas, const nr::Controls& controls, const nr::StageSlice& slice, nr::FrameInputs* frame_inputs);
   // The look set for `plan`, made now unless it is the one held. False (logged once): optional shaping is skipped this recording.
   bool EnsureLook(const LookPlan& plan);
+  bool EnsureIntermediates(const SetSizes& sizes, bool pre_sr, const nr::foveation::Grid& foveation);
+  bool EnsureChange(bool required);
   [[nodiscard]] LookPlan LookPlanFor(nr::Size image) const;  // sources::PlanLook for this device and this set
   [[nodiscard]] color::VkSampledView BoundMask(uint32_t slot);             // the mask copy for this recording, or none
   // A global memory dependency: everything written before `source_stage` is visible to everything after (every Uplift image stays in GENERAL).

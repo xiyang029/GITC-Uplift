@@ -131,8 +131,13 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
     if (!IsFormatRefusal(result)) return {.skipped = DlssSkip::SHARE_FAILED};
     return unsupported(result);
   }
-  if (!after && !EnsureShared(&dlss_swap_.shared, &dlss_swap_.failure, image_size, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, SWAP_BYTES_PER_TEXEL,
-                              "Before upscaling's colour")) {
+  constexpr DXGI_FORMAT swap_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+  constexpr D3D12_RESOURCE_FLAGS swap_flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!after && (!dlss_swap_.shared.d3d12 || dlss_swap_.shared.size != image_size)
+      && !EnsureShared(&dlss_swap_.shared, &dlss_swap_uav_failure_, image_size, swap_format,
+                       swap_flags | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, SWAP_BYTES_PER_TEXEL, "Before upscaling's UAV colour")
+      && !EnsureShared(&dlss_swap_.shared, &dlss_swap_.failure, image_size, swap_format, swap_flags, SWAP_BYTES_PER_TEXEL,
+                       "Before upscaling's colour")) {
     return {.skipped = DlssSkip::SHARE_FAILED};
   }
   // DLSS's vectors and exposure cross when they can be shared; NR runs without them otherwise (EnsureShared logged why).
@@ -199,11 +204,11 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
           .motion_region = (motion12_ != nullptr ? nr::Rect{.x = 0u, .y = 0u, .width = input_.motion_region.width, .height = input_.motion_region.height}
                                                  : nr::Rect{}),
           .exposure = exposure12_,
-          .mask = (bridge_.mask_fresh_ ? bridge_.mask_.shared.d3d12.Get() : nullptr),
+          .mask = bridge_.mask_.shared.d3d12.Get(),
           .swap = (after_ ? nullptr : bridge_.dlss_swap_.shared.d3d12.Get()),
       };
       if (targets.mask != nullptr) {
-        Transition(list, targets.mask, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Transition(list, targets.mask, D3D12_RESOURCE_STATE_COMMON, SHADER_READ);
       }
       bool recorded = true;
       try {
@@ -215,7 +220,7 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
         *wrote = false;
       }
       if (targets.mask != nullptr) {
-        Transition(list, targets.mask, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+        Transition(list, targets.mask, SHADER_READ, D3D12_RESOURCE_STATE_COMMON);
       }
       if (!recorded) {
         bridge_.side_->CloseList();
@@ -268,7 +273,6 @@ DlssHandoff D3D11Bridge::RunDlss(const DlssHandoffInput& input, const DlssRecord
     }
     if (steps.used_mask) {
       mask_.shared.last_use = out;
-      mask_fresh_ = false;
     }
   }
   if (frame.d3d12_signalled) {

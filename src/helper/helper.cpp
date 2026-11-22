@@ -118,9 +118,9 @@ int Helper::Loop() {
     block_->reply = {};
     ipc::Reply& reply = block_->reply;
     reply.sequence = request.sequence;
-    bool deferred = false;
+    uint64_t complete_at = 0u;
     if (request.kind == ipc::RequestKind::ATTACH || request.kind == ipc::RequestKind::FRAME
-        || request.kind == ipc::RequestKind::RUN) {
+        || request.kind == ipc::RequestKind::RUN || request.kind == ipc::RequestKind::FRAME_RUN) {
       heartbeat_.BeginLongHandler(LONG_HANDLER_BEAT);  // these can enter NR's runtime, whose cold load can take longer than ipc::HelperLauncher::HUNG_AFTER
     }
     try {
@@ -132,7 +132,18 @@ int Helper::Loop() {
           Frame(request, &reply);
           break;
         case ipc::RequestKind::RUN:
-          Run(request, &reply, &deferred);
+          Run(request, &reply, &complete_at);
+          break;
+        case ipc::RequestKind::FRAME_RUN:
+          reply.run_skipped = 1u;  // also if Frame throws: the helper has not consumed the input fence
+          Frame(request, &reply, true);
+          if (reply.ok != 0u && reply.frame_ready != 0u && reply.handles.color == 0u
+              && reply.handles.to12 == 0u && reply.handles.to11 == 0u) {
+            reply.run_skipped = 0u;
+            Run(request, &reply, &complete_at);
+          } else if (reply.ok != 0u) {
+            FillStatus(&reply.status);
+          }
           break;
         case ipc::RequestKind::SHARE_MASK:
         case ipc::RequestKind::SHARE_MOTION:
@@ -166,7 +177,7 @@ int Helper::Loop() {
       reply.ok = 0u;
       ipc::CopyText(reply.error, "the helper threw while handling the request");
       nr::Log(nr::LogLevel::ERR, "the helper threw while handling a request");
-      deferred = false;
+      complete_at = 0u;
     }
     heartbeat_.EndLongHandler();
     if (transport_) {
@@ -174,7 +185,9 @@ int Helper::Loop() {
       // before the event is set.
       transport_->FenceValues(&reply.to12_completed, &reply.to11_completed);
     }
-    if (!deferred) {
+    // Publish every field before arming the event. A finished BLOCK/KMT submission can signal it immediately.
+    if (complete_at == 0u || FAILED(side_->Progress()->SetEventOnCompletion(complete_at, events_.reply))) {
+      if (complete_at != 0u) reply.wrote = 0u;
       SetEvent(events_.reply);
     }
     heartbeat_.Beat();
@@ -260,7 +273,7 @@ void Helper::ReplayPoint(uint32_t point) {
   if (static_cast<addon::TriggerPoint>(point) == addon::TriggerPoint::MARKER) context_->OnTechnique(true);
 }
 
-void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
+void Helper::Frame(const ipc::Request& request, ipc::Reply* reply, bool defer_status) {
   if (!context_ || !transport_) {
     ipc::CopyText(reply->error, "not attached");
     return;
@@ -313,30 +326,21 @@ void Helper::Frame(const ipc::Request& request, ipc::Reply* reply) {
   reply->ok = 1u;
   reply->frame_ready = context_->FrameReady() ? 1u : 0u;
   reply->running = (context_->NrState() != nr::SessionState::OFF) ? 1u : 0u;
-  FillStatus(&reply->status);
+  if (!defer_status) FillStatus(&reply->status);
 }
 
-void Helper::Run(const ipc::Request& request, ipc::Reply* reply, bool* deferred) {
+void Helper::Run(const ipc::Request& request, ipc::Reply* reply, uint64_t* complete_at) {
   if (!context_ || !transport_) {
     ipc::CopyText(reply->error, "not attached");
     return;
   }
   ReplayPoint(request.run.point);
-  uint64_t complete_at = 0u;
-  transport_->Run(request.run, *context_, reply, &complete_at);
+  transport_->Run(request.run, *context_, reply, complete_at);
   if (reply->busy != 0u) {
     ++busy_skips_;
   }
   // The status the add-on shows is this RUN's outcome (nr_applied, the skip reason): BeginFrame's copy predates it.
   FillStatus(&reply->status);
-  if (complete_at == 0u) return;
-  // BLOCK and KMT: the reply is complete, so the runtime may set the event once the GPU has passed the signal. That is the
-  // only place that sets it for this request (`deferred`), so it is set exactly once.
-  if (SUCCEEDED(side_->Progress()->SetEventOnCompletion(complete_at, events_.reply))) {
-    *deferred = true;
-  } else {
-    reply->wrote = 0u;  // nothing would tell the add-on when the GPU is done: it must not read the block
-  }
 }
 
 void Helper::FillStatus(ipc::Status* out) const {

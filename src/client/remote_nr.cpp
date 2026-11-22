@@ -1,6 +1,7 @@
 #include "client/remote_nr.hpp"
 
 #include <array>
+#include <algorithm>
 #include <format>
 #include <utility>
 
@@ -36,6 +37,18 @@ constexpr std::array<NtHandle, 5> NT_HANDLES = {{
     {&ipc::Handles::to12, nullptr},
     {&ipc::Handles::to11, nullptr},
 }};
+
+bool CarriesFrame(ipc::RequestKind kind) {
+  return kind == ipc::RequestKind::FRAME || kind == ipc::RequestKind::FRAME_RUN;
+}
+
+bool StableForRun(const ipc::Frame& old, const ipc::Frame& next) {
+  return next.nr_allowed != 0u && next.drain_now == 0u && next.retry_now == 0u
+      && next.settings_generation == old.settings_generation && next.mask_running == old.mask_running
+      && next.target.width == old.target.width && next.target.height == old.target.height
+      && next.target.dxgi_format == old.target.dxgi_format && next.target.color_space == old.target.color_space
+      && next.target.problem[0] == '\0' && old.target.problem[0] == '\0';
+}
 
 }  // namespace
 
@@ -80,6 +93,11 @@ void RemoteNr::Forget() {
   quit_sent_ = false;
   announced_ = false;
   outstanding_ = {};
+  steady_frame_.reset();
+  deferred_frame_.reset();
+  combined_reply_.reset();
+  ipc_timings_ = {};
+  next_ipc_log_ = {};
   last_status_ = {};
   have_status_ = false;
   nr_may_run_ = false;  // the process is gone, and its NR with it
@@ -110,23 +128,52 @@ void RemoteNr::Kill() {
 }
 
 std::optional<ipc::Reply> RemoteNr::Transact(const ipc::Request& request, uint32_t cap_ms) {
-  if (request.kind == ipc::RequestKind::FRAME && request.frame.nr_allowed != 0u) {
+  if (CarriesFrame(request.kind) && request.frame.nr_allowed != 0u) {
     nr_may_run_ = true;  // from here on the helper may load NR, whether or not this FRAME is answered
   }
-  switch (launcher_->Send(request, cap_ms)) {
+  const bool measure = nr::IsLogEnabled(nr::LogLevel::TRACE);
+  const auto start = measure ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  const auto outcome = launcher_->Send(request, cap_ms);
+  if (measure) NoteIpcTiming(request.kind, start, outcome);
+  switch (outcome) {
     case ipc::HelperLauncher::Wait::REPLIED:
       outstanding_ = {};
       DrainLog();  // what the helper logged handling this request reaches ReShade.log now, not at the next present
       return launcher_->Block()->reply;
     case ipc::HelperLauncher::Wait::PENDING:
-      outstanding_ = {request.kind, (request.kind == ipc::RequestKind::FRAME ? request.frame.settings_generation : frame_generation_),
-                      (request.kind == ipc::RequestKind::FRAME && request.frame.nr_allowed != 0u)};
+      outstanding_ = {request.kind, (CarriesFrame(request.kind) ? request.frame.settings_generation : frame_generation_),
+                      (CarriesFrame(request.kind) && request.frame.nr_allowed != 0u)};
       return std::nullopt;
     case ipc::HelperLauncher::Wait::GONE:
       outstanding_ = {};  // the next Present sees the exit
       return std::nullopt;
   }
   return std::nullopt;
+}
+
+void RemoteNr::NoteIpcTiming(ipc::RequestKind kind, std::chrono::steady_clock::time_point start, ipc::HelperLauncher::Wait outcome) {
+  const auto index = kind == ipc::RequestKind::FRAME ? 0u : kind == ipc::RequestKind::RUN ? 1u
+                   : kind == ipc::RequestKind::FRAME_RUN ? 2u : 3u;
+  if (index >= ipc_timings_.size()) return;
+  const auto now = std::chrono::steady_clock::now();
+  auto& sample = ipc_timings_[index];
+  const double ms = std::chrono::duration<double, std::milli>(now - start).count();
+  ++sample.calls;
+  sample.pending += outcome == ipc::HelperLauncher::Wait::PENDING;
+  sample.gone += outcome == ipc::HelperLauncher::Wait::GONE;
+  sample.total_ms += ms;
+  sample.max_ms = std::max(sample.max_ms, ms);
+  if (next_ipc_log_ == std::chrono::steady_clock::time_point{}) next_ipc_log_ = now + std::chrono::seconds(1);
+  if (now < next_ipc_log_) return;
+  constexpr std::array names = {"FRAME", "RUN", "FRAME_RUN"};
+  for (size_t i = 0u; i < ipc_timings_.size(); ++i) {
+    const auto& s = ipc_timings_[i];
+    if (s.calls == 0u) continue;
+    nr::Logf(nr::LogLevel::TRACE, "NR IPC {} CPU round trip: calls {}, pending {}, gone {}, mean {:.3f}, max {:.3f} ms; busy frames {}",
+             names[i], s.calls, s.pending, s.gone, s.total_ms / static_cast<double>(s.calls), s.max_ms, busy_frames_);
+  }
+  ipc_timings_ = {};
+  next_ipc_log_ = now + std::chrono::seconds(1);
 }
 
 void RemoteNr::Consume(const Outstanding& request, const ipc::Reply& reply, bool late) {
@@ -140,6 +187,7 @@ void RemoteNr::Consume(const Outstanding& request, const ipc::Reply& reply, bool
       }
       break;
     case ipc::RequestKind::FRAME:
+    case ipc::RequestKind::FRAME_RUN:
     case ipc::RequestKind::RUN:
       // RUN's status is the recording's outcome (nr_applied, the skip reason); FRAME's predates it.
       if (reply.ok != 0u) {
@@ -148,7 +196,7 @@ void RemoteNr::Consume(const Outstanding& request, const ipc::Reply& reply, bool
         have_status_ = true;
         // One request at a time, so this answers the newest FRAME; sent without nr_allowed and OFF, the helper's NR is unloaded
         // (the Session reaches OFF only after its unload) and nothing sent since can load it.
-        if (request.kind == ipc::RequestKind::FRAME && !request.nr_allowed
+        if (CarriesFrame(request.kind) && !request.nr_allowed
             && reply.status.session_state == static_cast<uint32_t>(nr::SessionState::OFF)) {
           nr_may_run_ = false;
         }
@@ -162,7 +210,7 @@ void RemoteNr::Consume(const Outstanding& request, const ipc::Reply& reply, bool
     case ipc::RequestKind::QUIT:
       break;
   }
-  if (late && request.kind == ipc::RequestKind::RUN) {
+  if (late && (request.kind == ipc::RequestKind::RUN || request.kind == ipc::RequestKind::FRAME_RUN)) {
     late_run_signalled_ = (reply.signalled != 0u);  // a FENCED client waits for that RUN's `out` until it hears this
   }
   // Each NT handle is handed out exactly once, in the reply of the request that made it. A reply nobody passes on to a client
@@ -190,7 +238,7 @@ void RemoteNr::Consume(const Outstanding& request, const ipc::Reply& reply, bool
 }
 
 std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& frame, std::string_view settings_text,
-                                            const std::function<void(std::string_view)>& log) {
+                                            const std::function<void(std::string_view)>& log, bool combine) {
   frame_sent_ = false;
   log_ = log;
   const auto now = std::chrono::steady_clock::now();
@@ -247,6 +295,7 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
     return std::nullopt;
   }
   if (launcher_->Pending()) {
+    steady_frame_.reset();  // deliver the late reply and re-establish the handshake before combining again
     switch (launcher_->Poll()) {
       case ipc::HelperLauncher::Wait::REPLIED:
         DrainLog();  // what the helper logged handling the late request
@@ -303,14 +352,42 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
     written_generation_ = frame.settings_generation;
     text_written_ = true;
   }
-  ipc::Request request = {.kind = ipc::RequestKind::FRAME};
+  if (combine && enabled && config_.attach.transport == ipc::Transport::FENCED && steady_frame_ && StableForRun(*steady_frame_, frame)) {
+    deferred_frame_ = frame;
+    return std::nullopt;
+  }
+  return DeliverFrame(SendFrame(frame, nullptr));
+}
+
+std::optional<ipc::Reply> RemoteNr::SendFrame(const ipc::Frame& frame, const ipc::Run* run) {
+  const auto kind = run != nullptr ? ipc::RequestKind::FRAME_RUN : ipc::RequestKind::FRAME;
+  ipc::Request request = {.kind = kind};
   request.frame = frame;
+  if (run != nullptr) request.run = *run;
   frame_generation_ = frame.settings_generation;
   frame_sent_ = true;
-  const std::optional<ipc::Reply> answered = Transact(request, FRAME_CAP_MS);
+  auto answered = Transact(request, run != nullptr ? RUN_CAP_MS : FRAME_CAP_MS);
+  if (answered) Consume({kind, frame.settings_generation, frame.nr_allowed != 0u}, *answered, false);
+  if (answered && answered->ok != 0u && answered->frame_ready != 0u && answered->running != 0u && frame.nr_allowed != 0u
+      && answered->status.session_state == static_cast<uint32_t>(nr::SessionState::ACTIVE)) {
+    steady_frame_ = frame;
+  } else {
+    steady_frame_.reset();
+  }
+  return answered;
+}
+
+std::optional<ipc::Reply> RemoteNr::FinishPresent() {
+  if (const auto frame = std::exchange(deferred_frame_, std::nullopt)) {
+    if (launcher_ == nullptr || !attached_ || launcher_->Pending()) return std::nullopt;
+    return DeliverFrame(SendFrame(*frame, nullptr));
+  }
+  return DeliverFrame(std::exchange(combined_reply_, std::nullopt));
+}
+
+std::optional<ipc::Reply> RemoteNr::DeliverFrame(std::optional<ipc::Reply> answered) {
   if (!answered) return std::nullopt;
   ipc::Reply reply = *answered;
-  Consume({ipc::RequestKind::FRAME, frame.settings_generation, frame.nr_allowed != 0u}, reply, false);  // the status; an ok = 0 reply's handles are kept
   if (reply.ok == 0u) {
     if (const std::string_view error = ipc::TextOf(reply.error); error != last_error_) {
       last_error_ = std::string(error);
@@ -351,6 +428,7 @@ std::optional<ipc::Reply> RemoteNr::Present(bool enabled, const ipc::Frame& fram
 
 void RemoteNr::Detach() {
   attached_ = false;
+  steady_frame_.reset();
   if (launcher_ == nullptr) return;
   DiscardLate();  // handles of the transport being dropped are of no use to the next one
   if (launcher_->Pending()) {
@@ -387,6 +465,10 @@ std::optional<ipc::Reply> RemoteNr::Run(const ipc::Run& run) {
   late_run_signalled_.reset();  // a newer RUN supersedes what an older one's late reply said
   if (launcher_ == nullptr || !attached_ || launcher_->Pending()) return std::nullopt;
   run_sent_ = true;
+  if (const auto frame = std::exchange(deferred_frame_, std::nullopt)) {
+    combined_reply_ = SendFrame(*frame, &run);
+    return combined_reply_;
+  }
   ipc::Request request = {.kind = ipc::RequestKind::RUN};
   request.run = run;
   const std::optional<ipc::Reply> reply = Transact(request, RUN_CAP_MS);

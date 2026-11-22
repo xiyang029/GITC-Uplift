@@ -520,12 +520,20 @@ bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* st
   }
   const MotionPick preferred = MotionPickOf(*settings);
   const int shown = static_cast<int>(view.setup.motion);
-  std::string saved_tip;
+  std::string tip_note;
   const OptionState& stored_motion = view.setup.motion_options[static_cast<size_t>(preferred)];
   if (view.setup.motion != preferred && (stored_motion.why.empty() || stored_motion.temporary)) {  // a fixed cause never clears: no promise
     const std::string_view stored = (settings->motion_vectors == MotionVectorSource::AUTO ? std::string_view("Auto") : std::string_view(OPTIONS[static_cast<size_t>(preferred)]));
-    saved_tip = std::format("{}\n{}", tips[static_cast<size_t>(shown)], SavedNote(stored));
-    tips[static_cast<size_t>(shown)] = saved_tip;
+    tip_note = SavedNote(stored);
+  }
+  // The row kept the preference because this frame's copy is only in flight (Setup's note): say so here, where the row says nothing.
+  if (!view.setup.motion_note.empty()) {
+    if (!tip_note.empty()) tip_note += "\n";
+    tip_note += view.setup.motion_note;
+  }
+  if (!tip_note.empty()) {
+    tip_note = std::format("{}\n{}", tips[static_cast<size_t>(shown)], tip_note);
+    tips[static_cast<size_t>(shown)] = tip_note;
   }
   // The row's label in its column, the segments across the control column, the reset arrow in the end slot:
   // the same RowLabel every other row goes through, which is also what gives Segmented its width. A bare
@@ -988,15 +996,23 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
     widgets::NextGap(style::RowGap());
     if (card.working) {
       const bool split = std::count_if(view.stage_runs.begin(), view.stage_runs.end(), [](const auto& run) { return run.planned != 0; }) > 1;
+      // Two numbers per stage: the evaluation alone (the TRACE line's "evaluate") and the whole chain (copy/remap,
+      // encode and exposure meter, evaluation, compose/Look, decode). A chain number without the evaluation in front
+      // reads as a regression to everyone who has watched this row.
       std::string nr_time;
       for (size_t i = 0; i < view.stage_runs.size(); ++i) {
-        const auto gpu_ms = view.stage_runs[i].gpu_ms;
-        if (!gpu_ms) continue;
+        const auto evaluation = view.stage_runs[i].gpu_ms;
+        const auto total = view.stage_runs[i].gpu_total_ms ? view.stage_runs[i].gpu_total_ms : evaluation;
+        if (!evaluation && !total) continue;
         if (!nr_time.empty()) nr_time += " · ";
         if (split) nr_time += gui::Display(NR_STAGE_NAMES[i]) + " ";
-        nr_time += std::format("{:.2f} ms", *gpu_ms);
+        if (evaluation && total) {
+          nr_time += std::format("{:.2f} · {:.2f} ms", *evaluation, *total);
+        } else {
+          nr_time += std::format("{:.2f} ms", *evaluation ? *evaluation : *total);
+        }
       }
-      const float timing_width = nr_time.empty() ? 0.f : gui::CalcTextSize("NR GPU time").x;
+      const float timing_width = nr_time.empty() ? 0.f : gui::CalcTextSize("NR GPU time (inference · chain)").x;
       const float key_width = std::max({timing_width, gui::CalcTextSize("Running at").x, gui::CalcTextSize("Motion vectors").x,
                                        gui::CalcTextSize("Backend").x, gui::CalcTextSize("Resolution").x});
       const float value_offset = style::SnapUp(key_width) + style::BlockGap();
@@ -1018,9 +1034,9 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       if (!view.details_backend.empty()) row("Backend", view.details_backend);
       row("Resolution", view.live.resolution);
       if (!nr_time.empty()) {
-        row("NR GPU time", nr_time);
+        row("NR GPU time (inference · chain)", nr_time);
         if (gui::IsItemHovered()) {
-          widgets::ItemTooltip("%s", gui::Display("Latest GPU time for NR evaluation at each stage. Includes all passes and the extra Keep faces evaluation when active.").c_str());
+          widgets::ItemTooltip("%s", gui::Display("Per stage, the latest completed recording: NR's evaluation alone, then the whole chain (copy and remap, encode and exposure meter, evaluation, compose/Look, decode). Includes all passes and the extra Keep faces run when active.").c_str());
         }
       }
       if (!view.setup.why.empty()) {

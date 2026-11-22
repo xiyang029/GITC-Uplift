@@ -16,7 +16,8 @@ inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // 8: Frame::uplift_mv_lumenite (+8 bytes); 9: Status::network_diagnostic (+256 bytes); 10: Status::legacy_runtime (+8 with alignment).
 // 11: network diagnostics for all ten passes (+3840 bytes).
 // 12-13: game-facing Present and per-pass network/style records; 14: the early-marker motion extent; 15: Status::keep_faces_supported.
-inline constexpr uint32_t PROTOCOL_VERSION = 15u;
+// 16: RequestKind::FRAME_RUN (the steady FENCED path) and Reply::reserved -> run_skipped (same offset and size).
+inline constexpr uint32_t PROTOCOL_VERSION = 16u;
 inline constexpr size_t TEXT_BYTES = 256u;
 inline constexpr size_t NETWORK_DIAGNOSTIC_BYTES = 4096u;
 inline constexpr size_t PATH_BYTES = 1024u;
@@ -54,6 +55,7 @@ enum class RequestKind : uint32_t {
   STOP,
   DETACH,
   QUIT,
+  FRAME_RUN,  // steady FENCED path; FRAME first, then RUN on the already imported resources
 };
 
 struct Attach {
@@ -208,7 +210,7 @@ struct Reply {
   uint32_t wrote = 0u;
   uint32_t signalled = 0u;
   uint32_t busy = 0u;
-  uint32_t reserved = 0u;
+  uint32_t run_skipped = 0u;  // FRAME_RUN: the FRAME invalidated the prepared handoff; no wait or signal queued
   // FENCED's two fences' completed values as the helper read them when it wrote this reply (UINT64_MAX: its device was removed; 0 on every other
   // transport). A GL semaphore cannot be read from the game's side, so the OpenGL client gets the helper's view of them in every reply.
   uint64_t to12_completed = 0u;

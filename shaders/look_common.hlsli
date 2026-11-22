@@ -126,8 +126,8 @@ float4 RegionBilinear(Texture2D<float4> atlas, int2 base, int2 size, float2 posi
 }
 
 // One level's sample at a work pixel: bilinear, or with `tent` a 3x3 tent of bilinear taps from level 3 up.
-float4 LevelSample(Texture2D<float4> atlas, uint2 image, uint level, uint2 pixel, bool tent) {
-  const int2 base = int2(LevelOffset(image, level), 0);
+float4 LevelSample(Texture2D<float4> atlas, uint2 image, uint level, uint2 pixel, bool tent, uint offset_base = 0u) {
+  const int2 base = int2(LevelOffset(image, level) - offset_base, 0);
   const int2 size = int2(LevelSize(image, level));
   const float2 position = LevelPosition(pixel, level);
   if (!tent || level < 3u) return RegionBilinear(atlas, base, size, position);
@@ -142,11 +142,12 @@ float4 LevelSample(Texture2D<float4> atlas, uint2 image, uint level, uint2 pixel
 }
 
 // Low pass: trilinear between floor(level) and the next level, clamped to [1, levels].
-float4 LowPass(Texture2D<float4> atlas, uint2 image, uint levels, float level, uint2 pixel, bool tent) {
+float4 LowPass(Texture2D<float4> atlas, uint2 image, uint levels, float level, uint2 pixel, bool tent, bool packed = false) {
   const float clamped = clamp(level, 1.f, float(levels));
   const uint first = uint(floor(clamped));
   const uint second = min(first + 1u, levels);
-  return lerp(LevelSample(atlas, image, first, pixel, tent), LevelSample(atlas, image, second, pixel, tent),
+  const uint base = packed ? LevelOffset(image, first) : 0u;
+  return lerp(LevelSample(atlas, image, first, pixel, tent, base), LevelSample(atlas, image, second, pixel, tent, base),
               clamped - float(first));
 }
 

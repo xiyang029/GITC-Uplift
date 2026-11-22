@@ -196,7 +196,8 @@ class DeviceContext {
   // Returns the recording's result; an empty one when nothing ran.
   sources::PresentResult Run(FrameHost* host, D3D12_RESOURCE_STATES entry_state, TriggerPoint point,
                              ID3D12Resource* motion = nullptr, bool motion_is_dlss = false, float dlss_scale_x = 1.f,
-                             float dlss_scale_y = 1.f, nr::Rect dlss_motion_region = {}, uint64_t dlss_motion_age = 0u);
+                             float dlss_scale_y = 1.f, nr::Rect dlss_motion_region = {}, uint64_t dlss_motion_age = 0u,
+                             ID3D12Resource* shared_mask = nullptr);
   // After the hooked evaluate of this device's main handle returned, under the
   // add-on's lock. Records NR after DLSS when that is the chosen placement; otherwise notes the evaluate.
   sources::PipelineResult OnDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
@@ -255,9 +256,10 @@ class DeviceContext {
                     std::chrono::steady_clock::time_point now);
   // A closed list whose Uplift work was first recorded with `first_token` was submitted again
   // without a Reset. Thread-safe.
-  void ResubmitTokens(uint64_t first_token, ID3D12CommandQueue* queue, uint32_t thread_id,
+  void ResubmitTokens(std::span<const uint64_t> recordings, ID3D12CommandQueue* queue, uint32_t thread_id,
                       std::chrono::steady_clock::time_point now);
   void DropTokens(std::span<const uint64_t> tokens);
+  void ReleaseRecordings(std::span<const uint64_t> tokens) { timeline_->ReleaseRecordings(tokens); }
   // StampThread runs at reset, evaluate or present, and at execute_command_list only for a list reset after the thread's last token submission:
   // any other execute_command_list could precede the native ExecuteCommandLists of the batch its tokens were submitted in.
   // `later_call`: the stamp was made at an execute_command_list event for a list that proves a later ExecuteCommandLists call than the tokens'; the
@@ -307,6 +309,8 @@ class DeviceContext {
   // BeginFrame readied a Present-path recording that Run has not made yet. The D3D11 bridge starts its fence
   // hand-off only then.
   [[nodiscard]] bool FrameReady() const { return frame_ready_; }
+  [[nodiscard]] bool PresentFoveated() const { return present_layout_.foveation.active(); }
+  [[nodiscard]] nr::SkipReason PresentWorkSkip() const;
   // The Session's state (OFF once torn down after a removal), for the bridge's surfaces and its mask copy.
   [[nodiscard]] nr::SessionState NrState() const { return (session_ ? session_->State() : nr::SessionState::OFF); }
   // The recordings that applied NR so far, at every placement (each Present-path run, each DLSS evaluate's), and the latest recording's
@@ -345,7 +349,7 @@ class DeviceContext {
   void NoteDlssFeature(uint64_t serial);
   // The recordings of both DLSS placements on `host`'s list, with the status they set: shared by the Direct3D 12 paths (OnDlssEvaluate,
   // BeforeDlssEvaluate) and the Direct3D 11 bridge's (RecordBridgedStage). Split chain: After DLSS records stage group `group` (Before upscaling is always
-  // group 0); `before_reset`, the game's reset as this evaluate's Before upscaling group already filtered it (ResetMerger passes one per window).
+  // group 0); `before_reset` is the game's reset received by this evaluate's Before upscaling group.
   sources::PipelineResult RecordAfterDlss(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host, const sources::WorkLayout& layout,
                                           std::chrono::steady_clock::time_point now, uint32_t group, std::optional<bool> before_reset);
   sources::PipelineResult RecordBeforeUpscaling(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host, const sources::WorkLayout& layout,
@@ -377,7 +381,6 @@ class DeviceContext {
   uint64_t dlss_feature_serial_ = 0u;
   FrameTrigger trigger_;
   ngx_hooks::FrameGenDetector frame_generation_;
-  ngx_hooks::ResetMerger reset_merger_;
   ngx_hooks::MotionJitterTracker present_jitter_;
   ID3D12CommandQueue* present_queue_ = nullptr;
   FrameSettings settings_;
@@ -392,8 +395,9 @@ class DeviceContext {
   uint64_t last_dlss_token_ = 0u;     // the newest DLSS-stage recording's token, whatever the chain (marked when the chain splits)
   // A queue other than the current presents' that the game's DLSS-stage NR went to; while set, a later group never runs at Present.
   ID3D12CommandQueue* other_dlss_queue_ = nullptr;
-  bool present_reset_owed_ = false;   // a later Present group skipped a frame: its next recording restarts its history
-  std::optional<bool> before_reset_;  // this evaluate's Before upscaling group's filtered reset, for the After DLSS group behind it
+  // A later Present group skipped a frame (no slices run, or group 0's intensity is 0): its next recording restarts its history.
+  bool present_reset_owed_ = false;
+  std::optional<bool> before_reset_;  // this evaluate's Before upscaling group's reset, for the After DLSS group behind it
   std::string blocked_reason_;
   std::string dlss_unavailable_reason_;
   std::string output_message_;  // device removal, unsupported format or colour space

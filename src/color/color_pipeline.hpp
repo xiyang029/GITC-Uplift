@@ -23,6 +23,7 @@ namespace shader_options {
 inline constexpr uint32_t PRIMARIES_MASK = 3u;    // bits 0-1: the SourcePrimaries index (Primaries; 0 = automatic)
 inline constexpr uint32_t NEAR_BLACK_GUARD = 4u;  // F16: read by the change pass
 inline constexpr uint32_t CONSISTENT = 8u;        // F15: read by the compose
+inline constexpr uint32_t FUSED_CHANGE = 32u;     // unscaled, no neighbouring or temporal change reads
 inline constexpr uint32_t MASK = 16u;             // set by RecordDecode/RecordComputeDecode when a mask is given
 }  // namespace shader_options
 
@@ -65,6 +66,7 @@ struct DecodePass {
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
   nr::foveation::Grid foveation;
+  ID3D12Resource* model_input = nullptr;  // preserved A in fused mode; null recomputes it
 };
 
 // The After-DLSS decode (v2 design §3.4 step 5): compute, into a region of a UAV target.
@@ -95,6 +97,7 @@ struct ComputeDecodePass {
   ID3D12Resource* mask = nullptr;                     // Plan 5 (§3.13): the mask copy, both shader-read states; null = none
   DXGI_FORMAT mask_view_format = DXGI_FORMAT_R8_UNORM;
   nr::foveation::Grid foveation;
+  ID3D12Resource* model_input = nullptr;
 };
 
 // v2 design §3.7: NR's change field at the work image size, from the model input recomputed exactly
@@ -175,6 +178,7 @@ struct StabilizePass {
   bool motion_mode = false;            // Stabilize = Motion
   bool reset = false;
   StabilizeMotion motion;
+  bool packed_history = false;
 };
 
 struct ShapePass {
@@ -188,6 +192,7 @@ struct ShapePass {
   look::Bands bands;
   look::ShapeSettings settings;
   bool sdr = false;
+  bool packed_history = false;
 };
 
 // The change field's own stabiliser (shaders/change_stabilize_cs.hlsl), after the shape: NR's output flickers where its input is still.
@@ -257,6 +262,8 @@ class ColorPipeline {
   bool RecordComputeDecode(ID3D12GraphicsCommandList* list, uint32_t slot, const ComputeDecodePass& pass);
   // False (logged, nothing recorded) when slot is out of range. Also used for the change field.
   bool RecordChange(ID3D12GraphicsCommandList* list, uint32_t slot, const ChangePass& pass);
+  bool RecordDepth(ID3D12GraphicsCommandList* list, uint32_t slot, ID3D12Resource* source, DXGI_FORMAT view_format,
+                   nr::Rect region, ID3D12Resource* target);
   bool RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const MotionPass& pass);
   // Plan 5. Each: false (logged, nothing recorded) when slot is out of range.
   bool RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, const MeterPass& pass);
@@ -280,6 +287,7 @@ class ColorPipeline {
   [[nodiscard]] bool HasDecodePipeline(DXGI_FORMAT target_view_format) const;
   // Whether the device can store to `format` through a typed UAV (cached per format).
   [[nodiscard]] bool SupportsTypedUavStore(DXGI_FORMAT format) const;
+  [[nodiscard]] bool CanDecodeInPlace(DXGI_FORMAT format) const;
   // Key decision 12: typed UAV loads of RGBA16F, R16F and RGBA32F, which the Plan 5 passes need.
   [[nodiscard]] bool SupportsUavLoads() const { return uav_loads_; }
   // Keep faces fix round 1 (C3): its pipeline was built (Initialize does not fail without it).
@@ -307,7 +315,9 @@ class ColorPipeline {
   Microsoft::WRL::ComPtr<ID3D12RootSignature> root_signature_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> encode_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> compute_decode_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> in_place_decode_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> depth_pipeline_;
   // Plan 5: the look, meter and resolve pipelines.
   Microsoft::WRL::ComPtr<ID3D12PipelineState> meter_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> pyramid_pipeline_;
@@ -319,6 +329,7 @@ class ColorPipeline {
   // A null entry records a format whose pipeline could not be built, so it is not retried every frame.
   std::unordered_map<DXGI_FORMAT, Microsoft::WRL::ComPtr<ID3D12PipelineState>> decode_pipelines_;
   mutable std::unordered_map<DXGI_FORMAT, bool> typed_uav_store_;
+  mutable std::unordered_map<DXGI_FORMAT, bool> in_place_formats_;
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> shader_heap_;  // shader-visible CBV/SRV/UAV ring
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> target_heap_;  // one CPU RTV, rewritten per decode
   uint32_t descriptor_size_ = 0u;

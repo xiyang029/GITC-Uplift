@@ -487,6 +487,7 @@ bool D3D12Client::RunFenced(D3D12Host& host, ID3D12Resource* back_buffer, D3D12U
   Steps steps(*this, host, back_buffer, entry_state, shared_motion_source, run, link);
   const bridge::BridgedFrame frame = bridge::RunBridgedFrame(steps, in, out);
   run_sent_ = steps.sent;
+  if (steps.reply.run_skipped != 0u) return false;  // the combined FRAME changed readiness; no GPU wait or signal was issued by the helper
   if (steps.timed_out) {
     // No reply within RUN_REPLY_CAP (or the helper is gone, which the launcher shows next frame). Nothing was queued on this side's GPU after the copy in, and no wait ever
     // will be for `out`; the helper's list may still run, so until to11 shows its signal (or a late reply says there is none) nothing touches the shared

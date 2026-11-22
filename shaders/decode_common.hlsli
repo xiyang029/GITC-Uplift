@@ -30,10 +30,11 @@ cbuffer DecodeConstants : register(b0) {
   float foveation_gmax_x;
   float foveation_gmax_y;
   float guided_low_gain;   // Edge-aware: the base band's gain (1 = the field's low frequencies unchanged)
+  uint has_model_input;  // preserved FP16 A (one NR pass)
 };
 
 // On Vulkan's After DLSS the decode works in place: the target (DLSS's output, u0) is also where the original pixel is read.
-#if UPLIFT_VK_SOURCE_STORAGE
+#if UPLIFT_VK_SOURCE_STORAGE || UPLIFT_DX_SOURCE_STORAGE
 UPLIFT_IMAGE_FORMAT(UPLIFT_VK_TARGET_FORMAT) RWTexture2D<float4> target_texture : register(u0);
 #define UPLIFT_LOAD_SOURCE(pixel) target_texture[uint2(pixel)]
 #else
@@ -42,6 +43,7 @@ Texture2D<float4> source_texture : register(t0);
 #endif
 Texture2D<float4> change_texture : register(t1);
 Texture2D<float> exposure_texture : register(t2);
+Texture2D<float4> model_input_texture : register(t4);
 Texture2D<float4> mask_texture : register(t3);  // Uplift's copy of UPLIFT_MASK, read with OPTION_MASK
 
 static const float WIDE_TENT_SLOPE = 1.f / 1.5f;  // reciprocal half-width in work texels
@@ -269,7 +271,21 @@ float4 DecodePixel(uint2 pixel) {
   float3 original = float3(0.f, 0.f, 0.f);
   bool has_original = false;
   if (upsampling == 0u) {
-    change = change_texture.Load(int3(pixel, 0)).xyz;
+    if ((options & OPTION_FUSED_CHANGE) != 0u) {
+      precise float3 model_in;
+      if (has_model_input != 0u) {
+        model_in = model_input_texture.Load(int3(pixel, 0)).rgb;
+      } else {
+        model_in = QuantizeHalf(EncodeModel(encoding, primaries, source.rgb, scale));
+      }
+      // Match the Direct3D FP16 UAV store of the unfused change field before composition.
+      const float3 field = ChangeField(encoding, model_in, change_texture.Load(int3(pixel, 0)).rgb,
+                                       (options & OPTION_NEAR_BLACK_GUARD) != 0u).xyz;
+      change = QuantizeHalf(field);
+    } else
+    {
+      change = change_texture.Load(int3(pixel, 0)).xyz;
+    }
   } else {
     uint2 size;
     change_texture.GetDimensions(size.x, size.y);

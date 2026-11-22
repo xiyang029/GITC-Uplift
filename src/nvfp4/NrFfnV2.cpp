@@ -28,6 +28,7 @@
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "NrPassBorrowTables.h"      // the runtime builds whose kernels and weights have been audited
@@ -48,6 +49,8 @@ constexpr unsigned kAqUnit = 576, kWqHalf = 2304;
 constexpr unsigned kMaxShared = 101376;     // the driver drops the device on a larger request instead of refusing the launch
 constexpr uint64_t kMaxTokens = 1u << 15;   // four times an 8K frame's; our buffers grow with the token count
 constexpr size_t kMaxSessions = 6;          // frame sizes per device whose buffers are held (about 50 MB each at 4K)
+constexpr size_t kWarmSessions = 2;         // with host recording leases: current and most recently used alternate size
+thread_local RecordingScope* recordingScope = nullptr;
 // Kernels of the runtime we recognise by name.
 enum Kind : unsigned { ExpandPublish, ExpandChained, Contract, Clear, Other };
 // Position of an evaluation's first feed-forward expand, counted in launches from its cc_cb_clear, in every audited
@@ -128,6 +131,8 @@ struct Session {
     struct Block { Buffer xq, hq, partial; };
     std::array<Block, 8> blocks;
     Buffer flags;                               // per block: [pack: 8 per tile][expand: 64 per tile] ints
+    bool tracked = true;
+    uint64_t lastUsed = 0;
     uint64_t FlagAddress(unsigned block, unsigned tiles, bool expand) const {
         return flags.Address() + (uint64_t(block) * 72 + (expand ? 8 : 0)) * tiles * 4;
     }
@@ -173,7 +178,8 @@ struct State {
     void (*log)(const char*) = nullptr;
     std::map<NVDX_ObjectHandle, Target> targets;
     std::map<ID3D12Device*, Device> devices;
-    std::map<std::pair<ID3D12Device*, uint64_t>, Session> sessions;
+    std::map<std::pair<ID3D12Device*, uint64_t>, std::shared_ptr<Session>> sessions;
+    uint64_t scratchSerial = 0;
     std::map<ID3D12GraphicsCommandList*, ListState> lists;
     decltype(&NvAPI_D3D12_CreateCuModule) createModule = nullptr;
     decltype(&NvAPI_D3D12_CreateCuFunction) createFunction = nullptr;
@@ -394,8 +400,29 @@ void LoadWeights(ModelWeights& m, ID3D12Device* device, const fs::path& root) {
     }
 }
 
+void TrimSessions(ID3D12Device* device, uint64_t tokens) {
+    if (!recordingScope) return;
+    auto& sessions = S().sessions;
+    for (;;) {
+        auto oldest = sessions.end();
+        size_t count = 0;
+        for (auto i = sessions.begin(); i != sessions.end(); ++i) {
+            // Only a tracked session can be erased, so only it counts: counting an untracked one would hold the loop at a size it can never
+            // reduce (the erase target is always tracked), and the sessions would grow past the warm set without ever being trimmed.
+            if (i->first.first != device || i->first.second == tokens || !i->second || !i->second->tracked) continue;
+            ++count;
+            if (oldest == sessions.end() || i->second->lastUsed < oldest->second->lastUsed) oldest = i;
+        }
+        if (count < kWarmSessions || oldest == sessions.end()) break;
+        sessions.erase(oldest);  // outstanding recordings own leases until reset AND execution completion
+    }
+}
+
 Session& SessionFor(ID3D12Device* device, uint64_t tokens) {
-    auto& session = S().sessions[{device, tokens}];
+    TrimSessions(device, tokens);
+    auto& cached = S().sessions[{device, tokens}];
+    if (!cached) cached = std::make_shared<Session>();
+    auto& session = *cached;
     if (!session.flags.resource) {
         try {
             const uint64_t tiles = (tokens + 127) / 128;
@@ -409,6 +436,9 @@ Session& SessionFor(ID3D12Device* device, uint64_t tokens) {
             throw;
         }
     }
+    session.lastUsed = ++S().scratchSerial;
+    if (recordingScope) recordingScope->Pin(cached);
+    else session.tracked = false;  // once an untracked caller used it, only device teardown can retire it
     return session;
 }
 
@@ -644,8 +674,9 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                         snprintf(megapixels, sizeof megapixels, "%.1f", s.options.minTokens * 3840.0 / 1e6);
                         text = std::string("off at this resolution: only faster from ") + megapixels + " megapixels up";
                     } else if (!s.sessions.count({target->device, size})) {
-                        // Buffers of a size stay until ReleaseDevice() (recorded command lists refer to them), so the
-                        // number of sizes is capped instead of freeing any while the model runs.
+                        TrimSessions(target->device, size);
+                        // Untracked callers keep the historical cap. Scoped callers can evict cache ownership;
+                        // the host's recording and execution leases retain buffers for as long as they are needed.
                         size_t held = 0;
                         for (const auto& entry : s.sessions) held += entry.first.first == target->device;
                         if (held >= kMaxSessions) text = "off at this resolution: too many frame sizes since the session started";
@@ -717,6 +748,22 @@ NvAPI_Status __cdecl DestroyModule(ID3D12Device* device, NVDX_ObjectHandle modul
     return S().destroyModule(device, module);
 }
 }   // namespace
+
+RecordingScope::RecordingScope(std::function<void(std::shared_ptr<void>)> retain)
+    : previous_(recordingScope), retain_(std::move(retain)) {
+    if (!retain_) throw std::invalid_argument("NVFP4 recording scope needs a retention callback");
+    recordingScope = this;
+}
+
+RecordingScope::~RecordingScope() { recordingScope = previous_; }
+
+void RecordingScope::Pin(const std::shared_ptr<void>& resource) {
+    if (!resource || std::find(pinned_.begin(), pinned_.end(), resource.get()) != pinned_.end()) return;
+    // Both operations precede any launch using this scratch. If either allocation fails, the caller can
+    // still keep the runtime's pair; never mark a lease pinned before its owner has accepted it.
+    retain_(resource);
+    pinned_.push_back(resource.get());
+}
 
 void* WrapNvapi(unsigned id, void* original) {
     if (!original) return original;

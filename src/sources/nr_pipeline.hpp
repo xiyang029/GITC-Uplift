@@ -48,6 +48,7 @@ struct PresentTarget {
   float motion_scale_y = 1.f;
   uint64_t dlss_motion_age = 0u;  // bridged copy; the native ring reports its age separately
   bool motion_enabled = true;    // false for an explicit None, not for a missed copy
+  ID3D12Resource* shared_mask = nullptr;
 };
 
 // The After-DLSS target: the region of DLSS's Output that NR runs on. Also pre-SR's
@@ -154,11 +155,10 @@ class NrPipeline final : private nr::PassResolver {
   // frame. False when nothing was recorded.
   // 1.1.6: `flip_y` when DLSS's images are upside down against the back buffer (ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN).
   bool RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& motion, float scale_x, float scale_y, bool flip_y = false,
-                        float offset_x = 0.f, float offset_y = 0.f);
-  // 2026-11-05 (Depth input): at an evaluate of the game's DLSS, copies its depth -- the very texture DLSS reads as Input.Depth, at that subrect -- on the
-  // game's list into the slot of the present that closes the current frame, exactly as RecordMotionCopy does for the vectors. MakeDepthCopies keeps the
-  // source's own format (a depth resource cannot be written by the motion copy's shader), so this is a plain region copy. False when nothing was recorded.
-  bool RecordDepthCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& depth);
+                        float offset_x = 0.f, float offset_y = 0.f, const std::shared_ptr<nr::Timeline::SubmissionProof>& producer = {});
+  // Samples DLSS's depth subrect into a read-only colour texture on the producer's list.
+  bool RecordDepthCopy(ID3D12GraphicsCommandList* list, const nr::BoundResource& depth, bool inverted,
+                       const std::shared_ptr<nr::Timeline::SubmissionProof>& producer);
   // Frees the intermediates now when the GPU has passed the newest recording that used them (a drain to OFF
   // normally has); otherwise hands them to the timeline, which frees them once it does. Also the look set,
   // the mask copy and the exposure state too.
@@ -198,6 +198,7 @@ class NrPipeline final : private nr::PassResolver {
   // NR's history. Freed like the main set: at once when the GPU is done with them, else at their mark.
   struct LookSurfaces {
     LookPlan plan;
+    nr::Size history_size;
     look::Atlas atlas;
     Texture basis;                          // κ_M, RG16F
     Texture gauss;                          // the pyramid atlas, RGBA16F
@@ -271,6 +272,8 @@ class NrPipeline final : private nr::PassResolver {
     ID3D12Resource* texture = nullptr;            // the (shaped) change field
     std::optional<color::Upsampling> upsampling;  // unset: direct reads; set: resample the change field
     bool ok = true;                               // false: the change pass could not be recorded
+    bool fused = false;
+    ID3D12Resource* model_input = nullptr;
   };
 
   void ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID3D12Resource* given, ID3D12Resource* returned) override;
@@ -288,7 +291,8 @@ class NrPipeline final : private nr::PassResolver {
   // The meter (and, for Auto's check, the copy of its state into the readback ring) before the encode.
   void RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, color::MeterPass pass, const ExposureChoice& exposure);
   void PollExposureChecks();  // reads the samples the GPU has passed into the set's auto_exposure
-  ID3D12Resource* BoundMask(uint32_t slot);  // the mask copy for this recording, or null
+  struct MaskBinding { ID3D12Resource* texture = nullptr; DXGI_FORMAT format = DXGI_FORMAT_R16G16B16A16_FLOAT; };
+  MaskBinding BoundMask(uint32_t slot, ID3D12Resource* shared);
   AfterNr RecordAfterNr(ID3D12GraphicsCommandList* list, uint32_t slot, const color::EncodePass& encode,
                         ID3D12Resource* nr_output, uint32_t passes_run, bool reduced, bool look_ready, color::Upsampling upsampling,
                         const color::StabilizeMotion& motion, bool reset, std::optional<ChangeStabilizeInput> change_input = std::nullopt);
@@ -301,7 +305,7 @@ class NrPipeline final : private nr::PassResolver {
   MaskCopy mask_;
   uint32_t resolve_slot_ = 0u;  // the recording's descriptor slot, for ResolvePass
 
-  // What one recording needs allocated. A different plan reallocates the set.
+  // What one recording needs allocated. Each surface is reused while its own dimensions/format fit.
   struct SetPlan {
     SetSizes sizes;
     DXGI_FORMAT copy_format = DXGI_FORMAT_UNKNOWN;  // the source copy's; UNKNOWN: none (pre-SR reads Color in place)
@@ -323,9 +327,9 @@ class NrPipeline final : private nr::PassResolver {
     Texture private_color;  // pre-SR only
     SetPlan plan;
     uint64_t bytes = 0u;    // every texture above, as the budget charges them
-    bool motion_needs_clear = true;
     bool reset_pending = true;  // only a frame that ran NR pays off the owed reset
     color::Encoding encoding = color::Encoding::AUTO;
+    color::Primaries primaries = color::Primaries::AUTO;
     float input_scale = 0.f;
     nr::Mark last_use;  // the newest recording on this set (CommitSlot): the GPU is done with it once complete
   };
@@ -354,22 +358,22 @@ class NrPipeline final : private nr::PassResolver {
   static constexpr size_t MOTION_COPY_SLOTS = PRESENT_MOTION_SLOTS;  // room for the grown ring
   struct MotionCopies {
     std::array<Texture, MOTION_COPY_SLOTS> textures;
+    std::array<std::shared_ptr<nr::Timeline::SubmissionProof>, MOTION_COPY_SLOTS> producers;
     std::array<uint64_t, MOTION_COPY_SLOTS> frames = {};    // the frame each copy was made for; 0 = none
     size_t slots = PRESENT_MOTION_MIN_SLOTS;                 // the slots in use, starting at PRESENT_MOTION_MIN_SLOTS
     std::array<nr::Mark, MOTION_COPY_SLOTS> last_use = {};  // the newest recording that wrote or read it
     nr::Size size;
   };
 
-  // 2026-11-05 (Depth input): the game's depth, copied at the DLSS evaluate for the present that closes the frame, in the same ring scheme as the motion
-  // copies above (indexed by the frame the present closes, PRESENT_MOTION_MIN_SLOTS -- no growth, 2026-11-07: the depth is not worth four more full-size
-  // textures). Each copy keeps the source's own format, so it is a plain region copy, not a compute pass.
+  // Depth for Present: four slots hold the sampled value in R32_FLOAT, with no stencil.
   struct DepthCopies {
     std::array<Texture, MOTION_COPY_SLOTS> textures;
+    std::array<std::shared_ptr<nr::Timeline::SubmissionProof>, MOTION_COPY_SLOTS> producers;
     std::array<uint64_t, MOTION_COPY_SLOTS> frames = {};  // the frame each copy was made for; 0 = none
     size_t slots = PRESENT_MOTION_MIN_SLOTS;
     std::array<nr::Mark, MOTION_COPY_SLOTS> last_use = {};
     nr::Size size;
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // the format the copies are in (the source's, or its plain twin)
+    std::array<bool, MOTION_COPY_SLOTS> inverted = {};
     bool warned_format = false;
   };
 
@@ -395,6 +399,7 @@ class NrPipeline final : private nr::PassResolver {
   nr::SkipReason EnsureIntermediates(const SetPlan& plan);  // NONE on success, else OUT_OF_MEMORY
   // `set`'s intermediates only: freed now if the GPU is done with them, else at their mark. The Retire*(StageSet*) free one set's surfaces: the recording's,
   // or any from ReleaseIntermediates and RetireSetsFrom.
+  bool EnsureChange(bool required);
   void RetireSet(StageSet* set);
   void RetireLook(StageSet* set);
   void RetireFaces(StageSet* set);
@@ -402,7 +407,7 @@ class NrPipeline final : private nr::PassResolver {
   void RetireExposureCheck(StageSet* set);
   void RetireMotionCopies();   // likewise for the motion copies
   void RetireDepthCopies();    // and for the depth copies (Depth input)
-  bool MakeDepthCopies(size_t first, size_t end, nr::Size size, DXGI_FORMAT format);
+  bool MakeDepthCopies(size_t first, size_t end, nr::Size size);
   void RetireLaunchpadMotion();  // likewise for Launchpad's converted motion
   void RetireDlssPresentMotion();  // likewise for Direct3D 11's converted ring vectors
   bool MakeMotionCopies(size_t first, size_t end, nr::Size size);  // motion_copies_.textures[first, end); none kept on a failure
@@ -418,10 +423,10 @@ class NrPipeline final : private nr::PassResolver {
                                            const WorkLayout& work);
   bool ConvertWorkMotion(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs& inputs, const WorkLayout& work, bool flip_y = false);
   void NoteEncoding(color::Encoding encoding, float input_scale);
-  void CommitSlot(uint32_t slot);
-  bool Encode(ID3D12GraphicsCommandList* list, uint32_t slot, color::EncodePass pass);
+  void CommitSlot(uint32_t slot, bool replayable);
+  bool Encode(ID3D12GraphicsCommandList* list, uint32_t slot, color::EncodePass pass, bool needs_zero_motion);
   nr::EvaluateResult Evaluate(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs inputs, const nr::Controls& controls,
-                              const nr::StageSlice& slice, ID3D12CommandQueue* timing_queue, DlssFrameHost* timing_host);
+                              const nr::StageSlice& slice, NrTimingSlot* sample);
 
   Microsoft::WRL::ComPtr<ID3D12Device> device_;
   nr::Session& session_;

@@ -80,6 +80,21 @@ C4996 (`_wgetenv` / `getenv`). `build.cmd`'s working-tree modification is pre-ex
 The comparison bases are the two shas at the top of this file. No other upstream commit has been
 reviewed for this half yet; the next sweep should start at `d3299ce5` and record shas the same way.
 
+## Local lifetime follow-up, 2026-11-21
+
+FFN scratch retirement now uses local recording leases instead of upstream's proxy lifetime layer.
+`Session::Evaluate` brackets feature creation and evaluation with `NrFfnV2::RecordingScope`. Scratch
+is retained by the NR timeline until both GPU execution completes and the owning command recording
+is reset or destroyed. A reusable command list therefore keeps its original buffers even after its
+first execution completes; private one-shot bridge recordings explicitly release their recording
+ownership after submission, while their execution fence still protects the buffers.
+
+For scoped calls the cache retains the current token count and the most recently used alternate.
+Eviction drops only cache ownership; outstanding recordings can keep more sizes alive. Unscoped
+calls permanently mark their sessions untracked and retain the original six-size cap and device
+teardown lifetime. This changes neither kernels, weights, model selection nor precision. It does
+not claim a fixed peak-VRAM saving while game command lists still reference old sizes.
+
 ## Sweep 2026-11-20: `fca8f4c1` (FP8 NR models) and `e468b65d` (presets / calibrator)
 
 Selective port of `fca8f4c19307d32983b71d703b416ee4294ced55` from `codex/standalone-current`.

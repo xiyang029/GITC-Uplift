@@ -107,6 +107,8 @@ Timeline::Timeline(Timeline&& other) noexcept
       fence_(std::move(other.fence_)),
       event_(std::exchange(other.event_, nullptr)),
       tokens_(std::move(other.tokens_)),
+      recordings_(std::move(other.recordings_)),
+      recording_proofs_(std::move(other.recording_proofs_)),
       last_token_(other.last_token_),
       unstamped_(other.unstamped_.load()),
       thread_stamps_(other.thread_stamps_.load()),
@@ -190,6 +192,30 @@ bool Timeline::IsComplete(uint64_t frame) const {
 }
 
 bool Timeline::IsComplete(const Mark& mark) const {
+  {
+    const std::shared_lock lock(tokens_mutex_);
+    if (!recordings_.empty() && *recordings_.begin() <= mark.token) return false;
+  }
+  return IsExecutionComplete(mark);
+}
+
+bool Timeline::IsReusable(const Mark& mark) const {
+  {
+    const std::shared_lock lock(tokens_mutex_);
+    if (mark.recording_token != 0u && recordings_.contains(mark.recording_token)) return false;
+  }
+  return IsExecutionComplete(mark);
+}
+
+uint32_t Timeline::FindReusableSlot(std::span<const Mark> marks, uint32_t first, uint32_t ordinal) const {
+  for (uint32_t offset = 0u; offset < marks.size(); ++offset) {
+    const uint32_t slot = (first + offset) % static_cast<uint32_t>(marks.size());
+    if (IsReusable(marks[slot]) && ordinal-- == 0u) return slot;
+  }
+  return static_cast<uint32_t>(marks.size());
+}
+
+bool Timeline::IsExecutionComplete(const Mark& mark) const {
   if (mark.frame == 0u && mark.token == 0u) return true;
   uint64_t token = mark.token;
   {
@@ -206,8 +232,9 @@ bool Timeline::IsComplete(const Mark& mark) const {
   return IsComplete(mark.frame) && TokensComplete(token);
 }
 
-Mark Timeline::MarkNow() const {
-  return {.frame = CurrentFrame(), .token = LastToken()};
+Mark Timeline::MarkNow(bool replayable) const {
+  const uint64_t token = LastToken();
+  return {.frame = CurrentFrame(), .token = token, .recording_token = replayable ? token : 0u};
 }
 
 void Timeline::ReleaseAfter(uint64_t frame, std::function<void()> release) {
@@ -224,7 +251,9 @@ void Timeline::Poll() {
     if (fences_ != nullptr) {
       std::erase_if(tokens_, [this](const auto& entry) {
         const Token& token = entry.second;
-        return token.state == Token::State::STAMPED && fences_->Completed(token.queue) >= token.fence_value;
+        if (token.state != Token::State::STAMPED || fences_->Completed(token.queue) < token.fence_value) return false;
+        if (const auto proof = token.proof.lock()) proof->complete_ = true;
+        return true;
       });
     }
     if (token_probe_) {
@@ -307,6 +336,8 @@ void Timeline::Flush(std::chrono::milliseconds timeout) {
   {
     const std::unique_lock lock(tokens_mutex_);
     tokens_.clear();
+    recordings_.clear();
+    recording_proofs_.clear();
     reexecutions_.clear();
     unstamped_.store(0u);
   }
@@ -318,10 +349,39 @@ void Timeline::Flush(std::chrono::milliseconds timeout) {
   }
 }
 
+std::shared_ptr<Timeline::SubmissionProof> Timeline::TrackSubmission(uint64_t token) {
+  const std::unique_lock lock(tokens_mutex_);
+  const auto found = tokens_.find(token);
+  if (found == tokens_.end() || found->second.state != Token::State::RECORDED) return {};
+  if (auto proof = found->second.proof.lock()) return proof;
+  auto proof = std::make_shared<SubmissionProof>();
+  found->second.proof = proof;
+  recording_proofs_[token] = proof;
+  return proof;
+}
+
+bool Timeline::OrderedBefore(const SubmissionProof* proof, ID3D12CommandQueue* consumer) const {
+  if (proof == nullptr) return false;
+  const std::shared_lock lock(tokens_mutex_);
+  // A producer submitted to the consumer's own queue is ordered by submission: the queue runs lists in order, so the
+  // consumer's list executes after it whatever the GPU has finished. A stamp is not needed for that -- but a submit is
+  // not enough either: ReShade raises execute_command_list before the native call, so a list submitted within the
+  // frame being recorded could still be waiting to reach the queue. One whole frame later that window is long closed,
+  // so the queue alone orders the write then. This is what made Present read no copy at all while the GPU ran behind:
+  // the copy's list is submitted on the game's render thread, nothing stamps it before the same frame's present, and
+  // the aged stamp takes 250 ms -- far past the copy's one-frame shelf life. Foreign queues still need completion.
+  // A stamp names the queue and already orders it; a submission from an earlier frame proves the native call returned.
+  const bool same_queue = (proof->queue_ != nullptr && consumer != nullptr && proof->queue_ == consumer &&
+                           (proof->fence_ != 0u || proof->submitted_frame_ < CurrentFrame()));
+  return !proof->replayed_ && (proof->complete_ || same_queue ||
+      (proof->fence_ != 0u && fences_ != nullptr && fences_->Completed(proof->queue_) >= proof->fence_));
+}
+
 uint64_t Timeline::IssueToken(std::chrono::steady_clock::time_point now) {
   const std::unique_lock lock(tokens_mutex_);
   const uint64_t id = ++last_token_;
   tokens_.emplace(id, Token{.issue_time = now});
+  recordings_.insert(id);
   return id;
 }
 
@@ -339,8 +399,15 @@ void Timeline::Submit(std::span<const uint64_t> tokens, ID3D12CommandQueue* queu
         .issue_time = found->second.issue_time,  // preserve: this replaces the whole Token
         .submit_frame = CurrentFrame(),
         .submit_time = now,
+        .proof = found->second.proof,
         .stage = stage,
     };
+    // The proof names its queue and its frame as soon as the list it covers is submitted, not only once it is
+    // stamped: a copy read by a later frame's list on this same queue is ordered by submission alone (OrderedBefore).
+    if (const auto proof = found->second.proof.lock()) {
+      proof->queue_ = queue;
+      proof->submitted_frame_ = found->second.submit_frame;
+    }
     unstamped_.fetch_add(1u);
     if (stage && std::ranges::find(stage_queues_, queue) == stage_queues_.end()) {
       stage_queues_.push_back(queue);
@@ -356,8 +423,16 @@ void Timeline::Submit(std::span<const uint64_t> tokens, ID3D12CommandQueue* queu
 }
 
 uint64_t Timeline::Resubmit(uint64_t first_token, ID3D12CommandQueue* queue, uint32_t thread_id,
-                            std::chrono::steady_clock::time_point now) {
+                            std::chrono::steady_clock::time_point now, std::span<const uint64_t> recordings) {
   const std::unique_lock lock(tokens_mutex_);
+  // A copy replay can overwrite an already completed producer. Its first fence cannot prove
+  // the new write ready, including after Poll pruned that first token. Stop lending this copy.
+  if (recordings.empty()) recordings = std::span<const uint64_t>(&first_token, 1u);
+  for (const uint64_t original : recordings) {
+    if (const auto found = recording_proofs_.find(original); found != recording_proofs_.end()) {
+      if (const auto proof = found->second.lock()) proof->replayed_ = true;
+    }
+  }
   const uint64_t fresh = ++last_token_;
   if (token_probe_) {
     // The probe decides when this execution is done; nothing stamps it, so it stays RECORDED (never counted as unstamped).
@@ -380,10 +455,20 @@ uint64_t Timeline::Resubmit(uint64_t first_token, ID3D12CommandQueue* queue, uin
 void Timeline::Drop(std::span<const uint64_t> tokens) {
   const std::unique_lock lock(tokens_mutex_);
   for (const uint64_t id : tokens) {
+    recordings_.erase(id);
+    recording_proofs_.erase(id);
     const auto found = tokens_.find(id);
     if (found != tokens_.end() && found->second.state == Token::State::RECORDED) {
       tokens_.erase(found);
     }
+  }
+}
+
+void Timeline::ReleaseRecordings(std::span<const uint64_t> tokens) {
+  const std::unique_lock lock(tokens_mutex_);
+  for (const uint64_t token : tokens) {
+    recordings_.erase(token);
+    recording_proofs_.erase(token);
   }
 }
 
@@ -431,6 +516,7 @@ void Timeline::ForgetQueue(ID3D12CommandQueue* queue) {
     if (it->second.state == Token::State::SUBMITTED) {
       unstamped_.fetch_sub(1u);
     }
+    if (const auto proof = it->second.proof.lock()) proof->complete_ = true;
     it = tokens_.erase(it);
   }
 }
@@ -514,6 +600,10 @@ uint64_t Timeline::StampLocked(const std::function<bool(const Token&)>& matches)
       if (token.state == Token::State::SUBMITTED && token.queue == queue && matches(token)) {
         token.state = Token::State::STAMPED;
         token.fence_value = value;
+        if (const auto proof = token.proof.lock()) {
+          proof->queue_ = queue;
+          proof->fence_ = value;
+        }
         unstamped_.fetch_sub(1u);
         ++stamped;
       }

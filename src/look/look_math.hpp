@@ -94,6 +94,7 @@ struct Atlas { nr::Size image; uint32_t levels = 0u; nr::Size size; };  // level
 // λ = log2(2σ) clamped to [1, levels]; the halo's max level ceil(log2 σ); the stabiliser's floor(λ) (and the next).
 struct Bands { float low_level = 1.f; uint32_t peak_level = 1u; uint32_t stable_level = 1u; };
 [[nodiscard]] Bands MakeBands(float detail_radius, uint32_t height, uint32_t levels);
+[[nodiscard]] nr::Size LowHistorySize(const Atlas& atlas, float detail_radius);
 // The face mask's live tuning in the Advanced rows. Shader constants only: none restarts NR or
 // the twin.
 // The threshold and full protection are relative, % of the pixel's own brightness (faces_cs.hlsl's FirstWeight), so

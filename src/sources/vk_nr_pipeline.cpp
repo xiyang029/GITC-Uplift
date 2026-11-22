@@ -450,11 +450,94 @@ LookPlan VkNrPipeline::LookPlanFor(nr::Size image) const {
   return PlanLook(config_, image, look_storage_);
 }
 
+bool VkNrPipeline::EnsureIntermediates(const SetSizes& sizes, bool pre_sr, const nr::foveation::Grid& foveation) {
+  auto& held = set_->intermediates;
+  if (held.a.image != VK_NULL_HANDLE && held.foveation != foveation) {
+    held.foveation = foveation;
+    held.reset_pending = true;
+    set_->look.history_valid = false;
+    set_->look.change_valid = false;
+  }
+  if (held.a.image != VK_NULL_HANDLE && held.pre_sr == pre_sr && held.sizes == sizes) return true;
+  const bool same_canvas = held.a.image != VK_NULL_HANDLE && held.sizes.canvas == sizes.canvas;
+  Intermediates created = {
+      .a = same_canvas ? held.a : vk::NrImage{},
+      .b = same_canvas ? held.b : vk::NrImage{},
+      .zero_motion = same_canvas ? held.zero_motion : vk::NrImage{},
+      .canvas_motion = same_canvas ? held.canvas_motion : vk::NrImage{},
+      .private_color = held.sizes.private_color == sizes.private_color ? held.private_color : vk::NrImage{},
+      .change = held.sizes.image == sizes.image ? held.change : vk::NrImage{},
+      .sizes = sizes, .pre_sr = pre_sr, .foveation = foveation,
+      .motion_bytes = sizes.canvas.Pixels() * MOTION_BYTES_PER_PIXEL,
+      .last_use = held.last_use,
+  };
+  std::array<vk::NrImage*, 3> allocated{};
+  size_t count = 0u;
+  const auto make = [&](vk::NrImage* image, nr::Size size, bool ngx) {
+    if (image->image != VK_NULL_HANDLE || size.Empty()) return true;
+    allocated[count++] = image;
+    return vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, size.width, size.height, MODEL_USAGE, ngx, image);
+  };
+  if (!make(&created.a, sizes.canvas, true) || !make(&created.b, sizes.canvas, true)
+      || !make(&created.private_color, sizes.private_color, false)) {
+    for (size_t i = 0; i < count; ++i) vk::DestroyNrImage(functions_, device_, allocated[i]);
+    LogAllocationFailure(sizes.canvas);
+    return false;
+  }
+  created.bytes = (2u * sizes.canvas.Pixels() + sizes.private_color.Pixels()
+                   + (created.change.image != VK_NULL_HANDLE ? sizes.image.Pixels() : 0u)) * MODEL_BYTES_PER_PIXEL;
+  // Transfer unchanged handles to the new set; only replaced surfaces enter deferred destruction.
+  std::array<vk::NrImage, 6> retired = {held.a, held.b, held.zero_motion, held.canvas_motion, held.private_color, held.change};
+  const std::array<vk::NrImage, 6> kept = {created.a, created.b, created.zero_motion, created.canvas_motion, created.private_color, created.change};
+  bool any = false;
+  for (size_t i = 0; i < retired.size(); ++i) {
+    if (retired[i].image == kept[i].image) retired[i] = {};
+    any |= retired[i].image != VK_NULL_HANDLE;
+  }
+  if (any) {
+    auto destroy = [functions = functions_, device = device_, retired]() mutable {
+      for (auto& image : retired) vk::DestroyNrImage(functions, device, &image);
+    };
+    if (timeline_.IsComplete(held.last_use)) destroy();
+    else timeline_.ReleaseAfter(held.last_use, std::move(destroy));
+  }
+  set_->look.history_valid = false;
+  set_->look.change_valid = false;
+  held = std::move(created);
+  allocation_failure_logged_ = false;
+  return true;
+}
+
+bool VkNrPipeline::EnsureChange(bool required) {
+  auto& set = set_->intermediates;
+  const auto bytes = set.sizes.image.Pixels() * MODEL_BYTES_PER_PIXEL;
+  if (!required) {
+    if (set.change.image != VK_NULL_HANDLE) {
+      auto destroy = [functions = functions_, device = device_, image = set.change]() mutable { vk::DestroyNrImage(functions, device, &image); };
+      if (timeline_.IsComplete(set.last_use)) destroy();
+      else timeline_.ReleaseAfter(set.last_use, std::move(destroy));
+      set.change = {};
+      set.bytes -= bytes;
+    }
+    return true;
+  }
+  if (set.change.image != VK_NULL_HANDLE) return true;
+  if (!vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, set.sizes.image.width, set.sizes.image.height,
+                         MODEL_USAGE, false, &set.change)) {
+    LogAllocationFailure(set.sizes.image);  // the caller only learns OUT_OF_MEMORY: the size and the budget are logged here
+    return false;
+  }
+  set.bytes += bytes;
+  return true;
+}
+
 bool VkNrPipeline::EnsureLook(const LookPlan& plan) {
-  if (plan == set_->look.plan) return true;
+  const look::Atlas atlas = plan.shape ? look::MakeAtlas(plan.image) : look::Atlas{};
+  const nr::Size history_size = plan.stabilize ? look::LowHistorySize(atlas, config_.look.detail_radius) : nr::Size{};
+  if (plan == set_->look.plan && history_size == set_->look.history_size) return true;
   RetireLook(set_);
   if (plan == LookPlan{}) return true;
-  LookSurfaces created = {.plan = plan, .atlas = (plan.shape ? look::MakeAtlas(plan.image) : look::Atlas{})};
+  LookSurfaces created = {.plan = plan, .history_size = history_size, .atlas = atlas};
   bool made = true;
   const auto make = [&](bool wanted, nr::Size size, VkFormat format, uint64_t bytes_per_pixel, VkImageUsageFlags usage, vk::NrImage* image) {
     if (!wanted || !made) return;
@@ -465,7 +548,7 @@ bool VkNrPipeline::EnsureLook(const LookPlan& plan) {
   make(plan.shape, created.atlas.size, VK_FORMAT_R16G16B16A16_SFLOAT, MODEL_BYTES_PER_PIXEL, LOOK_USAGE, &created.gauss);
   make(plan.shape, created.atlas.size, VK_FORMAT_R16_SFLOAT, 2u, LOOK_USAGE, &created.peaks);
   for (vk::NrImage& history : created.history) {
-    make(plan.stabilize, created.atlas.size, VK_FORMAT_R16G16B16A16_SFLOAT, MODEL_BYTES_PER_PIXEL, LOOK_USAGE, &history);
+    make(plan.stabilize, history_size, VK_FORMAT_R16G16B16A16_SFLOAT, MODEL_BYTES_PER_PIXEL, LOOK_USAGE, &history);
   }
   for (vk::NrImage& history : created.detail_history) {
     make(plan.detail, plan.image, VK_FORMAT_R16G16B16A16_SFLOAT, MODEL_BYTES_PER_PIXEL, LOOK_USAGE, &history);
@@ -731,9 +814,11 @@ bool VkNrPipeline::ConvertWorkMotion(VkCommandBuffer buffer, uint32_t slot, nr::
 
 float VkNrPipeline::NoteEncoding(const VkDlssTarget& target) {
   const float input_scale = color::InputScale(target.encoding, target.diffuse_white_nits, config_.fixes.linear_unit_nits);
-  // NR's history belongs to one encoding and input scale; a change starts it afresh.
-  if (target.encoding != set_->intermediates.encoding || input_scale != set_->intermediates.input_scale) {
+  const color::Primaries primaries = color::ResolvePrimaries(config_.fixes.primaries, target.encoding);
+  // Model and Look histories belong to one colour basis, independently in each stage set.
+  if (target.encoding != set_->intermediates.encoding || primaries != set_->intermediates.primaries || input_scale != set_->intermediates.input_scale) {
     set_->intermediates.encoding = target.encoding;
+    set_->intermediates.primaries = primaries;
     set_->intermediates.input_scale = input_scale;
     set_->intermediates.reset_pending = true;
   }
@@ -747,6 +832,9 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
     set_->look.last_use = slot_marks_[slot];
   }
   const VkImageView change = set_->intermediates.change.view;
+  if (change == VK_NULL_HANDLE) {
+    return {.view = nr_output, .fused = true, .model_input = passes_run == 1u ? set_->intermediates.a.view : VK_NULL_HANDLE};
+  }
   const bool shape = (look_ready && set_->look.plan.shape);
   // 1. NR's change field and, for the look, NR's input chroma κ_M.
   // A still holds the original FP16 input after one pass; later passes overwrite it through ping-pong.
@@ -778,7 +866,7 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
           .rate = look::StabilizeRate(config_.frame_seconds, config_.look.stabilize_ms),
           .motion_mode = (config_.look.stabilize == look::StabilizeMode::MOTION),
           .reset = (reset || !set_->look.history_valid),
-          .motion = motion,
+          .motion = motion, .packed_history = true,
       };
       color_.RecordStabilize(buffer, slot, stabilize);
       color_.ComputeBarrier(buffer);
@@ -804,7 +892,7 @@ VkNrPipeline::AfterNr VkNrPipeline::RecordAfterNr(VkCommandBuffer buffer, uint32
                         .atlas = atlas,
                         .bands = bands,
                         .settings = config_.look.shape,
-                        .sdr = color::IsSdr(encode.encoding)});
+                        .sdr = color::IsSdr(encode.encoding), .packed_history = true});
     // C is the shape's storage output and what follows samples it: the change stabiliser, or the decode when it is off.
     color_.ComputeBarrier(buffer);
   }
@@ -846,6 +934,10 @@ PipelineResult VkNrPipeline::RecordAfterDlssImpl(VkCommandBuffer buffer, const V
     return {.reason = nr::SkipReason::INVALID_INPUT};
   }
   set_ = &sets_[part.set];
+  if (!session_.SliceRuns(part.slice)) {
+    set_->intermediates.reset_pending = true;
+    return {.reason = nr::SkipReason::BUDGET};
+  }
   const NVSDK_NGX_ImageViewInfo_VK& output = target.resource->Resource.ImageViewInfo;
   nr::Rect region = target.region;
   if (region.width == 0u && region.height == 0u) {
@@ -861,12 +953,15 @@ PipelineResult VkNrPipeline::RecordAfterDlssImpl(VkCommandBuffer buffer, const V
   }
   const WorkLayout work = ResolveLayout(layout, size);
   if (!color::VkColorPipeline::OutputVariantOf(output.Format)) return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
-  if (controls.intensity <= 0.f) return {.reason = nr::SkipReason::INTENSITY_ZERO};  // exact pass-through: the Output stays bit-identical
+  if (!config_.keep_faces.show_mask && !session_.SliceHasIntensity(part.slice, controls, config_.later_controls)) {
+    set_->intermediates.reset_pending = true;
+    return {.reason = nr::SkipReason::INTENSITY_ZERO};
+  }
   // Every pipeline exists before the encode is recorded, so a decode that cannot be built never leaves NR running unused.
   if (!color_.Prepare(output.Format)) return {.reason = nr::SkipReason::PIPELINE_FAILED};
 
-  const uint32_t slot = next_slot_;
-  if (!timeline_.IsComplete(slot_marks_[slot])) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
+  const uint32_t slot = timeline_.FindReusableSlot(slot_marks_, next_slot_);
+  if (slot == slot_marks_.size()) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
   const bool foveated = work.foveation.active();
   const bool remap_motion = foveated && !motion_is_canvas;
   const color::VkStabilizeMotion source_motion = StabilizeMotionOf(inputs);
@@ -874,40 +969,8 @@ PipelineResult VkNrPipeline::RecordAfterDlssImpl(VkCommandBuffer buffer, const V
   const bool game_motion = copy_motion || (!remap_motion && inputs.motion.resource != nullptr);
   if (copy_motion && !color_.PrepareMotion()) return {.reason = nr::SkipReason::PIPELINE_FAILED};
   const bool reduced = (work.image != size);
-  // The set: A and B at the canvas, and the required change field at the work image. A different layout (or the other placement's set)
-  // reallocates it (the old one retires at its mark).
-// The foveated grid can move under surfaces that still fit (a shorter fall-off, a denser edge, a smaller centre): NR's
-// history and the stabiliser's then describe the old mapping of the same pixels, so both start afresh. The field is
-// copied first, so the size comparison below still sees a set that needs no reallocation for a moved grid alone.
-if (set_->intermediates.a.image != VK_NULL_HANDLE && set_->intermediates.foveation != work.foveation) {
-  set_->intermediates.foveation = work.foveation;
-  set_->intermediates.reset_pending = true;
-  set_->look.history_valid = false;
-}
-const SetSizes sizes = {.output = size, .image = work.image, .canvas = work.image};
-if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr || set_->intermediates.sizes != sizes) {
-  RetireSet(set_);
-  Intermediates created = {
-      .sizes = sizes,
-      .foveation = work.foveation,
-        .bytes = 3u * work.image.Pixels() * MODEL_BYTES_PER_PIXEL,
-        .motion_bytes = work.image.Pixels() * MOTION_BYTES_PER_PIXEL,
-    };
-    const bool made =
-        vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, work.image.width, work.image.height, MODEL_USAGE, true, &created.a)
-        && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, work.image.width, work.image.height, MODEL_USAGE, true, &created.b)
-        && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, work.image.width, work.image.height, MODEL_USAGE, false,
-                             &created.change);
-    if (!made) {
-      for (vk::NrImage* image : {&created.a, &created.b, &created.change}) {
-        vk::DestroyNrImage(functions_, device_, image);
-      }
-      LogAllocationFailure(work.image);
-      return {.reason = nr::SkipReason::OUT_OF_MEMORY};
-    }
-    allocation_failure_logged_ = false;
-    set_->intermediates = std::move(created);
-  }
+  const SetSizes sizes = {.output = size, .image = work.image, .canvas = work.image};
+  if (!EnsureIntermediates(sizes, false, work.foveation)) return {.reason = nr::SkipReason::OUT_OF_MEMORY};
   // Allocate either the remap target or fallback lazily; a frame that binds the source in place needs neither.
   vk::NrImage* const motion_target = copy_motion ? &set_->intermediates.canvas_motion
                                     : !game_motion ? &set_->intermediates.zero_motion : nullptr;
@@ -917,12 +980,14 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
     LogAllocationFailure(work.image);
     return {.reason = nr::SkipReason::OUT_OF_MEMORY};
   }
-  const bool look_ready = EnsureLook(LookPlanFor(work.image));  // before the fit, like the set
+  const auto look_plan = LookPlanFor(work.image);
+  if (!EnsureChange(reduced || foveated || look_plan.shape || look_plan.change)) return {.reason = nr::SkipReason::OUT_OF_MEMORY};
+  const bool look_ready = EnsureLook(look_plan);  // before the fit, like the set
   nr::FrameInputs frame_inputs = inputs;
   PrepareFaces(work.image, controls, part.slice, &frame_inputs);  // Keep faces: its surfaces before the fit and the opening, like the look's
   // The GPU reads this slot's constants, and the intermediates, until this recording completes: the current frame, and the token the caller issued before
   // recording (every mark taken from here on includes it).
-  slot_marks_[slot] = timeline_.MarkNow();
+  slot_marks_[slot] = timeline_.MarkNow(!present_change.has_value());
   set_->intermediates.last_use = slot_marks_[slot];
   // OpenRecording below transitions the look's and Keep faces' images whenever they exist, whether or not NR then runs and uses them, so
   // this recording is their last use too.
@@ -1059,10 +1124,10 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || set_->intermediates.pre_sr 
                             .source_x = region.x,
                             .source_y = region.y,
                             .upsampling = after.upsampling,
-                            .options = options,
+                            .options = options | (after.fused ? color::shader_options::FUSED_CHANGE : 0u),
                             .chroma_clamp = config_.fixes.chroma_clamp,
                             .guided_low_gain = config_.fixes.guided_low_gain,
-                            .mask = BoundMask(slot), .foveation = work.foveation})) {
+                            .mask = BoundMask(slot), .foveation = work.foveation, .model_input = after.model_input})) {
     return {.recorded = true, .reason = nr::SkipReason::DECODE_FAILED, .motion_source = motion_source, .motion_scale_x = frame_inputs.motion_scale_x, .motion_scale_y = frame_inputs.motion_scale_y};
   }
   Barrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -1088,7 +1153,14 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
   }
   // A colour format the sampled encode reads; Intensity 0 swaps nothing either (exact pass-through).
   if (!PreSrColorFormatSupported(game.Format)) return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
-  if (controls.intensity <= 0.f) return {.reason = nr::SkipReason::INTENSITY_ZERO};
+  if (!session_.SliceRuns(part.slice)) {
+    set_->intermediates.reset_pending = true;
+    return {.reason = nr::SkipReason::BUDGET};
+  }
+  if (!config_.keep_faces.show_mask && !session_.SliceHasIntensity(part.slice, controls, config_.later_controls)) {
+    set_->intermediates.reset_pending = true;
+    return {.reason = nr::SkipReason::INTENSITY_ZERO};
+  }
   // The set and the feature are keyed on the settled work image, never the per-frame render region. A region that is not the
   // settled image is resampled into it, and the decode upsamples NR's change back to the region, as on Direct3D 12.
   const WorkLayout work = ResolveLayout(layout, size);
@@ -1110,42 +1182,11 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
   const bool use_zero_motion = !game_motion || (foveated && !copy_motion);
   if (!color_.PreparePreSr() || (copy_motion && !color_.PrepareMotion())) return {.reason = nr::SkipReason::PIPELINE_FAILED};
 
-  const uint32_t slot = next_slot_;
-  if (!timeline_.IsComplete(slot_marks_[slot])) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
+  const uint32_t slot = timeline_.FindReusableSlot(slot_marks_, next_slot_);
+  if (slot == slot_marks_.size()) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
   const nr::Size color_size = {game.Width, game.Height};
-// The change field always exists here: whether a frame needs it depends on its render region, which the set is not keyed on.
-// A grid that moves under surfaces that still fit restarts the histories, not the set (RecordUav above).
-if (set_->intermediates.a.image != VK_NULL_HANDLE && set_->intermediates.foveation != work.foveation) {
-  set_->intermediates.foveation = work.foveation;
-  set_->intermediates.reset_pending = true;
-  set_->look.history_valid = false;
-}
-const SetSizes sizes = {.output = image, .image = image, .canvas = canvas, .private_color = color_size};
-if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr || set_->intermediates.sizes != sizes) {
-    RetireSet(set_);
-    Intermediates created = {
-        .sizes = sizes,
-        .pre_sr = true,
-        .foveation = work.foveation,
-        .bytes = (canvas.Pixels() * 2u + color_size.Pixels() + image.Pixels()) * MODEL_BYTES_PER_PIXEL,
-        .motion_bytes = canvas.Pixels() * MOTION_BYTES_PER_PIXEL,
-    };
-    const bool made =
-        vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, canvas.width, canvas.height, MODEL_USAGE, true, &created.a)
-        && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, canvas.width, canvas.height, MODEL_USAGE, true, &created.b)
-        && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, color_size.width, color_size.height, MODEL_USAGE, false,
-                             &created.private_color)
-        && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, image.width, image.height, MODEL_USAGE, false, &created.change);
-    if (!made) {
-      for (vk::NrImage* made_image : {&created.a, &created.b, &created.private_color, &created.change}) {
-        vk::DestroyNrImage(functions_, device_, made_image);
-      }
-      LogAllocationFailure(canvas);
-      return {.reason = nr::SkipReason::OUT_OF_MEMORY};
-    }
-    allocation_failure_logged_ = false;
-    set_->intermediates = std::move(created);
-  }
+  const SetSizes sizes = {.output = image, .image = image, .canvas = canvas, .private_color = color_size};
+  if (!EnsureIntermediates(sizes, true, work.foveation)) return {.reason = nr::SkipReason::OUT_OF_MEMORY};
   // The motion images, made at the first frame that needs each, at the canvas size, and freed with the set.
   const bool motion_failed =
       (use_zero_motion && set_->intermediates.zero_motion.image == VK_NULL_HANDLE
@@ -1158,10 +1199,12 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr
     return {.reason = nr::SkipReason::OUT_OF_MEMORY};
   }
   const bool reduced = (image != size);
-  const bool look_ready = EnsureLook(LookPlanFor(image));  // before the fit, like the set; C stays the main set's
+  const auto look_plan = LookPlanFor(image);
+  if (!EnsureChange(reduced || foveated || look_plan.shape || look_plan.change)) return {.reason = nr::SkipReason::OUT_OF_MEMORY};
+  const bool look_ready = EnsureLook(look_plan);  // before the fit, like the set; C stays the main set's
   nr::FrameInputs frame_inputs = inputs;
   PrepareFaces(canvas, controls, part.slice, &frame_inputs);  // Keep faces: its surfaces before the fit and the opening, like the look's
-  slot_marks_[slot] = timeline_.MarkNow();
+  slot_marks_[slot] = timeline_.MarkNow(true);
   set_->intermediates.last_use = slot_marks_[slot];
   // OpenRecording below transitions the look's and Keep faces' images whenever they exist, whether or not NR then runs and uses them, so
   // this recording is their last use too.
@@ -1289,10 +1332,10 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr
                             .source_x = region.x,
                             .source_y = region.y,
                             .upsampling = after.upsampling,
-                            .options = options,
+                            .options = options | (after.fused ? color::shader_options::FUSED_CHANGE : 0u),
                             .chroma_clamp = config_.fixes.chroma_clamp,
                             .guided_low_gain = config_.fixes.guided_low_gain,
-                            .mask = BoundMask(slot), .foveation = work.foveation})) {
+                            .mask = BoundMask(slot), .foveation = work.foveation, .model_input = after.model_input})) {
     return {.recorded = true, .reason = nr::SkipReason::DECODE_FAILED, .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
   }
   HandToNgx(buffer, set_->intermediates.private_color);
@@ -1300,11 +1343,12 @@ if (set_->intermediates.a.image == VK_NULL_HANDLE || !set_->intermediates.pre_sr
 }
 
 PresentMotionWrite VkNrPipeline::RecordPresentMotion(VkCommandBuffer buffer, const color::VkSampledView& motion, nr::Rect region, float scale_x,
-                                                     float scale_y, uint64_t frame, bool flip_y, float offset_x, float offset_y) {
+                                                     float scale_y, uint64_t frame, bool flip_y, float offset_x, float offset_y,
+                                                     std::shared_ptr<vk::NrCompletion::MotionProducer> producer) {
   const nr::Size size = {region.width, region.height};
   if (buffer == VK_NULL_HANDLE || motion.view == VK_NULL_HANDLE || size.Empty() || frame == 0u || !color_.PrepareMotion()) return PresentMotionWrite::NO_INPUT;
-  const uint32_t ring_slot = next_slot_;
-  if (!timeline_.IsComplete(slot_marks_[ring_slot])) return PresentMotionWrite::RING_BUSY;
+  const uint32_t ring_slot = timeline_.FindReusableSlot(slot_marks_, next_slot_);
+  if (ring_slot == slot_marks_.size()) return PresentMotionWrite::RING_BUSY;
   // A new size: the ring is made again at its smallest (the old slots retire at their marks). A copy that is still in use is never overwritten: the frame goes
   // without one (its present binds an older copy: PresentMotion).
   if (present_motion_size_ != size || present_motion_[0].image.image == VK_NULL_HANDLE) {
@@ -1329,7 +1373,7 @@ PresentMotionWrite VkNrPipeline::RecordPresentMotion(VkCommandBuffer buffer, con
     return PresentMotionWrite::SLOT_BUSY;
   }
   // The GPU reads this ring slot's constants until this recording completes: the current frame, and the token the caller issued before recording.
-  slot_marks_[ring_slot] = timeline_.MarkNow();
+  slot_marks_[ring_slot] = timeline_.MarkNow(true);
   next_slot_ = (ring_slot + 1u) % color::VkColorPipeline::RING_SLOTS;
   // The slot's contents are rewritten in full: UNDEFINED -> GENERAL, the motion copy at the region's own size (an image = canvas = region copy), then handed over
   // in SHADER_READ_ONLY_OPTIMAL for the bridge's copy-in.
@@ -1340,20 +1384,22 @@ PresentMotionWrite VkNrPipeline::RecordPresentMotion(VkCommandBuffer buffer, con
                        .offset_x = offset_x, .offset_y = offset_y, .flip_y = flip_y});
   HandToNgx(buffer, copy.image);
   copy.frame = frame;
+  copy.producer = std::move(producer);
   copy.last_use = slot_marks_[ring_slot];
   return PresentMotionWrite::WRITTEN;
 }
 
-std::array<uint64_t, VkNrPipeline::PRESENT_MOTION_SLOTS> VkNrPipeline::PresentMotionFrames() const {
+std::array<uint64_t, VkNrPipeline::PRESENT_MOTION_SLOTS> VkNrPipeline::PresentMotionFrames(const MotionReady& ready) const {
   std::array<uint64_t, PRESENT_MOTION_SLOTS> frames = {};
   for (size_t index = 0u; index < PRESENT_MOTION_SLOTS; ++index) {
-    frames[index] = (present_motion_[index].image.image != VK_NULL_HANDLE ? present_motion_[index].frame : 0u);
+    const auto& copy = present_motion_[index];
+    if (copy.image.image != VK_NULL_HANDLE && (!ready || (copy.producer && ready(*copy.producer)))) frames[index] = copy.frame;
   }
   return frames;
 }
 
-vk::NrImage VkNrPipeline::PresentMotion(uint64_t frame, uint64_t* age, uint64_t max_age) {
-  const std::array<uint64_t, PRESENT_MOTION_SLOTS> frames = PresentMotionFrames();
+vk::NrImage VkNrPipeline::PresentMotion(uint64_t frame, uint64_t* age, uint64_t max_age, const MotionReady& ready) {
+  const std::array<uint64_t, PRESENT_MOTION_SLOTS> frames = PresentMotionFrames(ready);
   const PresentMotionPick pick = PickPresentMotion(frames, frame, max_age);
   if (!pick.slot) return {};
   PresentMotionSlot& copy = present_motion_[*pick.slot];
@@ -1364,8 +1410,9 @@ vk::NrImage VkNrPipeline::PresentMotion(uint64_t frame, uint64_t* age, uint64_t 
   return copy.image;
 }
 
-bool VkNrPipeline::HasPresentMotion(uint64_t frame, uint64_t max_age) const {
-  const std::array<uint64_t, PRESENT_MOTION_SLOTS> frames = PresentMotionFrames();
+bool VkNrPipeline::HasPresentMotion(uint64_t frame, uint64_t max_age, const MotionReady& ready) const {
+  // The same readiness filter PresentMotion binds with: an unfiltered answer calls a copy in flight "present", which hides the very gap this reports.
+  const std::array<uint64_t, PRESENT_MOTION_SLOTS> frames = PresentMotionFrames(ready);
   return PickPresentMotion(frames, frame, max_age).slot.has_value();
 }
 
@@ -1403,8 +1450,8 @@ bool VkNrPipeline::ConvertLaunchpadMotion(VkCommandBuffer buffer, const VkPresen
       || work.image.Empty() || !color_.PrepareMotion()) {
     return false;
   }
-  const uint32_t slot = next_slot_;
-  if (!timeline_.IsComplete(slot_marks_[slot])) return false;
+  const uint32_t slot = timeline_.FindReusableSlot(slot_marks_, next_slot_);
+  if (slot == slot_marks_.size()) return false;
   if (present_.launchpad.image == VK_NULL_HANDLE || present_.launchpad_size != work.image) {
     RetirePresentLaunchpad();
     if (!vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16_SFLOAT, work.image.width, work.image.height, MOTION_USAGE, false,
@@ -1466,22 +1513,37 @@ PipelineResult VkNrPipeline::RecordPresent(VkCommandBuffer buffer, const VkPrese
   if (session_.State() != nr::SessionState::ACTIVE) return {.reason = nr::SkipReason::INACTIVE};
   const uint64_t bytes_per_pixel = PresentBytesPerPixel(target.copy_format);
   if (buffer == VK_NULL_HANDLE || target.image == VK_NULL_HANDLE || target.size.Empty() || bytes_per_pixel == 0u || part.set >= STAGE_SETS) return {.reason = nr::SkipReason::INVALID_INPUT};
+  if (!session_.SliceRuns(part.slice)) {
+    sets_[part.set].intermediates.reset_pending = true;
+    return {.reason = nr::SkipReason::BUDGET};
+  }
   if (!nr::MeetsNrFloor(target.size)) {
     sets_[part.set].intermediates.reset_pending = true;
     return {.reason = nr::SkipReason::FRAME_TOO_SMALL};
   }
   const WorkLayout work = ResolveLayout(layout, target.size);
   // RecordAfterDlss's own checks, made before anything is recorded, so a frame it would skip copies nothing either.
-  if (controls.intensity <= 0.f) return {.reason = nr::SkipReason::INTENSITY_ZERO};  // exact pass-through: the image is never touched
+  if (!config_.keep_faces.show_mask && !session_.SliceHasIntensity(part.slice, controls, config_.later_controls)) {
+    sets_[part.set].intermediates.reset_pending = true;
+    return {.reason = nr::SkipReason::INTENSITY_ZERO};
+  }
   if (!color_.Prepare(VK_FORMAT_R16G16B16A16_SFLOAT)) return {.reason = nr::SkipReason::PIPELINE_FAILED};
-  const uint32_t following = (next_slot_ + 1u) % color::VkColorPipeline::RING_SLOTS;  // Launchpad's conversion may take the first
-  if (!timeline_.IsComplete(slot_marks_[next_slot_]) || !timeline_.IsComplete(slot_marks_[following])) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
-  if (present_.color.image == VK_NULL_HANDLE || present_.size != target.size || present_.format != target.copy_format) {
+  // Launchpad may consume a slot before NR; check capacity before the copy in.
+  if (timeline_.FindReusableSlot(slot_marks_, next_slot_, 1u) == slot_marks_.size()) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
+  // Preserve both FP16 conversions for integer formats. When the actual image format is known
+  // to equal the raw-copy format, the same blits can read/write it directly: no staging or copies.
+  // sRGB and typeless/mutable images keep raw-copy staging so a blit never linearises their bits.
+  const bool needs_blit = target.copy_format != VK_FORMAT_R16G16B16A16_SFLOAT;
+  const bool direct_blit = needs_blit && target.image_format == target.copy_format;
+  const bool needs_staging = needs_blit && !direct_blit;
+  if (present_.color.image == VK_NULL_HANDLE || present_.size != target.size || present_.format != target.copy_format
+      || present_.direct_blit != direct_blit) {
     RetirePresent();
     PresentSurfaces created = {.size = target.size, .format = target.copy_format,
-                               .bytes = target.size.Pixels() * (bytes_per_pixel + MODEL_BYTES_PER_PIXEL)};
-    const bool made = vk::CreateNrImage(functions_, device_, memory_, target.copy_format, target.size.width, target.size.height, PRESENT_STAGING_USAGE,
-                                        false, &created.staging)
+                               .direct_blit = direct_blit,
+                               .bytes = target.size.Pixels() * (MODEL_BYTES_PER_PIXEL + (needs_staging ? bytes_per_pixel : 0u))};
+    const bool made = (!needs_staging || vk::CreateNrImage(functions_, device_, memory_, target.copy_format, target.size.width, target.size.height, PRESENT_STAGING_USAGE,
+                                        false, &created.staging))
                       && vk::CreateNrImage(functions_, device_, memory_, VK_FORMAT_R16G16B16A16_SFLOAT, target.size.width, target.size.height,
                                            MODEL_USAGE, true, &created.color);
     if (!made) {
@@ -1496,8 +1558,8 @@ PipelineResult VkNrPipeline::RecordPresent(VkCommandBuffer buffer, const VkPrese
   }
   // Both are rewritten in full every frame and used on ReShade's queue alone: the frame's signal there follows this buffer's submission.
   present_.last_use = timeline_.MarkNow();
-  const VkImage staging = present_.staging.image;
   const VkImage color = present_.color.image;
+  const VkImage staging = needs_staging ? present_.staging.image : color;
   const VkExtent3D extent = {target.size.width, target.size.height, 1u};
   const VkImageCopy copy = {.srcSubresource = COLOR_LAYERS, .dstSubresource = COLOR_LAYERS, .extent = extent};
   const VkImageBlit blit = {
@@ -1518,19 +1580,23 @@ PipelineResult VkNrPipeline::RecordPresent(VkCommandBuffer buffer, const VkPrese
   };
   functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &earlier_writes, 0u, nullptr,
                                   static_cast<uint32_t>(into_copy.size()), into_copy.data());
-  functions_.vkCmdCopyImage(buffer, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
-  const std::array<VkImageMemoryBarrier, 2> into_blit = {
-      ImageTransition(staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-                      VK_ACCESS_TRANSFER_READ_BIT),
-      ImageTransition(color, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0u, VK_ACCESS_TRANSFER_WRITE_BIT),
-  };
-  functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr,
-                                  static_cast<uint32_t>(into_blit.size()), into_blit.data());
-  functions_.vkCmdBlitImage(buffer, staging, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, VK_FILTER_NEAREST);
+  if (!direct_blit) functions_.vkCmdCopyImage(buffer, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
+  if (needs_staging) {
+    const std::array<VkImageMemoryBarrier, 2> into_blit = {
+        ImageTransition(staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT),
+        ImageTransition(color, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0u, VK_ACCESS_TRANSFER_WRITE_BIT),
+    };
+    functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr,
+                                    static_cast<uint32_t>(into_blit.size()), into_blit.data());
+    functions_.vkCmdBlitImage(buffer, staging, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, VK_FILTER_NEAREST);
+  } else if (direct_blit) {
+    functions_.vkCmdBlitImage(buffer, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, VK_FILTER_NEAREST);
+  }
   const VkImageMemoryBarrier into_nr =
       ImageTransition(color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                       VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
-  functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &into_nr);
+  functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0u, 0u, nullptr, 0u, nullptr, 1u, &into_nr);
 
   // 2. Prefer DLSS, then Launchpad. Only the uniform grid reuses history on a zero stand-in.
   nr::FrameInputs inputs = {.ui_correction = config_.present_ui_correction, .reset_hint = reset_hint};
@@ -1585,24 +1651,40 @@ PipelineResult VkNrPipeline::RecordPresent(VkCommandBuffer buffer, const VkPrese
                                        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
   VkImageLayout image_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   if (result.nr_applied) {
-    const std::array<VkImageMemoryBarrier, 2> out_of_nr = {
-        ImageTransition(color, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
-        ImageTransition(staging, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
-                        VK_ACCESS_TRANSFER_WRITE_BIT),
-    };
-    functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr,
-                                    static_cast<uint32_t>(out_of_nr.size()), out_of_nr.data());
-    functions_.vkCmdBlitImage(buffer, color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit,
-                              VK_FILTER_NEAREST);
-    const std::array<VkImageMemoryBarrier, 2> into_image = {
-        ImageTransition(staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-                        VK_ACCESS_TRANSFER_READ_BIT),
-        ImageTransition(target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
-                        VK_ACCESS_TRANSFER_WRITE_BIT),
-    };
-    functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr,
-                                    static_cast<uint32_t>(into_image.size()), into_image.data());
-    functions_.vkCmdCopyImage(buffer, staging, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
+    if (needs_staging) {
+      const std::array<VkImageMemoryBarrier, 2> out_of_nr = {
+          ImageTransition(color, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+          ImageTransition(staging, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                          VK_ACCESS_TRANSFER_WRITE_BIT),
+      };
+      functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr,
+                                      static_cast<uint32_t>(out_of_nr.size()), out_of_nr.data());
+      functions_.vkCmdBlitImage(buffer, color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit,
+                                VK_FILTER_NEAREST);
+      const std::array<VkImageMemoryBarrier, 2> into_image = {
+          ImageTransition(staging, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                          VK_ACCESS_TRANSFER_READ_BIT),
+          ImageTransition(target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                          VK_ACCESS_TRANSFER_WRITE_BIT),
+      };
+      functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr,
+                                      static_cast<uint32_t>(into_image.size()), into_image.data());
+    } else {
+      const std::array<VkImageMemoryBarrier, 2> out_of_nr = {
+          ImageTransition(color, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT,
+                          VK_ACCESS_TRANSFER_READ_BIT),
+          ImageTransition(target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                          VK_ACCESS_TRANSFER_WRITE_BIT),
+      };
+      functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                      VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr, 0u, nullptr,
+                                      static_cast<uint32_t>(out_of_nr.size()), out_of_nr.data());
+    }
+    if (direct_blit) {
+      functions_.vkCmdBlitImage(buffer, color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &blit, VK_FILTER_NEAREST);
+    } else {
+      functions_.vkCmdCopyImage(buffer, staging, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &copy);
+    }
     image_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   }
   const VkImageMemoryBarrier returned =

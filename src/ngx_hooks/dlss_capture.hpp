@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <optional>
 
 #include "ngx_hooks/feature_registry.hpp"
@@ -80,19 +79,6 @@ class MotionJitterTracker {
     float y = 0.f;
   };
   std::optional<Sample> previous_;
-};
-
-// The game's Reset as NR's reset hint: the first Reset of a burst passes, and any
-// further Reset within `window` of the last one that passed is merged, because a burst of history
-// resets shows as pops.
-class ResetMerger {
- public:
-  explicit ResetMerger(std::chrono::milliseconds window = std::chrono::milliseconds(250)) : window_(window) {}
-  [[nodiscard]] bool Filter(bool game_reset, std::chrono::steady_clock::time_point now);
-
- private:
-  std::chrono::milliseconds window_;
-  std::optional<std::chrono::steady_clock::time_point> last_passed_;
 };
 
 }  // namespace uplift::ngx_hooks

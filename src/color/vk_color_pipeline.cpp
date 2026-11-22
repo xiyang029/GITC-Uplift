@@ -182,7 +182,7 @@ std::array<uint32_t, PASS_CONSTANTS> EncodeConstants(const VkEncodePass& pass, u
 std::array<uint32_t, PASS_CONSTANTS> StabilizeConstants(uint32_t mode, const VkStabilizePass& pass) {
   const VkStabilizeMotion& motion = pass.motion;
   const bool vectors = (motion.vectors.view != VK_NULL_HANDLE);
-  const uint32_t flags = (pass.reset ? STABILIZE_FLAG_RESET : 0u) | (pass.motion_mode ? STABILIZE_FLAG_MOTION : 0u) | (vectors ? STABILIZE_FLAG_VECTORS : 0u);
+  const uint32_t flags = (pass.reset ? STABILIZE_FLAG_RESET : 0u) | (pass.motion_mode ? STABILIZE_FLAG_MOTION : 0u) | (vectors ? STABILIZE_FLAG_VECTORS : 0u) | (pass.packed_history ? UPLIFT_STABILIZE_FLAG_PACKED_HISTORY : 0u);
   return {
       pass.atlas.image.width,
       pass.atlas.image.height,
@@ -588,9 +588,10 @@ bool VkColorPipeline::RecordDecode(VkCommandBuffer buffer, uint32_t slot, const 
       Bits(pass.foveation.x.gmax),
       Bits(pass.foveation.y.gmax),
       Bits(pass.guided_low_gain),
+      (pass.model_input != VK_NULL_HANDLE ? 1u : 0u),
   };
   Bindings bindings;
-  bindings.sampled = {pass.source, Own(pass.nr_output), pass.exposure, pass.mask, VkSampledView{}};
+  bindings.sampled = {pass.source, Own(pass.nr_output), pass.exposure, pass.mask, Own(pass.model_input)};
   bindings.storage[0] = pass.target;
   Dispatch(buffer, pipeline, slot, DECODE_PASS, constants, bindings, pass.width, pass.height);
   return true;
@@ -680,7 +681,7 @@ bool VkColorPipeline::RecordShape(VkCommandBuffer buffer, uint32_t slot, const V
   bindings.sampled = {Own(pass.gauss), Own(pass.peaks), Own(pass.history), Own(pass.basis), Own(pass.detail)};
   bindings.storage[0] = pass.change;
   const look::ShapeSettings& shape = pass.settings;
-  const uint32_t flags = (pass.sdr ? 1u : 0u) | (pass.history != VK_NULL_HANDLE ? 2u : 0u) | (pass.detail != VK_NULL_HANDLE ? 4u : 0u);
+  const uint32_t flags = (pass.sdr ? 1u : 0u) | (pass.history != VK_NULL_HANDLE ? 2u : 0u) | (pass.detail != VK_NULL_HANDLE ? 4u : 0u) | (pass.packed_history ? UPLIFT_SHAPE_FLAG_PACKED_HISTORY : 0u);
   const std::array<uint32_t, 20> constants = {
       pass.atlas.image.width,
       pass.atlas.image.height,

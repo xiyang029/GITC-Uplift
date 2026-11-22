@@ -1,6 +1,9 @@
 #pragma once
 #include <filesystem>
 #include <string>
+#include <functional>
+#include <memory>
+#include <vector>
 
 struct ID3D12Device;
 struct ID3D12GraphicsCommandList;
@@ -15,6 +18,19 @@ struct ID3D12GraphicsCommandList;
 // that evaluation's launches are dropped, one frame's result is lost, and the replacement stays off until the next
 // Enable().
 namespace NrFfnV2 {
+// The host pins scratch to its recording mark. Without a scope the historical six-size cache is retained.
+class RecordingScope {
+public:
+    explicit RecordingScope(std::function<void(std::shared_ptr<void>)> retain);
+    ~RecordingScope();
+    RecordingScope(const RecordingScope&) = delete;
+    RecordingScope& operator=(const RecordingScope&) = delete;
+    void Pin(const std::shared_ptr<void>& resource);
+private:
+    RecordingScope* previous_;
+    std::function<void(std::shared_ptr<void>)> retain_;
+    std::vector<const void*> pinned_;
+};
 struct Options {
     // modelFolders false: the folder with ffn_v2.cubin, ffn_v2.bin and ffn_v2.txt of the model in use (probes).
     // modelFolders true: the folder with ffn_v2.cubin and the modelA/modelB weight subfolders. Only evaluations

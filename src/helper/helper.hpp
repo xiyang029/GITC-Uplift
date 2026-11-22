@@ -69,8 +69,8 @@ class Helper {
 
  private:
   void Attach(const ipc::Request& request, ipc::Reply* reply);
-  void Frame(const ipc::Request& request, ipc::Reply* reply);
-  void Run(const ipc::Request& request, ipc::Reply* reply, bool* deferred);
+  void Frame(const ipc::Request& request, ipc::Reply* reply, bool defer_status = false);
+  void Run(const ipc::Request& request, ipc::Reply* reply, uint64_t* complete_at);
   // The FrameTrigger's two events the add-on reached, applied to this side's copy so the two never diverge:
   // Replay a marker observed by the front, including recovery frames that already ran NR before effects.
   void ReplayPoint(uint32_t point);

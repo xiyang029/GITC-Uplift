@@ -8,6 +8,7 @@
 
 #include "memory_units.hpp"
 #include "nr/log.hpp"
+#include "nvfp4/NrFfnV2.h"
 
 namespace uplift::nr {
 namespace {
@@ -182,6 +183,17 @@ bool Session::SliceRuns(const StageSlice& slice) const {
     end = std::min(end, pass_view_limit_);
   }
   return slice.count > 0u && slice.first < end;
+}
+
+bool Session::SliceHasIntensity(const StageSlice& slice, const Controls& controls,
+                                std::span<const std::optional<Controls>> later) const {
+  uint32_t end = std::min({pass_count_, passes_limit_, slice.first + slice.count});
+  if (pass_view_limit_ != 0u) end = std::min(end, pass_view_limit_);
+  for (uint32_t pass = slice.first; pass < end; ++pass) {
+    const Controls& effective = pass > 0u && pass - 1u < later.size() && later[pass - 1u] ? *later[pass - 1u] : controls;
+    if (!(effective.intensity <= 0.f)) return true;
+  }
+  return false;
 }
 
 void Session::NoteFacesWanted(bool wanted) {
@@ -715,6 +727,10 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   const bool faces_wanted = (inputs.faces.wanted && inputs.resolver != nullptr);
   stage.faces_requested = faces_wanted;
   stage.faces_surface_bytes = (faces_wanted ? inputs.faces.surface_bytes : 0u);
+  const Mark scratch_mark = timeline_.MarkNow();
+  NrFfnV2::RecordingScope scratch([this, scratch_mark](std::shared_ptr<void> keep) {
+    timeline_.ReleaseAfter(scratch_mark, [keep = std::move(keep)] {});
+  });
   SkipReason reason = SkipReason::NONE;
   if (!EnsureFeatures(list, chain, slice, faces_wanted, inputs.faces.output != nullptr, &reason)) return {nullptr, 0u, reason};
   const bool faces_run = (faces_wanted && inputs.faces.output != nullptr && stage.face_feature != nullptr && stage.faces_pause == FacesPause::NONE);

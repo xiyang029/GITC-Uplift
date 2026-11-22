@@ -85,6 +85,11 @@ class Interop {
   // Flushes `host`'s queue, submits an empty batch with this slot's fence and waits for it, at most `timeout_ms`. A wait that timed out stays in
   // flight: the next call on the slot says BUSY until it has finished, instead of resetting a pending fence.
   WaitResult FlushAndWait(WaitSlot slot, GameHost& host, uint32_t timeout_ms);
+  // Signal the producer, then enqueue a GPU wait before any consumer effects are flushed.
+  WaitResult OrderQueues(GameHost& producer, GameHost& consumer, uint32_t timeout_ms);
+  // Before route retirement: cover both the source signal and all consumer waits by a retirement fence.
+  bool RetireQueueDependencies(GameHost& consumer);
+  void DestroyQueueDependencies();  // device idle only
   // The timeline semaphore's counter, UINT64_MAX when it cannot be read (VK_ERROR_DEVICE_LOST sets DeviceLost()).
   uint64_t Counter(VkSemaphore semaphore);
   [[nodiscard]] bool DeviceLost() const { return device_lost_; }
@@ -108,6 +113,14 @@ class Interop {
   Device device_;
   std::vector<Retired> retired_;
   std::array<WaitFence, WAIT_SLOTS> waits_;
+  struct QueueDependency {
+    VkQueue queue = VK_NULL_HANDLE;
+    VkQueue consumer = VK_NULL_HANDLE;
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    uint64_t value = 0u;
+  };
+  std::vector<QueueDependency> dependencies_;
+  bool dependency_failed_ = false;  // an indeterminate failed signal stays until device teardown
   bool device_lost_ = false;
 };
 

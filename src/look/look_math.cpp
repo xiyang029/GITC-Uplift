@@ -148,6 +148,13 @@ Atlas MakeAtlas(nr::Size image) {
   return {.image = image, .levels = levels, .size = {LevelOffset(image, levels + 1u), LevelSize(image, 1u).height}};
 }
 
+nr::Size LowHistorySize(const Atlas& atlas, float detail_radius) {
+  const uint32_t level = MakeBands(detail_radius, atlas.image.height, atlas.levels).stable_level;
+  nr::Size size = LevelSize(atlas.image, level);
+  if (level < atlas.levels) size.width += LevelSize(atlas.image, level + 1u).width;
+  return size;
+}
+
 Bands MakeBands(float detail_radius, uint32_t height, uint32_t levels) {
   const float sigma = std::max(detail_radius / 100.f * static_cast<float>(height), 0.5f);
   const float top = static_cast<float>(levels);

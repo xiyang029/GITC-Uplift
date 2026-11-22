@@ -68,7 +68,10 @@ struct OverlayView {
     sources::MotionSource motion = sources::MotionSource::NONE;
     uint32_t planned = 0;
     std::string skip;
-    std::optional<double> gpu_ms;
+    std::optional<double> gpu_ms;  // NR evaluation alone: the GPU window between the encode's end and the passes' end
+    // The whole NR chain for the same recording: copy/remap, encode and exposure meter, evaluation, compose/Look and
+    // decode. The panel shows this one; gpu_ms stays the evaluation alone (the TRACE line's "evaluate").
+    std::optional<double> gpu_total_ms;
   };
   std::array<StageRun, 4> stage_runs{};  // Pre-DLSS, After DLSS, Before FG, On Present. Only passes actually evaluated.
   [[nodiscard]] const char* RecordedStageName(uint32_t pass) const {

@@ -29,13 +29,13 @@ using QueueSignal = std::function<bool(void* queue, VkSemaphore semaphore, uint6
 //   synchronisation scope is everything earlier on the queue, so it covers DLSS, NR and Uplift's passes on whichever queue the buffer runs.
 //   The GPU sets an event and the CPU polls it (vkGetEventStatus): a host cannot wait on one, so Flush polls. The token is complete when its
 //   event is SET (or the device is lost, or idle: DeviceIdle). A token with no event yet is NOT complete.
-//   An event belongs to its list's recording and returns to the pool (vkResetEvent) at the list's next reset or destroy: Recycle. A re-executed
-//   list resets its events and gets a fresh token mapped to its last event (Reexecuted). A list that is never executed is dropped by DropStale.
+//   An event belongs to its list's recording and returns to the pool at reset or destroy. A re-execution cannot reuse the
+//   event as proof of fresh completion; the extra token lasts until reset or destroy.
 // Locking: one small mutex of its own, a leaf: the probe takes it under the Timeline's token lock, so no method here ever calls the Timeline
 // while holding it. Methods other than the Timeline's own probe are called under the add-on's lock (or by the smoke's one thread).
 class NrCompletion {
  public:
-  // An unsubmitted recording can be dropped only after both its elapsed time and frame age reach these limits.
+  // Diagnose a recording whose completion cannot be proven; time alone never permits retirement.
   static constexpr std::chrono::seconds STALE_AGE{2};
   static constexpr uint64_t STALE_FRAMES = 8u;
 
@@ -46,22 +46,30 @@ class NrCompletion {
 
   [[nodiscard]] nr::Timeline& Timeline() { return *timeline_; }  // generic ctor: Completed = counter, Signal = signal_, Wait = vkWaitSemaphores
   // The event for `token`, which the caller records with vkCmdSetEvent(event, ALL_COMMANDS) at the end of the hooked evaluate.
-  // VK_NULL_HANDLE when no event could be made (the token then stays outstanding until DropStale takes it, executed or not). Idempotent per
-  // token: a second call returns the token's own event.
+  // VK_NULL_HANDLE when no event could be made. Repeated calls return the same event if it exists.
   VkEvent EventFor(uint64_t token, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
-  // The list holding `tokens` was submitted (execute_command_list, before the native submit): DropStale leaves them alone. A token DropStale
-  // already dropped after STALE_AGE and STALE_FRAMES may execute after its protected resources were released; logged once.
-  void Executed(std::span<const uint64_t> tokens);
-  // The list was submitted again without a reset: vkResetEvent each, then Timeline::Resubmit(first_token, queue); the fresh token maps to the
-  // last of `tokens`' events (set after everything earlier in that command buffer), so `tokens` must be in recording order.
-  // When a reset fails, the event stays SET, so the fresh token maps to no event and both stale-age guards apply.
-  void Reexecuted(std::span<const uint64_t> tokens, uint64_t first_token, void* queue);
+  // A motion copy belongs to its writer's native queue. An exclusive image cannot be handed to an
+  // arbitrary queue with only a frame number and a host-side completion check.
+  class MotionProducer {
+    friend class NrCompletion;
+    VkQueue queue_ = VK_NULL_HANDLE;
+    uint32_t thread_ = 0u;
+    VkEvent event_ = VK_NULL_HANDLE;
+    bool completed_ = false;
+  };
+  [[nodiscard]] std::shared_ptr<MotionProducer> TrackMotion(uint64_t token);
+  [[nodiscard]] bool OrderedBefore(const MotionProducer& producer, VkQueue queue) const;
+  // execute_command_list, before the native submit.
+  void Executed(std::span<const uint64_t> tokens, VkQueue native_queue);
+  // No host event reset: the command buffer can be pending with SIMULTANEOUS_USE. The producer keeps its queue and gains this thread as its
+  // submitter; its event, which may still be SET from the earlier run, stops counting as proof for this recording.
+  void Reexecuted(std::span<const uint64_t> tokens, uint64_t first_token, void* queue, VkQueue native_queue);
   // The list was reset or destroyed: events back to the pool (vkResetEvent) and the tokens (and any fresh one a re-execution mapped to their
   // events) dropped from the Timeline: by Vulkan's rules the list was not pending, so each token is complete or never will be. An event
   // whose reset fails is destroyed instead of pooled.
   void Recycle(std::span<const uint64_t> tokens);
-  // Drop never-executed recordings once both STALE_AGE and STALE_FRAMES are reached. Log the first such drop.
-  void DropStale(std::chrono::steady_clock::time_point now, uint64_t frame);
+  // Warn about outstanding recordings that may retain memory.
+  void DiagnoseStale(std::chrono::steady_clock::time_point now, uint64_t frame);
   // The game idled the device (the vkDestroyDevice detour): nothing is in flight, so every token and every frame is complete, and the frame
   // signal is no longer submitted (no queue is touched during the device's destruction). Teardown only.
   void DeviceIdle();
@@ -87,7 +95,8 @@ class NrCompletion {
     std::chrono::steady_clock::time_point issued;
     uint64_t issue_frame = 0u;
     bool executed = false;
-    bool dropped = false;
+    std::weak_ptr<MotionProducer> motion;
+    uint64_t owner = 0u;  // the original recording for a resubmission
   };
 
   // The Timeline's probe.
@@ -103,12 +112,11 @@ class NrCompletion {
   std::atomic<bool> signal_failed_logged_{false};
   std::unique_ptr<nr::Timeline> timeline_;
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::map<uint64_t, Entry> entries_;  // by token
   std::vector<VkEvent> pool_;          // reset, unused
   std::atomic<bool> idle_{false};      // DeviceIdle: read by the frame functions without the mutex too
   bool stale_logged_ = false;
-  bool late_submit_logged_ = false;
 };
 
 }  // namespace uplift::vk

@@ -16,6 +16,7 @@ class PresentRelayHost final : public GameHost {
   VkResult FinishFrame();
   void Register(VkImage image, nr::Size size);
   void Destroy();
+  [[nodiscard]] VkQueue Queue() const override { return queue_; }
   bool Valid() const override { return failure_ == VK_SUCCESS; }
   void Barrier(VkImage image, Usage before, Usage after) override;
   void BarrierWithGlobal(VkImage image, Usage before, Usage after, Usage global_before, Usage global_after) override;
