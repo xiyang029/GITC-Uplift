@@ -178,7 +178,6 @@ nr::Controls ToControls(const Settings& settings) {
       .intensity = settings.intensity,
       .local_tone = settings.local_tone,
       .local_structure = settings.local_structure,
-      .global_tone = settings.global_tone,
       .auto_mask = settings.auto_mask,
       .skin_structure = settings.skin_structure,
       .style = settings.style,

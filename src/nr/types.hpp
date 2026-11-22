@@ -64,7 +64,6 @@ struct Controls {
   float intensity = 1.f;
   float local_tone = 1.f;
   float local_structure = 1.f;
-  float global_tone = 1.f;     // forwarded; the 310.8 runtime never reads it
   bool auto_mask = true;
   float skin_structure = 1.f;  // -1 = same as local_structure
   uint32_t style = 0u;         // 0..2 = Model A/B/C

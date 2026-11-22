@@ -42,7 +42,6 @@ std::array<std::optional<nr::Controls>, MAX_PASSES - 1u> ControlsCoalescer::Late
           .intensity = pass.intensity,
           .local_tone = pass.local_tone,
           .local_structure = pass.local_structure,
-          .global_tone = live.global_tone,
           .auto_mask = pass.auto_mask,
           .skin_structure = pass.skin_structure,
           .style = pass.style,

@@ -1450,18 +1450,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.state_restore = FromIndex<StateRestore>(v); },
     },
     {
-        .key = "GlobalTone",
-        .kind = SettingKind::FLOAT,
-        .section = SettingSection::HIDDEN,
-        .label = "Global Tone Intensity",
-        .tooltip = "Stored and forwarded; NR 310.8 never reads it.",
-        .min = 0.0,
-        .max = 1.0,
-        .flags = GREYED,
-        .get = [](const Settings& s) { return static_cast<double>(s.global_tone); },
-        .set = [](Settings& s, double v) { s.global_tone = static_cast<float>(v); },
-    },
-    {
         .key = "Preset",
         .kind = SettingKind::CHOICE,
         .section = SettingSection::PLACEMENT,

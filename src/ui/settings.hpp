@@ -253,7 +253,6 @@ struct Settings {
   float diffuse_white_nits = 0.f;  // 0 = automatic for the encoding, else 48-500
   float transfer_strength = 1.f;
   float color_strength = 1.f;
-  float global_tone = 1.f;    // forwarded; no effect in NR 310.8
   uint32_t preset = 1u;       // 310.9.16: 1 = legacy, 2 = small FP8; ignored by 310.8
   uint32_t mask_blend_mode = 1u;
   uint32_t performance = 3u;  // forwarded; no effect in NR 310.8

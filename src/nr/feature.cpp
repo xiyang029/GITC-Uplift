@@ -81,12 +81,12 @@ NVSDK_NGX_Result Feature::Evaluate(ID3D12GraphicsCommandList* list, const Evalua
   SetResource(parameters_, keys::BACKBUFFER, inputs.backbuffer);
   SetResource(parameters_, keys::UI, inputs.ui);
   SetResource(parameters_, keys::UI_ALPHA, inputs.ui_alpha);
+  SetResource(parameters_, keys::BIDIRECTIONAL_DISTORTION_FIELD, {nullptr, {}});
   parameters_->Set(keys::MVEC_SCALE_X, inputs.motion_scale_x);
   parameters_->Set(keys::MVEC_SCALE_Y, inputs.motion_scale_y);
   parameters_->Set(keys::INTENSITY, controls.intensity);
   parameters_->Set(keys::LOCAL_TONE, controls.local_tone);
   parameters_->Set(keys::LOCAL_STRUCTURE, controls.local_structure);
-  parameters_->Set(keys::GLOBAL_TONE, controls.global_tone);
   parameters_->Set(keys::USE_AUTO_MASK, controls.auto_mask ? 1 : 0);
   parameters_->Set(keys::MASK_BLEND_MODE, controls.mask_blend_mode);
   parameters_->Set(keys::SKIN_STRUCTURE, controls.skin_structure);
