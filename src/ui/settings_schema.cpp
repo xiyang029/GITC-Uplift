@@ -104,7 +104,7 @@ constexpr double AUTO_EXPOSURE_BLEND_DISPLAY_SCALE = 100.0;
 
 using setting_flags::APPLY_ON_RELEASE;
 using setting_flags::BOOKKEEPING;
-using setting_flags::GREYED;
+
 using setting_flags::KEEP_FACES_HERE;
 using setting_flags::KEEP_FACES_OWN;
 using setting_flags::KEEP_FACES_ROW;
@@ -1049,16 +1049,13 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[5]); },
         .set = [](Settings& s, double v) { s.dlss_render_scale[5] = static_cast<uint32_t>(v); },
     },
-    // The two DLSS-SR create-time overrides (spec §10), shown under the render scales they end up as: the
-    // quality mode selects which scale DLSS uses, so the two belong on one line of the same story. Uplift
-    // patches the game's own NGX create (ngx_hooks/dlss_overrides.cpp), so a change lands the next time the
-    // game creates its DLSS feature -- switching DLSS off and on, changing its quality, or changing resolution
-    // in the game all do it, and no restart is needed. It cannot reach a feature that already exists: DLSS
-    // reads both keys once, at CreateFeature.
+    // The two DLSS-SR create overrides are hidden: applying them means the game has to recreate its DLSS feature,
+    // so Uplift does not apply them and the game's own choices stand. The INI keys stay readable so an existing
+    // config keeps loading.
     {
         .key = "DLSSQualityMode",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::DLSS_REFLEX,
+        .section = SettingSection::HIDDEN,
         .label = "DLSS quality mode",
         .tooltip = "The quality mode Uplift asks the game's next DLSS-SR feature to be created with, which is the render "
                    "resolution everything else works from. Lands when the game creates its DLSS again: toggle DLSS in the "
@@ -1072,7 +1069,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
     {
         .key = "DLSSAutoExposure",
         .kind = SettingKind::CHOICE,
-        .section = SettingSection::DLSS_REFLEX,
+        .section = SettingSection::HIDDEN,
         .label = "DLSS auto-exposure",
         .tooltip = "Forces DLSS-SR's auto-exposure on or off when the game creates its DLSS feature again (toggle DLSS in "
                    "the game, or change its quality). It cannot change a DLSS feature that already exists. Game keeps the "
@@ -1436,7 +1433,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .label = "Depth direction",
         .tooltip = "Forwarded as DLSSNR.DepthInverted.",
         .choices = DEPTH_DIRECTIONS,
-        .flags = GREYED,
         .get = [](const Settings& s) { return Index(s.depth_direction); },
         .set = [](Settings& s, double v) { s.depth_direction = FromIndex<DepthDirection>(v); },
     },
@@ -1479,7 +1475,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .tooltip = "Stored and forwarded; no effect in NR 310.8.",
         .min = 1.0,
         .max = 6.0,
-        .flags = GREYED,
         .get = [](const Settings& s) { return static_cast<double>(s.performance); },
         .set = [](Settings& s, double v) { s.performance = static_cast<uint32_t>(v); },
     },

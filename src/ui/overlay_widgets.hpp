@@ -199,11 +199,13 @@ inline bool GlyphButton(const char* glyph, const char* id, const ImVec2& size, f
 inline bool ResetButton(const char* id, const char* default_text) {
   const float height = ImGui::GetFrameHeight();
   const float width = SnapUp(height);
-  ImGui::SameLine(0.f, 0.f);
+  // This is an overlay control in the row's reserved slot, not another item in the row's layout.
+  // Preserve the cursor used by the following note/row so the reset button cannot change their height.
+  const ImVec2 layout_cursor = ImGui::GetCursorScreenPos();
   const ImVec2 last_min = ImGui::GetItemRectMin(), last_max = ImGui::GetItemRectMax();
   const float y = last_max.y > last_min.y ? (last_min.y + last_max.y - height) * 0.5f
-                                          : ImGui::GetCursorScreenPos().y;
-  const float window_right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+                                          : layout_cursor.y;
+  const float window_right = layout_cursor.x + ImGui::GetContentRegionAvail().x;
   const ImVec2 slot((std::min)(row_slot_x, window_right - width), y);
   const bool over = ImGui::IsWindowHovered()
                     && ImGui::IsMouseHoveringRect(slot, ImVec2(slot.x + width, slot.y + height));
@@ -213,13 +215,14 @@ inline bool ResetButton(const char* id, const char* default_text) {
                                    over ? tokens::kTextPrimary : tokens::kTextSecondary);
   ImGui::PopID();
   ItemTooltip(gui::Display("Reset to default (%s)").c_str(), gui::Display(default_text).c_str());
+  ImGui::SetCursorScreenPos(layout_cursor);
   return clicked;
 }
 
 // The rail of a slider over its item's rect: the track, the filled part up to the knob, and the knob, at
 // `t` in [0, 1]. `hot` draws the halo while the pointer is on the control or it is held. Both sliders draw
 // through this, so an integer row and a float row cannot drift apart.
-inline void SliderRail(const ImVec2& lo, const ImVec2& hi, float t, bool hot) {
+inline void SliderRail(const ImVec2& lo, const ImVec2& hi, float t, bool hot, bool active) {
   const float height = hi.y - lo.y;
   const float knob = height * 0.30f;
   // ImGui's own grab geometry: 2 px of padding, then half the grab.
@@ -233,12 +236,13 @@ inline void SliderRail(const ImVec2& lo, const ImVec2& hi, float t, bool hot) {
   draw->AddRectFilled(ImVec2(x0, y - rail * 0.5f), ImVec2(x1, y + rail * 0.5f), ToU32(tokens::kBgPopup), rail * 0.5f);
   if (x > x0) {
     draw->AddRectFilled(ImVec2(x0, y - rail * 0.5f), ImVec2(x, y + rail * 0.5f),
-                        ToU32(tokens::kTextSecondary), rail * 0.5f);
+                        ToU32(hot ? tokens::kAccent : tokens::kTextSecondary), rail * 0.5f);
   }
+  const float thumb = knob * (active ? 1.18f : hot ? 1.10f : 1.f);
   if (hot) {
-    draw->AddCircleFilled(ImVec2(x, y), knob + Px(2.f), ToU32(tokens::kAccentHalo));
+    draw->AddCircleFilled(ImVec2(x, y), thumb + Px(active ? 2.8f : 2.f), ToU32(tokens::kAccentHalo));
   }
-  draw->AddCircleFilled(ImVec2(x, y), knob, ToU32(hot ? tokens::kAccent : tokens::kTextPrimary));
+  draw->AddCircleFilled(ImVec2(x, y), thumb, ToU32(hot ? tokens::kAccent : tokens::kTextPrimary));
 }
 
 // A slider drawn the modern way: a thin rail filled up to the value, a round knob, and the value in its
@@ -303,8 +307,10 @@ inline bool Slider(const char* id, float* value, float min, float max, const cha
 
   const ImVec2 lo = ImGui::GetItemRectMin();
   const ImVec2 hi = ImGui::GetItemRectMax();
-  const float t = (max > min) ? std::clamp((shown - min) / (max - min), 0.f, 1.f) : 0.f;
-  SliderRail(lo, hi, t, active || ImGui::IsItemHovered());
+  const float target_t = (max > min) ? std::clamp((shown - min) / (max - min), 0.f, 1.f) : 0.f;
+  const bool hot = active || ImGui::IsItemHovered();
+  const float t = Animate(AnimationID(id), target_t, active ? motion::kSliderFollow : motion::kHover);
+  SliderRail(lo, hi, t, hot, active);
 
   // The value is drawn on the rail's own line, not laid out as an item of the row: it is centred on the rail
   // as the knob is (the rail's top edge is a knob-radius above the row's centre, so anchoring to it left the
@@ -364,8 +370,10 @@ inline bool SliderInt(const char* id, int* value, int min, int max, bool* draggi
 
   const ImVec2 lo = ImGui::GetItemRectMin();
   const ImVec2 hi = ImGui::GetItemRectMax();
-  const float t = (max > min) ? std::clamp(static_cast<float>(*value - min) / static_cast<float>(max - min), 0.f, 1.f) : 0.f;
-  SliderRail(lo, hi, t, active || ImGui::IsItemHovered());
+  const float target_t = (max > min) ? std::clamp(static_cast<float>(*value - min) / static_cast<float>(max - min), 0.f, 1.f) : 0.f;
+  const bool hot = active || ImGui::IsItemHovered();
+  const float t = Animate(AnimationID(id), target_t, active ? motion::kSliderFollow : motion::kHover);
+  SliderRail(lo, hi, t, hot, active);
 
   // The value is drawn on the rail's own line, not laid out as an item of the row: it is centred on the rail
   // as the knob is (the rail's top edge is a knob-radius above the row's centre, so anchoring to it left the
@@ -487,12 +495,19 @@ inline bool Switch(const char* id, bool* value) {
   }
   const bool hovered = ImGui::IsItemHovered();
   const bool held = ImGui::IsItemActive();
-  const ImVec4 track = *value ? (held ? tokens::kSelectedActive : hovered ? tokens::kSelectedHover : tokens::kSelected)
-                             : (held ? tokens::kBgControlActive : hovered ? tokens::kBgControlHover : tokens::kBgControl);
+  const float target = *value ? 1.f : 0.f;
+  const float progress = Animate(AnimationID(id), target, motion::kToggle);
+  // A small overshoot gives the thumb a soft, spring-like arrival without changing the stored value.
+  const float thumb_progress = progress + 0.12f * std::sin(progress * 3.14159265f);
+  const ImVec4 active_track = held ? tokens::kSelectedActive : hovered ? tokens::kSelectedHover : tokens::kSelected;
+  const ImVec4 track = tokens::Mix(tokens::kBgControl, active_track, progress);
   ImDrawList* draw = ImGui::GetWindowDrawList();
   draw->AddRectFilled(at, ImVec2(at.x + width, at.y + height), ToU32(track), CardRadius());
-  draw->AddCircleFilled(ImVec2(*value ? at.x + width - center : at.x + center, at.y + center), center * 0.68f,
-                        ToU32(*value ? tokens::kAccent : tokens::kTextSecondary));
+  const float thumb_width = held ? center * 0.82f : center * 0.68f;
+  const float thumb_x = at.x + center + thumb_progress * (width - 2.f * center);
+  draw->AddRectFilled(ImVec2(thumb_x - thumb_width, at.y + center - center * 0.68f),
+                      ImVec2(thumb_x + thumb_width, at.y + center + center * 0.68f),
+                      ToU32(tokens::kTextPrimary), center * 0.68f);
   return pressed;
 }
 
@@ -626,6 +641,7 @@ inline ChoiceHit ChoiceRow(const char* id, const char* caption, const char* cons
   const float text_y = lo.y + (height - ImGui::GetTextLineHeight()) * 0.5f;
   draw->AddText({lo.x, text_y}, ToU32(caption_ink), caption_text.c_str());
   if (show_arrows) {
+    // The value is drawn where it lands: no transition, so a change is visible on the very next frame.
     const int value_first = draw->VtxBuffer.Size;
     draw->AddText({value_x, text_y}, ToU32(value_ink), text.c_str());
     const float center_y = InkCenter(*draw, value_first, {0.f, lo.y + height * 0.5f}).y;
@@ -848,6 +864,7 @@ inline bool DetailOption(const char* label, std::string_view why, int index, boo
 
   const ImVec2 lo = gui::GetItemRectMin(), hi = gui::GetItemRectMax();
   ImDrawList* draw = gui::GetWindowDrawList();
+  // The selected row is filled on the frame the choice changes: the highlight is state, not a transition.
   if (selected || hot) {
     const ImVec4 fill = selected ? (hot ? tokens::kSelectedHover : tokens::kSelected) : tokens::kSurfaceHover;
     draw->AddRectFilled(lo, hi, ToU32(fill), ControlRadius());
@@ -906,6 +923,8 @@ inline bool CapsuleTabBar(const char* id, const char* const* english, int count,
   ImVec2 hi[kMaxTabs] = {};
   bool hot[kMaxTabs] = {};
   bool held[kMaxTabs] = {};
+  float hover_amount[kMaxTabs] = {};
+  float active_amount[kMaxTabs] = {};
   float widths[kMaxTabs] = {};
   float largest = 0.f;
   for (int i = 0; i < count; ++i) {
@@ -948,13 +967,17 @@ inline bool CapsuleTabBar(const char* id, const char* const* english, int count,
   draw->AddLine(left, right, ToU32(tokens::Fade(tokens::kTextPrimary, 0.06f)), std::max(1.f, Px(1.f)));
   for (int i = 0; i < count; ++i) {
     const bool live = i == (clicked >= 0 ? clicked : *current);
-    if (live) {
-      draw->AddRectFilled(lo[i], hi[i], ToU32(tokens::kTextPrimary), CapsuleRadius());
-    } else if (hot[i] || held[i]) {
-      draw->AddRectFilled(lo[i], hi[i], ToU32(tokens::Fade(tokens::kTextPrimary, held[i] ? 0.08f : 0.05f)), CapsuleRadius());
-    }
+    gui::PushID(i);  // the per-tab animation ids, without a string per tab per frame
+    active_amount[i] = Animate(AnimationID("##tab_active"), live ? 1.f : 0.f, motion::kTabSlide);
+    hover_amount[i] = Animate(AnimationID("##tab_hover"), hot[i] || held[i] ? 1.f : 0.f, motion::kHover);
+    gui::PopID();
+    // One white surface: the hover wash carries on under the moving plate instead of the two being blended twice.
+    const float hover_alpha = (held[i] ? 0.08f : 0.05f) * hover_amount[i];
+    const float plate_alpha = hover_alpha + (1.f - hover_alpha) * active_amount[i];
+    draw->AddRectFilled(lo[i], hi[i], ToU32(tokens::Fade(tokens::kTextPrimary, plate_alpha)), CapsuleRadius());
     const ImVec2 size = gui::CalcTextSize(shown[i].c_str());
-    const ImVec4 color = live ? tokens::kPlateInk : (hot[i] ? tokens::kTextPrimary : tokens::kTextSecondary);
+    const ImVec4 inactive_text = tokens::Mix(tokens::kTextSecondary, tokens::kTextPrimary, hover_amount[i]);
+    const ImVec4 color = tokens::Mix(inactive_text, tokens::kPlateInk, active_amount[i]);
     draw->AddText(ImVec2((lo[i].x + hi[i].x - size.x) * 0.5f, (lo[i].y + hi[i].y - size.y) * 0.5f), ToU32(color), shown[i].c_str());
   }
   gui::PopID();

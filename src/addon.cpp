@@ -3764,8 +3764,8 @@ void OnReshadeOverlay(api::effect_runtime* runtime) {
         view.mask_note = entry.mask_note;
         view.ui_correction_note = status.ui_correction_note;
         view.keep_faces_unavailable = std::string(ui::KeepFacesUnavailable({.gpu_ready = status.keep_faces_supported}));
-        view.frame_generation_line = ui::FormatFrameGenerationLine(
-            status.frame_generation.active, status.frame_generation.multiplier, status.frame_generation.from_ngx);
+        view.frame_generation_value =
+            ui::FormatFrameGenerationValue(status.frame_generation.active, status.frame_generation.multiplier);
         view.frame_generation_active = status.frame_generation.active;
         const addon::framerate::Snapshot rate = addon::framerate::Read();
         view.frame_rate_line =
@@ -3866,10 +3866,12 @@ void OnReshadeOverlay(api::effect_runtime* runtime) {
           facts.stopped = ui::PRIVATE_DEVICE_STOPPED_FINAL_REASON;  // a stop on the shared device, final at once
         }
         facts.frame_generation_blocks_present = (status.frame_generation.active && state.settings.fg_present == ui::Settings::FgPresent::OFF);
+        facts.nr_vram_bytes = view.runtime_bytes.value_or(0u);
+        facts.uplift_vram_bytes = view.intermediate_bytes;
         facts.vram_bytes = view.runtime_bytes.value_or(0u) + view.intermediate_bytes;
         facts.latch_note = (state.settings.dlss_placement_blocked ? addon::LATCH_UNAVAILABLE_REASON : std::string_view());
         facts.passes_note = view.card.WorkingNote();
-        facts.frame_generation_line = (view.frame_generation_active ? std::string_view(view.frame_generation_line) : std::string_view());
+        facts.frame_generation_value = view.frame_generation_value;
       } else {
         view.card = CardFor(state, entry, nullptr, {});
       }

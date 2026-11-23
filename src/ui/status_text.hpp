@@ -136,11 +136,13 @@ struct SetupFacts {
   std::string_view api;
   uint32_t passes_run = 0u;
   uint32_t passes_requested = 1u;
-  uint64_t vram_bytes = 0u;
+  uint64_t vram_bytes = 0u;      // NR's runtime plus Uplift's intermediates
+  uint64_t nr_vram_bytes = 0u;   // the NR runtime's own allocation; 0 when its stats do not report it
+  uint64_t uplift_vram_bytes = 0u;  // Uplift's intermediates, for the footer's breakdown
   std::string_view latch_note;  // the note line when there is no Why: the first non-empty, in this order
   std::string_view passes_note;
   std::string_view chain_note;  // split chain: "Pass 3 runs at After DLSS: frame generation is on" (ChainPlan::note)
-  std::string_view frame_generation_line;
+  std::string_view frame_generation_value;  // the working card's Frame generation row
   // Split chain: passes 2..N's "Runs at" rows. `chain`: where each pass runs now, from the shown context's chain; without one, the stored picks
   // from pass 1's highlight, never backwards.
   uint32_t pass_count = 1u;
@@ -189,8 +191,10 @@ struct LiveCard {
   std::string stage;
   std::string motion;
   std::string resolution;
+  std::string frame_generation;  // "On (2x)"/"Off"; empty when the device reports no frame generation at all
   std::string note;
-  std::string footer;  // "Direct3D 12 · 1/1 pass · VRAM 412 MiB" (the separator is U+00B7, a Latin-1 character)
+  // "Direct3D 12 · 1/1 pass · VRAM 412 MiB (NR 356 MiB, Uplift 56 MiB)" (the separator is U+00B7, a Latin-1 character)
+  std::string footer;
 };
 [[nodiscard]] LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown);
 
@@ -257,8 +261,8 @@ struct StatusView {
 // One status line for the overlay; only ACTIVE shows the detail.
 [[nodiscard]] std::string FormatStatusLine(const StatusView& view);
 
-// "Frame generation: on (2x, NGX)", "Frame generation: on (3x)", "Frame generation: off".
-[[nodiscard]] std::string FormatFrameGenerationLine(bool active, uint32_t multiplier, bool from_ngx);
+// The working card's Frame generation row: "On (2x)", "On", "Off".
+[[nodiscard]] std::string FormatFrameGenerationValue(bool active, uint32_t multiplier);
 // The frame-rate row (addon/frame_rate.hpp): real frames per second, and the rate frame generation
 // presents -- the provider's counted batch, or real x the measured multiplier (then `output_estimated`).
 // Empty while the measurement is stale or missing.
@@ -352,6 +356,8 @@ enum class CardButton : uint8_t {
 struct StatusCard {
   CardStage stage = CardStage::SWITCH;
   bool working = false;
+  // The plain off state: the panel's own state pill already says it, so the General tab draws no card for it.
+  bool idle = false;
   std::string title;
   std::string reason;
   std::string before_fg_note;

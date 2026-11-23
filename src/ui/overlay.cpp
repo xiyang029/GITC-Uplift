@@ -105,7 +105,9 @@ bool DrawChoice(OverlayState& state, std::string_view key, const char* title, co
                 int count, int value, const std::string_view* reasons, std::string_view body,
                 std::string_view disabled, std::function<bool(int)> apply) {
   gui::BeginDisabled(!disabled.empty());
-  const auto hit = widgets::ChoiceRow("##choice_row", title, names, count, value, reasons);
+  // ChoiceRow owns one invisible hit item. Give each setting its own hidden ID so rows in the same tab do not collide.
+  const std::string choice_id = std::string(key) + "##choice_row";
+  const auto hit = widgets::ChoiceRow(choice_id.c_str(), title, names, count, value, reasons);
   gui::EndDisabled();
   auto& frame = PendingDetail();
   if (frame.Select(state, key, hit.hovered, hit.nav_id, hit.activated)) {
@@ -668,7 +670,6 @@ void DrawWorkingSize(const OverlayView& view, const Settings& settings) {
 constexpr const char* DlssReflexGroup(std::string_view key) {
   if (key == "DLSSPresetDLAA") return "DLSS presets";
   if (key == "DLSSRenderScaleDLAA") return "DLSS render scale";
-  if (key == "DLSSQualityMode") return "DLSS create overrides";
   if (key == "DLSSFGPreset") return "Frame generation";
   if (key == "ReflexMode") return "Reflex";
   if (key == "RayReconstructionPreset") return "Ray Reconstruction";
@@ -763,15 +764,6 @@ bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* s
   return changed;
 }
 
-// The VRAM line of the Details header and of the working status card.
-std::string VramLine(const OverlayView& view) {
-  if (view.runtime_bytes) {
-    return std::format("VRAM: NR runtime {:.0f} MiB, Uplift intermediates {:.0f} MiB", static_cast<double>(*view.runtime_bytes) / BYTES_PER_MIB,
-                       static_cast<double>(view.intermediate_bytes) / BYTES_PER_MIB);
-  }
-  return std::format("VRAM: Uplift intermediates {:.0f} MiB", static_cast<double>(view.intermediate_bytes) / BYTES_PER_MIB);
-}
-
 }  // namespace
 
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now) {
@@ -788,113 +780,6 @@ void FinishSetup(OverlayView* view, OverlayState* state, const void* device, con
     view->live = BuildLiveCard(facts, view->setup);
   }
 }
-
-namespace {
-void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState& state) {
-  const auto fact = [](const char* key, const std::string& value) {
-    gui::TableNextRow();
-    gui::TableSetColumnIndex(0); widgets::SecondaryText(gui::Display(key).c_str());
-    gui::TableSetColumnIndex(1); gui::TextWrapped("%s", value.c_str());
-  };
-  widgets::Table("##runtime_facts", 2, ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_SizingStretchProp,
-                 {0.f, style::RowGap()}, [&] {
-    const float label_width = std::max({gui::CalcTextSize("Backend").x, gui::CalcTextSize("Display output").x, gui::CalcTextSize("Frame generation").x});
-    gui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthFixed, style::SnapUp(label_width) + style::BlockGap());
-    gui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
-    if (!view.details_backend.empty()) fact("Backend", gui::Display(view.details_backend));
-    if (!view.output_size.Empty()) {
-      const char* space = "";
-      switch (view.output_space) {
-        case color::ColorSpace::SRGB_NONLINEAR: space = "sRGB"; break;
-        case color::ColorSpace::EXTENDED_SRGB_LINEAR: space = "scRGB"; break;
-        case color::ColorSpace::HDR10_ST2084: space = "HDR10"; break;
-        case color::ColorSpace::HDR10_HLG: space = "HLG"; break;
-        default: break;
-      }
-      fact("Display output", std::format("{} × {}  {}", view.output_size.width, view.output_size.height, space));
-    }
-    if (view.frame_generation_active || !view.frame_generation_line.empty())
-      fact("Frame generation", gui::Display(view.frame_generation_active ? "On" : "Off"));
-  });
-
-  widgets::NextGap(style::BlockGap());
-  bool any = false;
-  widgets::Table("##executed_passes", 2,
-                 ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings,
-                 {style::RowGap(), style::RowGap()}, [&] {
-    gui::TableSetupColumn("##pass", ImGuiTableColumnFlags_WidthStretch, 0.5f);
-    gui::TableSetupColumn("##evaluation", ImGuiTableColumnFlags_WidthStretch, 3.f);
-    for (size_t i = 0; i < view.stage_runs.size(); ++i) {
-      const auto& group = view.stage_runs[i];
-      for (uint32_t n = 0; n < group.count && group.first + n < view.pass_models.size(); ++n) {
-        const uint32_t pass = group.first + n;
-        const auto& model = view.pass_models[pass];
-        const char* network = "Unconfirmed";
-        switch (model.network) {
-          case nr::RecordedNetwork::LEGACY: network = "Legacy"; break;
-          case nr::RecordedNetwork::SMALL_FP8: network = "Small FP8"; break;
-          case nr::RecordedNetwork::OTHER: network = "Other network"; break;
-          default: break;
-        }
-        const std::string name = model.style < 3u ? std::format("{} / {}", gui::Display(network), static_cast<char>('A' + model.style)) : gui::Display(network);
-        const char* motion = "None";
-        switch (group.motion) {
-          case sources::MotionSource::DIRECT: motion = "DLSS"; break;
-          case sources::MotionSource::PRESENT_COPY: motion = "DLSS copy"; break;
-          case sources::MotionSource::LAUNCHPAD: motion = view.lumenite_motion ? "Lumenite" : "Launchpad"; break;
-          default: break;
-        }
-        gui::TableNextRow();
-        gui::TableNextColumn(); gui::Text("P%u", pass + 1u);
-        gui::TableNextColumn();
-        const auto record = [](const char* label, const std::string& value) {
-          gui::TextWrapped("%s  %s", gui::Display(label).c_str(), value.c_str());
-        };
-        record("Ran at", gui::Display(NR_STAGE_NAMES[i]));
-        record("Network / style", name);
-        record("NR size", group.resolution.Empty() ? gui::Display("Unknown") : std::format("{} × {}", group.resolution.width, group.resolution.height));
-        record("Motion used", gui::Display(motion));
-        any = true;
-      }
-    }
-  });
-  if (!any) widgets::SecondaryText("No pass recorded.");
-  if (!view.details_note.empty()) gui::TextWrapped("%s", view.details_note.c_str());
-  for (const auto& group : view.stage_runs) {
-    if (group.skip.empty() || group.planned <= group.count) continue;
-    const uint32_t first = group.first + group.count + 1u, last = group.first + group.planned;
-    const std::string passes = first == last ? std::format("P{}", first) : std::format("P{}-{}", first, last);
-    gui::TextWrapped("%s: %s", passes.c_str(), gui::Display(group.skip).c_str());
-  }
-  const auto now = std::chrono::steady_clock::now();
-  const double elapsed = std::chrono::duration<double>(now - state.activity_since).count();
-  if (view.activity) {
-    const auto& v = *view.activity;
-    const auto& base = state.activity_start;
-    if (state.activity_mode != settings.fg_present || elapsed > 2.5 || v.real < base.real || v.reshade < base.reshade || v.passes < base.passes) {
-      state.activity_since = now;
-      state.activity_start = v;
-      state.activity_seconds = 0.0;
-      state.activity_mode = settings.fg_present;
-    } else if (elapsed >= 1.0) {
-      state.activity_delta = {v.real-base.real, v.reshade-base.reshade, v.passes-base.passes};
-      state.activity_seconds = elapsed;
-      state.activity_start = v;
-      state.activity_since = now;
-    }
-    if (state.activity_seconds > 0 && state.activity_delta.real > 0) {
-      const auto& delta = state.activity_delta;
-      const auto line = std::format("{} {:.1f} s: {} {} / {} {} / {} {}", gui::Display("FG activity over"), state.activity_seconds,
-          delta.real, gui::Display("real frames"), delta.reshade, gui::Display("ReShade Presents"), delta.passes, gui::Display("Present-pass runs"));
-      gui::TextWrapped("%s", line.c_str());
-    }
-  } else {
-    state.activity_since = {};
-    state.activity_seconds = 0.0;
-  }
-  gui::TextWrapped("%s", VramLine(view).c_str());
-}
-}  // namespace
 
 void OverlayView::AddStartupLocks(const Settings& settings, bool vulkan, bool d3d9) {
   if (d3d9 && (settings.startup_latches & Settings::LATCH_D3D9EX)) {
@@ -992,12 +877,19 @@ bool DrawPanelHeader(const OverlayView& view, OverlayState* state) {
   const float cross = style::SnapUp(font * 1.75f);
   const ImVec2 at = gui::GetCursorScreenPos();
   const float width = style::SnapDown(gui::GetContentRegionAvail().x);
+  // The grab area is the whole band above the close button, not just the content line: the window's padding strip
+  // (the very top of the panel, before the header's cursor) is part of it too, or dragging there does nothing.
+  const ImVec2 drag_min = gui::GetWindowPos();
+  const ImVec2 drag_max(at.x + (std::max)(1.f, width - cross - style::RowGap()), at.y + height);
+  gui::SetCursorScreenPos(drag_min);
+  ImGui::InvisibleButton("##panel_drag", ImVec2((std::max)(1.f, drag_max.x - drag_min.x), (std::max)(1.f, drag_max.y - drag_min.y)));
   gui::SetCursorScreenPos(at);
-  ImGui::InvisibleButton("##panel_drag", ImVec2((std::max)(1.f, width - cross - style::RowGap()), height));
   if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
     const ImVec2 delta = gui::GetIO().MouseDelta;
-    state->panel_x += delta.x;
-    state->panel_y += delta.y;
+    // Never past the top-left edge: a negative position is also the "not placed yet" sentinel, so letting a drag
+    // through there made the next frame take the default corner instead of staying at the edge.
+    state->panel_x = (std::max)(0.f, state->panel_x + delta.x);
+    state->panel_y = (std::max)(0.f, state->panel_y + delta.y);
   }
   // The name, then its state in the panel's quiet ink.
   gui::SetCursorScreenPos(ImVec2(at.x, at.y + (height - font * style::tokens::kHeadingScale) * 0.5f));
@@ -1093,12 +985,38 @@ std::string RunningStages(const OverlayView& view) {
   return recorded.empty() ? view.live.stage : recorded;
 }
 
+// The networks and styles of the passes that ran, as one row of the working card.
+std::string NetworkStyles(const OverlayView& view) {
+  std::string text;
+  for (size_t i = 0; i < view.stage_runs.size(); ++i) {
+    const auto& group = view.stage_runs[i];
+    for (uint32_t n = 0; n < group.count && group.first + n < view.pass_models.size(); ++n) {
+      const uint32_t pass = group.first + n;
+      const auto& model = view.pass_models[pass];
+      const char* network = "Unconfirmed";
+      switch (model.network) {
+        case nr::RecordedNetwork::LEGACY: network = "Legacy"; break;
+        case nr::RecordedNetwork::SMALL_FP8: network = "Small FP8"; break;
+        case nr::RecordedNetwork::OTHER: network = "Other network"; break;
+        default: break;
+      }
+      if (!text.empty()) text += " · ";
+      if (group.count > 1u) text += std::format("P{} ", pass + 1u);
+      text += model.style < 3u ? std::format("{} / {}", gui::Display(network), static_cast<char>('A' + model.style)) : gui::Display(network);
+    }
+  }
+  return text;
+}
+
 void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
   const StatusCard& card = view.card;
+  // The plain off state says nothing the panel's own state pill does not already say.
+  if (card.idle) return;
   if (card.title.empty() && card.reason.empty() && card.before_fg_note.empty() && card.fixes.empty()
       && !card.working && card.button == CardButton::NONE) return;
   widgets::Section("##status_card", [&] {
-    if (!card.title.empty()) {
+    // While running, the panel's own state pill already says so.
+    if (!card.working && !card.title.empty()) {
       widgets::Heading(card.title.c_str());
       widgets::NextGap(style::RowGap());
     }
@@ -1119,7 +1037,8 @@ void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
       }
       const float timing_width = nr_time.empty() ? 0.f : gui::CalcTextSize("NR GPU time (inference · chain)").x;
       const float key_width = (std::max)({timing_width, gui::CalcTextSize("Running at").x, gui::CalcTextSize("Motion vectors").x,
-                                          gui::CalcTextSize("Backend").x, gui::CalcTextSize("Resolution").x});
+                                          gui::CalcTextSize("Backend").x, gui::CalcTextSize("Resolution").x,
+                                          gui::CalcTextSize("Frame generation").x, gui::CalcTextSize("Network / style").x});
       const float value_offset = style::SnapUp(key_width) + style::BlockGap();
       const float value_x = gui::GetCursorPosX() + value_offset;
       const bool inline_values = value_offset <= gui::GetContentRegionAvail().x * 0.40f;
@@ -1132,6 +1051,9 @@ void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
       row("Motion vectors", view.live.motion);
       if (!view.details_backend.empty()) row("Backend", view.details_backend);
       row("Resolution", view.live.resolution);
+      if (!view.live.frame_generation.empty()) row("Frame generation", view.live.frame_generation);
+      const std::string styles = NetworkStyles(view);
+      if (!styles.empty()) row("Network / style", styles);
       if (!nr_time.empty()) {
         row("NR GPU time (inference · chain)", nr_time);
         if (gui::IsItemHovered()) {
@@ -1366,9 +1288,6 @@ bool DrawAdvancedTab(const OverlayView& view, Settings* settings, OverlayState* 
     changed |= DrawRows(view, settings, state, {"ShowFaceMask", "FaceMaskThreshold", "FaceMaskFull", "FaceMaskStrength", "FaceMaskSoftness", "FaceEdgeFalloff",
                                                "FaceLightingDensity", "FaceSpeckSize", "FaceFillSkin", "FaceFillRadius", "FaceFillTolerance"});
   }
-  widgets::NextGap(style::BlockGap());
-  widgets::Heading("Details");
-  DrawDetails(view, *settings, *state);
   return changed;
 }
 
@@ -1406,26 +1325,6 @@ bool DrawDetailColumn(const OverlayView& view, const Settings& settings, const O
       widgets::DetailText(focus.why, style::tokens::kBad);
     }
   }
-  const std::string stage_line = RunningStages(view);
-  // A line with nothing to say is dropped, and the whole block with it: with NR off all three strings are empty,
-  // and three dots with no words beside them read as a broken panel rather than as an idle one.
-  const bool now_anything = !stage_line.empty() || !view.live.motion.empty() || !view.live.resolution.empty();
-  if (now_anything) {
-    widgets::NextGap(style::CardGap());
-    {
-      style::StyleScope scope;
-      scope.Color(ImGuiCol_Text, style::tokens::kTextTertiary);
-      gui::TextUnformatted("Now");
-    }
-    widgets::NextGap(style::RowGap());
-    if (!stage_line.empty()) widgets::DetailLine(stage_line.c_str(), view.card.working);
-    if (!view.live.motion.empty()) widgets::DetailLine(view.live.motion.c_str(), false);
-    if (!view.live.resolution.empty()) widgets::DetailLine(view.live.resolution.c_str(), false);
-  }
-  if (!view.live.footer.empty()) {
-    widgets::NextGap(style::RowGap());
-    widgets::DetailText(view.live.footer);
-  }
   return changed;
 }
 
@@ -1444,66 +1343,89 @@ bool DrawPanel(const OverlayView& view, Settings* settings, OverlayState* state)
   auto& detail = PendingDetail();
   detail = {};
   changed |= DrawPanelTabs(view, settings, state);
-  const float total = style::SnapDown(gui::GetContentRegionAvail().x);
-  const float gutter = style::SnapDown((std::min)(style::Units(5.f), total * 0.04f));
-  const float right_width = style::SnapDown((total - gutter) * 0.41f);
-  const float left_width = (std::max)(1.f, total - right_width - gutter);
-  const float body_height = (std::max)(1.f, style::SnapDown(gui::GetContentRegionAvail().y));
+  const double now = ImGui::GetTime();
+  const float tab_progress = state->panel_tab_transition_started < 0.0
+                                 ? 1.f
+                                 : std::clamp(static_cast<float>((now - state->panel_tab_transition_started) / style::motion::kTabSlide), 0.f, 1.f);
+  const float tab_eased = 1.f - (1.f - tab_progress) * (1.f - tab_progress);
+  {
+    style::StyleScope transition;
+    transition.Var(ImGuiStyleVar_Alpha, tab_eased);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + style::Units(1.5f) * (1.f - tab_eased));
+    const float total = style::SnapDown(gui::GetContentRegionAvail().x);
+    const float gutter = style::SnapDown((std::min)(style::Units(5.f), total * 0.04f));
+    const float right_width = style::SnapDown((total - gutter) * 0.41f);
+    const float left_width = (std::max)(1.f, total - right_width - gutter);
+    const float body_height = (std::max)(1.f, style::SnapDown(gui::GetContentRegionAvail().y));
 
-  // The wheel is handled by hand inside each column (ScrollColumnWithWheel); NoScrollWithMouse keeps ImGui from
-  // scrolling them a second time under the pointer.
-  {
-    style::StyleScope column;
-    column.Var(ImGuiStyleVar_WindowPadding, {style::CardInset(), style::CardInset()})
-        .Color(ImGuiCol_ScrollbarBg, style::tokens::kTransparent);
-    constexpr auto flags = ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened;
-    gui::PushID(state->panel_tab);  // each tab keeps its own scroll offset and navigation history
-    if (gui::BeginChild("##panel_left", ImVec2(left_width, body_height), flags,
-                        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse)) {
-      ScrollColumnWithWheel();
-      switch (state->panel_tab) {
-        case panel::GENERAL: changed |= DrawGeneralTab(view, settings, state); break;
-        case panel::SETUP: changed |= DrawSetupTab(view, settings, state); break;
-        case panel::LOOK: changed |= DrawLookTab(view, settings, state); break;
-        case panel::LAYERS: changed |= DrawLayersTab(view, settings, state); break;
-        case panel::FIXES: changed |= DrawFixesTab(view, settings, state); break;
-        case panel::DLSS_REFLEX: changed |= DrawDlssReflexTab(view, settings, state); break;
-        case panel::ADVANCED: changed |= DrawAdvancedTab(view, settings, state); break;
-        default: break;
+    // The wheel is handled by hand inside each column (ScrollColumnWithWheel); NoScrollWithMouse keeps ImGui from
+    // scrolling them a second time under the pointer.
+    {
+      style::StyleScope column;
+      column.Var(ImGuiStyleVar_WindowPadding, {style::CardInset(), style::CardInset()})
+          .Color(ImGuiCol_ScrollbarBg, style::tokens::kTransparent);
+      constexpr auto flags = ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened;
+      gui::PushID(state->panel_tab);  // each tab keeps its own scroll offset and navigation history
+      if (gui::BeginChild("##panel_left", ImVec2(left_width, body_height), flags,
+                          ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse)) {
+        ScrollColumnWithWheel();
+        switch (state->panel_tab) {
+          case panel::GENERAL: changed |= DrawGeneralTab(view, settings, state); break;
+          case panel::SETUP: changed |= DrawSetupTab(view, settings, state); break;
+          case panel::LOOK: changed |= DrawLookTab(view, settings, state); break;
+          case panel::LAYERS: changed |= DrawLayersTab(view, settings, state); break;
+          case panel::FIXES: changed |= DrawFixesTab(view, settings, state); break;
+          case panel::DLSS_REFLEX: changed |= DrawDlssReflexTab(view, settings, state); break;
+          case panel::ADVANCED: changed |= DrawAdvancedTab(view, settings, state); break;
+          default: break;
+        }
       }
+      gui::EndChild();
+      gui::PopID();
     }
-    gui::EndChild();
-    gui::PopID();
-  }
-  // Resolve once after all rows have offered their detail. A stale nav cursor and a mouse exit are not new hits.
-  state->panel_focus = detail.focus.key;
-  state->panel_hovered_row = detail.hovered_row;
-  state->panel_nav_choice = detail.nav_choice;
-  gui::SameLine(0.f, gutter);
-  {
-    // The detail pane shares the panel background. Its child window only provides clipping and scrolling.
-    style::StyleScope column;
-    column.Var(ImGuiStyleVar_WindowPadding, {0.f, style::CardInset()});
-    constexpr auto flags = ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened;
-    if (gui::BeginChild("##panel_right", ImVec2(right_width, body_height), flags,
-                        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse)) {
-      ScrollColumnWithWheel();
-      changed |= DrawDetailColumn(view, *settings, *state);
+    // Resolve once after all rows have offered their detail. A stale nav cursor and a mouse exit are not new hits.
+    state->panel_focus = detail.focus.key;
+    state->panel_hovered_row = detail.hovered_row;
+    state->panel_nav_choice = detail.nav_choice;
+    gui::SameLine(0.f, gutter);
+    {
+      // The detail pane shares the panel background. Its child window only provides clipping and scrolling.
+      style::StyleScope column;
+      column.Var(ImGuiStyleVar_WindowPadding, {0.f, style::CardInset()});
+      constexpr auto flags = ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened;
+      if (gui::BeginChild("##panel_right", ImVec2(right_width, body_height), flags,
+                          ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse)) {
+        ScrollColumnWithWheel();
+        changed |= DrawDetailColumn(view, *settings, *state);
+      }
+      gui::EndChild();
     }
-    gui::EndChild();
+    detail = {};
+    changed |= DrawEnableWarning(settings, state, view.dlss_explicit);
   }
-  detail = {};
-  changed |= DrawEnableWarning(settings, state, view.dlss_explicit);
   return changed;
 }
 
 bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState* state) {
   // ReShade draws its own windows from the same global style, so the panel's look is lent for exactly this frame.
   const style::PanelStyle panel_style;
+  // ReShade's in-game backend may hide the platform cursor while drawing its overlay. Draw ImGui's arrow in the
+  // same command list as the panel so the standalone window remains usable inside a game.
+  gui::GetIO().MouseDrawCursor = true;
   // ImGui::GetMainViewport() and IO.DisplayPos are not available in this build (no viewport support), so the panel is
   // clamped to the same rectangle the dialogs are centred in: the IO display, whose origin is (0, 0).
   const ImVec2 origin(0.f, 0.f);
   const ImVec2 room = gui::GetIO().DisplaySize;
+  const double now = ImGui::GetTime();
+  if (state->panel_intro_started < 0.0) state->panel_intro_started = now;
+  if (state->panel_animation_tab < 0) {
+    state->panel_animation_tab = state->panel_tab;  // the tab it opens on is already in place, under the intro
+  } else if (state->panel_animation_tab != state->panel_tab) {
+    state->panel_animation_tab = state->panel_tab;
+    state->panel_tab_transition_started = now;
+  }
+  const float intro_progress = std::clamp(static_cast<float>((now - state->panel_intro_started) / style::motion::kIntro), 0.f, 1.f);
+  const float intro_eased = 1.f - (1.f - intro_progress) * (1.f - intro_progress);
   // Wide enough for both columns at ReShade's default font, and never wider than the screen minus a margin.
   const float width = std::clamp(room.x - style::Units(4.f), 1.f, style::Units(200.f));
   const float height = std::clamp(room.y - style::Units(4.f), 1.f, style::Units(120.f));
@@ -1513,14 +1435,15 @@ bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState
   }
   state->panel_x = std::clamp(state->panel_x, origin.x, (std::max)(origin.x, origin.x + room.x - width));
   state->panel_y = std::clamp(state->panel_y, origin.y, (std::max)(origin.y, origin.y + room.y - height));
-  gui::SetNextWindowPos(ImVec2(state->panel_x, state->panel_y), ImGuiCond_Always);
+  gui::SetNextWindowPos(ImVec2(state->panel_x, state->panel_y + style::Units(2.f) * (1.f - intro_eased)), ImGuiCond_Always);
   gui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
   bool changed = false;
   {
     style::StyleScope window;
     window.Color(ImGuiCol_Border, style::tokens::Fade(style::tokens::kTextPrimary, 0.07f))
         .Var(ImGuiStyleVar_WindowBorderSize, (std::max)(1.f, style::Px(1.f)))
-        .Var(ImGuiStyleVar_WindowPadding, ImVec2(style::Units(5.f), style::Units(4.f)));
+        .Var(ImGuiStyleVar_WindowPadding, ImVec2(style::Units(5.f), style::Units(4.f)))
+        .Var(ImGuiStyleVar_Alpha, intro_eased);
     const bool visible = gui::Begin("GITC Uplift###UpliftPanel", nullptr,
                                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove
                                         | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings
@@ -1530,6 +1453,13 @@ bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState
       changed = DrawPanel(view, settings, state);
     }
     gui::End();
+  }
+  if (!state->panel_open) {
+    gui::GetIO().MouseDrawCursor = false;
+    // The next open starts over: the intro replays and its first tab arrives without a tab transition.
+    state->panel_intro_started = -1.0;
+    state->panel_tab_transition_started = -1.0;
+    state->panel_animation_tab = -1;
   }
   return changed;
 }

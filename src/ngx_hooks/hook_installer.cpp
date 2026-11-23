@@ -188,39 +188,12 @@ NVSDK_NGX_Result RunCreate(size_t slot, CreateCall call, NVSDK_NGX_Handle** out_
   if (depth.Nested() || observer == nullptr) return original();
   const SlotGuard guard(slot);
   NVSDK_NGX_Parameter* const parameters = call.parameters;
-  // Restores the values BeforeCreate changed, last change first. Its own failure never says "the call went
-  // to NGX unchanged": the create itself may already have gone through either way.
-  const auto restore_quietly = [](NVSDK_NGX_Parameter* restore_parameters, CreateCall* create_call) noexcept {
-    if (create_call->saved.empty() || restore_parameters == nullptr) return;
-    static std::atomic<bool> logged{false};
-    try {
-      RestoreParameters(restore_parameters, create_call->saved);
-    } catch (const std::exception& e) {
-      if (!logged.exchange(true)) {
-        try {
-          nr::Logf(nr::LogLevel::ERR,
-                   "restoring the game's own NGX parameters threw ({}); some may not have been restored", e.what());
-        } catch (...) {
-        }
-      }
-    } catch (...) {
-      if (!logged.exchange(true)) {
-        try {
-          nr::Logf(nr::LogLevel::ERR, "restoring the game's own NGX parameters threw; some may not have been restored");
-        } catch (...) {
-        }
-      }
-    }
-    create_call->saved.clear();
-  };
   try {
     observer->BeforeCreate(&call);
   } catch (const std::exception& e) {
     LogObserverFailure(ObserverCall::CREATE, e.what());
-    restore_quietly(parameters, &call);
   } catch (...) {
     LogObserverFailure(ObserverCall::CREATE, nullptr);
-    restore_quietly(parameters, &call);
   }
   const auto create = [&] {
     call.submitted.reset();
@@ -235,14 +208,7 @@ NVSDK_NGX_Result RunCreate(size_t slot, CreateCall call, NVSDK_NGX_Handle** out_
     }
     return original();
   };
-  NVSDK_NGX_Result result = create();
-  if (!call.saved.empty() && NVSDK_NGX_FAILED(result)) {
-    // A DLSS-SR override NGX rejects must never cost the game its DLSS: ask again with its own values.
-    restore_quietly(parameters, &call);
-    result = create();
-  } else {
-    restore_quietly(parameters, &call);
-  }
+  const NVSDK_NGX_Result result = create();
   try {
     observer->AfterCreate(call, ((out_handle != nullptr && NVSDK_NGX_SUCCEED(result)) ? *out_handle : nullptr), result);
   } catch (const std::exception& e) {

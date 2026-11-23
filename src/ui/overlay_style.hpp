@@ -124,6 +124,32 @@ inline float RowHeight() { return SnapUp(gui::GetFontSize() * 2.f); }
 
 inline ImU32 ToU32(const ImVec4& color) { return ImGui::GetColorU32(color); }
 
+// Small, ID-backed transitions keep animation state with ImGui's window and disappear with it.
+inline ImGuiID AnimationID(const char* id) {
+  ImGui::PushID(id);
+  const ImGuiID animation_id = ImGui::GetID("##animation");
+  ImGui::PopID();
+  return animation_id;
+}
+
+inline float Animate(ImGuiID id, float target, float duration) {
+  float* const value = ImGui::GetStateStorage()->GetFloatRef(id, target);
+  const float delta = std::clamp(ImGui::GetIO().DeltaTime, 0.f, 0.1f);
+  const float step = duration > 0.f ? std::min(1.f, delta / duration) : 1.f;
+  *value += (target - *value) * step;
+  if (std::abs(*value - target) < 0.001f) *value = target;
+  return *value;
+}
+
+// The panel's transitions, one duration each, so the whole panel speeds up or slows down together.
+namespace motion {
+constexpr float kSliderFollow = 0.06f;  // the rail catching up with a knob that is being dragged, not a transition
+constexpr float kToggle = 0.20f;        // a switch's track and thumb sliding over
+constexpr float kHover = 0.22f;         // a control's hover and press wash, and a tab's own
+constexpr float kTabSlide = 0.32f;      // the plate and content moving between tabs
+constexpr float kIntro = 0.36f;         // the panel's opening slide and fade
+}  // namespace motion
+
 // Pushes and pops in one object, so a return from the middle of a panel cannot leave a colour or a variable
 // on ReShade's stacks. The named pairs are the two control roles the panel draws: its primary action, and a
 // quiet icon button.

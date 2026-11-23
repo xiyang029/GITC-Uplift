@@ -35,8 +35,8 @@ class NgxRouting {
   [[nodiscard]] virtual ngx_hooks::SrOverrides DlssPresetOverrides() = 0;
   // The panel's RayReconstructionPreset<Mode> choices, same shape as the SR ones above.
   [[nodiscard]] virtual ngx_hooks::SrOverrides RrPresetOverrides() = 0;
-  // The hidden DLSS-SR create overrides (DLSSQualityMode / DLSSAutoExposure): the quality mode and the
-  // auto-exposure flag the game's NEXT DLSS feature create is asked for. Empty when both say Game.
+  // The hidden DLSS-SR create overrides (DLSSQualityMode / DLSSAutoExposure): always empty (see
+  // addon::ToSrOverrides), so the game's own choices stand; kept as the create-side seam.
   [[nodiscard]] virtual ngx_hooks::SrOverrides SrCreateOverrides() = 0;
   // The ReShade device a game list was created on (Uplift's identity data), or null when untracked.
   [[nodiscard]] virtual const void* DeviceOf(ID3D12GraphicsCommandList* list) = 0;

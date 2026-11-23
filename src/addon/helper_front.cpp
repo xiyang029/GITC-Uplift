@@ -834,6 +834,8 @@ void HelperFront::Overlay(api::device* game_device, const HelperDevice* device, 
   if (device->strikes.Exhausted() && !helper_problem.empty()) {
     facts.stopped = ui::PRIVATE_DEVICE_STOPPED_TWICE_REASON;  // the helper's second stop is a fixed cause
   }
+  facts.nr_vram_bytes = view->runtime_bytes.value_or(0u);
+  facts.uplift_vram_bytes = view->intermediate_bytes;
   facts.vram_bytes = view->runtime_bytes.value_or(0u) + view->intermediate_bytes;
   facts.passes_note = view->card.WorkingNote();
   ui::FinishSetup(view, state, game_device, facts, now);

@@ -94,6 +94,10 @@ void MigrateSettings(Settings* settings) {
   if (settings->config_version < 5u && settings->panel_key == 0x24u) {
     settings->panel_key = 0x2Du;
   }
+  // 0 was EnableKey's default (no hotkey) before version 6: those files, and a 0 a right-click wrote since, move to F7.
+  if (settings->config_version < 6u && settings->enable_key == 0u) {
+    settings->enable_key = 0x76u;
+  }
   settings->config_version = CONFIG_VERSION;
 }
 

@@ -179,7 +179,6 @@ add_custom_command(OUTPUT "${UPLIFT_XMX_GENERATED}/embedded_xess_programs.rc"
 
 add_library(uplift_ngx_hooks STATIC
   src/ngx_hooks/hook_installer.cpp
-  src/ngx_hooks/dlss_overrides.cpp
   src/ngx_hooks/ngx_parameters.cpp
   src/ngx_hooks/feature_registry.cpp
   src/ngx_hooks/dlss_capture.cpp

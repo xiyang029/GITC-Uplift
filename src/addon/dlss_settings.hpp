@@ -10,9 +10,8 @@ namespace uplift::addon {
 [[nodiscard]] ngx_hooks::SrOverrides ToPresetOverrides(const ui::Settings& settings);
 // The panel's RayReconstructionPreset<Mode> choices, same shape (render preset values, 0 = Game).
 [[nodiscard]] ngx_hooks::SrOverrides ToRrPresetOverrides(const ui::Settings& settings);
-// The hidden DLSS-SR create overrides (DLSSQualityMode / DLSSAutoExposure): the quality mode the game's next
-// DLSS feature is created with and its auto-exposure flag. A value of Game leaves that key to the game, so an
-// all-Game pair returns an override whose Any() is false.
+// The hidden DLSS-SR settings (DLSSQualityMode / DLSSAutoExposure) never override the game, including keys
+// loaded from a hand-edited INI. NgxBridge::BeforeCreate calls this unconditionally and receives no overrides.
 [[nodiscard]] ngx_hooks::SrOverrides ToSrOverrides(const ui::Settings& settings);
 
 }  // namespace uplift::addon

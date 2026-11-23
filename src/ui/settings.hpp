@@ -24,8 +24,9 @@ inline constexpr char ENABLED_KEY[] = "Enabled";  // the one key the add-on poll
 inline constexpr float SKIN_SAME_AS_STRUCTURE = -1.f;
 
 // The version written into the settings file; 3 is the one in which InputExposure's default became Auto, 5 the one in
-// which PanelKey stopped defaulting to Home (ReShade's own overlay key). LoadSettings migrates older files.
-inline constexpr uint32_t CONFIG_VERSION = 5u;
+// which PanelKey stopped defaulting to Home (ReShade's own overlay key), 6 the one in which EnableKey stopped defaulting to
+// none and became F7. LoadSettings migrates older files.
+inline constexpr uint32_t CONFIG_VERSION = 6u;
 
 // Every combo is stored as its index, in the order below.
 enum class PlacementSource : uint32_t {
@@ -235,7 +236,7 @@ struct PassSettings {
 struct Settings {
   Language language = Language::SIMPLIFIED_CHINESE;
   bool enabled = false;
-  uint32_t enable_key = 0u;                      // Win32 virtual-key code; 0 = no hotkey
+  uint32_t enable_key = 0x76u;                   // VK_F7: switches NR on and off; 0 = no hotkey
   uint32_t panel_key = 0x2Du;                    // VK_INSERT: opens this panel; ReShade's own panel keeps Home
   float intensity = 1.f;     // slider 0-1; typed values up to 10 pass through
   uint32_t style = 0u;       // 0-2 = Model A/B/C
@@ -268,8 +269,8 @@ struct Settings {
   PlacementSource source = PlacementSource::AUTO;
   MotionVectorSource motion_vectors = MotionVectorSource::AUTO;
   std::array<DlssPresetOverride, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_presets = {};
-  // The two hidden DLSS-SR create-time overrides (schema rows DLSSQualityMode / DLSSAutoExposure): applied when
-  // the game next creates its DLSS feature. Nothing reads them back into a live feature on its own.
+  // The two hidden DLSS-SR create-time overrides (schema rows DLSSQualityMode / DLSSAutoExposure): the INI keeps
+  // them readable, but nothing applies them -- the game's own choices stand.
   DlssQualityOverride dlss_quality_mode = DlssQualityOverride::GAME;
   AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
 
@@ -425,6 +426,8 @@ void SaveSettings(const Settings& settings, ConfigStore* store);
 // A file written before CONFIG_VERSION 3 (1.0.0 stored every key, its default InputExposure Game included) reads InputExposure Game as Auto, the
 // new default; Metered and Manual stay. A file written before CONFIG_VERSION 5 that still holds Home for PanelKey (the old default) moves to
 // Insert: Home cannot be taken over, because ReShade handles its own overlay key before this add-on sees the input.
+// A file written before CONFIG_VERSION 6 that still holds none for EnableKey (the old default) moves to F7; a 0
+// written by a right-click after that is indistinguishable from the old default, so it moves too.
 // The next save writes the current version, so an explicit Game chosen after that stays Game.
 void MigrateSettings(Settings* settings);
 // After an overlay edit: a non-finite value returns to its default, a number is clamped into its

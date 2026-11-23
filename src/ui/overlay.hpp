@@ -87,8 +87,8 @@ struct OverlayView {
     return StageLabel(SourcePick::PRESENT, settings.fg_present == Settings::FgPresent::BEFORE && before_fg_unavailable.empty());
   }
   std::string before_fg_unavailable;
-  std::string frame_generation_line;     // FormatFrameGenerationLine; empty before a context exists and in 32-bit games
-  bool frame_generation_active = false;  // the working card shows frame_generation_line only when this is set
+  std::string frame_generation_value;    // FormatFrameGenerationValue; empty before a context exists and in 32-bit games
+  bool frame_generation_active = false;  // frame generation is running: the FG tab reads it to offer Present's placements
   bool dlss_latched = false;              // DlssPlacementBlocked: the device-removal latch is set (or, in a Vulkan game, VulkanNativeNr = 0)
   std::string ui_correction_note;  // why UI correction does nothing on this placement
   std::string keep_faces_unavailable;  // Keep faces: non-empty greys its rows, and says why (ui::KeepFacesUnavailable)
@@ -161,6 +161,10 @@ struct OverlayState {
   bool panel_drew = false;   // set by DrawOverlayWindow when the window actually drew; input is blocked only then
   float panel_x = -1.f;      // where the window was last dragged; negative means the default corner
   float panel_y = -1.f;
+  // The panel's transitions, all of them session-only: negative means "start it on the next draw".
+  double panel_intro_started = -1.0;          // when the panel appeared, for the opening slide and fade
+  double panel_tab_transition_started = -1.0;  // when the shown tab changed; negative means no transition in flight
+  int panel_animation_tab = -1;                // the tab the last draw showed, to notice a change made by any input
   bool capturing_panel_key = false;
   // Last row inspected in this tab. Retained through row gaps and while using the right pane.
   std::string panel_focus = "Source";

@@ -329,7 +329,8 @@ LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown) {
   } else {
     card.resolution = std::format("{}x{} of {}x{} ({}, {})", work.width, work.height, facts.frame.width, facts.frame.height, mode, upsampling);
   }
-  for (const std::string_view note : {facts.latch_note, facts.passes_note, facts.chain_note, facts.frame_generation_line}) {
+  card.frame_generation = std::string(facts.frame_generation_value);
+  for (const std::string_view note : {facts.latch_note, facts.passes_note, facts.chain_note}) {
     if (!note.empty()) {
       card.note = std::string(note);
       break;
@@ -337,7 +338,14 @@ LiveCard BuildLiveCard(const SetupFacts& facts, const SetupView& shown) {
   }
   card.footer = std::format("{} · {}/{} {}", facts.api, facts.passes_run, facts.passes_requested, (facts.passes_requested == 1u ? "pass" : "passes"));
   if (facts.vram_bytes > 0u) {
-    card.footer += std::format(" · VRAM {:.0f} MiB", static_cast<double>(facts.vram_bytes) / BYTES_PER_MIB);
+    if (facts.nr_vram_bytes > 0u) {
+      card.footer += std::format(" · VRAM {:.0f} MiB (NR {:.0f} MiB, Uplift {:.0f} MiB)",
+                                 static_cast<double>(facts.vram_bytes) / BYTES_PER_MIB,
+                                 static_cast<double>(facts.nr_vram_bytes) / BYTES_PER_MIB,
+                                 static_cast<double>(facts.uplift_vram_bytes) / BYTES_PER_MIB);
+    } else {
+      card.footer += std::format(" · VRAM {:.0f} MiB", static_cast<double>(facts.vram_bytes) / BYTES_PER_MIB);
+    }
   }
   return card;
 }
@@ -449,9 +457,10 @@ std::string FormatStatusLine(const StatusView& view) {
   return line;
 }
 
-std::string FormatFrameGenerationLine(bool active, uint32_t multiplier, bool from_ngx) {
-  if (!active) return "Frame generation: off";
-  return std::format("Frame generation: on ({}x{})", multiplier, (from_ngx ? ", NGX" : ""));
+std::string FormatFrameGenerationValue(bool active, uint32_t multiplier) {
+  if (!active) return "Off";
+  if (multiplier >= 2u) return std::format("On ({}x)", multiplier);
+  return "On";
 }
 
 std::string FormatXmxLive(const XmxFacts& facts) {
@@ -668,7 +677,11 @@ StatusCard BuildStatusCard(const CardFacts& facts) {
                 {"Remove the other NR add-on, or set \"When another NR producer runs\" to Observe (Advanced)."},
                 CardButton::NONE);
   }
-  if (!facts.enabled) return card(CardStage::SWITCH, "NR is off", "Neural rendering is switched off.", {}, CardButton::NONE);
+  if (!facts.enabled) {
+    StatusCard off = card(CardStage::SWITCH, "NR is off", "Neural rendering is switched off.", {}, CardButton::NONE);
+    off.idle = true;
+    return off;
+  }
   // Plan 15: after the game's NGX shutdown on Direct3D 12 NR waits for the game's DLSS, whatever the stage (a temporary cause; Setup greys with the same text).
   if (!facts.held.empty()) return card(CardStage::PLACEMENT, "Waiting for the game's DLSS", facts.held, {}, CardButton::NONE);
   const nr::SessionStatus& session = facts.session;
