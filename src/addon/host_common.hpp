@@ -41,8 +41,6 @@ inline constexpr char ADDON_NAME[] = "GITC Uplift";
 inline constexpr char ADDON_DESCRIPTION[] =
     "A virtual photography focused version of the DLSS 5 mod: NVIDIA DLSS Neural Rendering (DLSS-NR) with greater "
     "flexibility, ease of use, stability and hassle-free compatibility across APIs.";
-// The title of the add-on's overlay tab.
-inline constexpr char OVERLAY_TITLE[] = "GITC Uplift";
 
 // Why the vkCreateDevice hook is not installed: logged once from create_device(vulkan), or a startup warning; the argument is the reason.
 inline constexpr char VK_DEVICE_HOOK_FAILED_LINE[] = "Vulkan: the vkCreateDevice hook could not be installed: {}";
@@ -324,12 +322,35 @@ template <auto& STATE>
 bool OnOpenOverlay(api::effect_runtime* /*runtime*/, bool open, api::input_source /*source*/) {
   try {
     const std::unique_lock lock(STATE->mutex);
-    if (!open) {
+    const bool reshade_overlay_was_open = STATE->overlay.reshade_overlay_open;
+    if (open) {
+      // ReShade's own window is opening (its key, Home by default): this panel yields, so exactly one of the two is ever
+      // on screen. The reverse direction is in the add-on's hotkey, which closes ReShade's overlay before opening this one.
+      STATE->overlay.panel_open = false;
+      STATE->overlay.reshade_overlay_open = true;
+      if (!reshade_overlay_was_open) {
+        nr::Logf(nr::LogLevel::INFO, "ReShade overlay opened: the Uplift panel yields");
+      }
+    } else {
       // defaults_view is session-only and survives closing the overlay; a slider held as
-      // it closes must not stay coalesced, so everything else about the panel still resets.
+      // it closes must not stay coalesced, so everything else about the panel still resets --
+      // except where the panel sits and which tab it is on, which are the user's, not the session's.
+      // This also runs when the add-on closes ReShade's overlay to make room for its own panel; the caller opens the
+      // panel after the reset, so nothing of value is lost.
       const bool defaults_view = STATE->overlay.defaults_view;
+      const int panel_tab = STATE->overlay.panel_tab;
+      const float panel_x = STATE->overlay.panel_x;
+      const float panel_y = STATE->overlay.panel_y;
+      const std::string panel_focus = STATE->overlay.panel_focus;
       STATE->overlay = {};
       STATE->overlay.defaults_view = defaults_view;
+      STATE->overlay.panel_tab = panel_tab;
+      STATE->overlay.panel_x = panel_x;
+      STATE->overlay.panel_y = panel_y;
+      STATE->overlay.panel_focus = panel_focus;
+      if (reshade_overlay_was_open) {
+        nr::Logf(nr::LogLevel::INFO, "ReShade overlay closed: the Uplift panel stays closed");
+      }
     }
     return false;
   }

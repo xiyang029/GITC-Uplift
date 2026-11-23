@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <string>
@@ -22,6 +21,14 @@ class LanguageScope {
 
 inline std::string Display(std::string_view text) { return Localize(language, text); }
 inline std::string Label(std::string_view text) { return LocalizedLabel(language, text); }
+// The text a hand-drawn control paints itself. Label() keeps the "###id" suffix that lets ImGui tell two same-named
+// controls apart; AddText knows no such rule and would print it.
+inline std::string Visible(std::string_view text) {
+  std::string shown = Label(text);
+  const size_t stable_id = shown.find("###");
+  if (stable_id != std::string::npos) shown.resize(stable_id);
+  return shown;
+}
 inline std::string Formatted(const char* format, va_list args) {
   va_list count;
   va_copy(count, args);
@@ -53,10 +60,4 @@ inline ImVec2 CalcTextSize(const char* text, const char* end = nullptr, bool hid
 inline bool Button(const char* label, const ImVec2& size = ImVec2(0.f, 0.f)) { return ImGui::Button(Label(label).c_str(), size); }
 inline bool InputInt(const char* label, int* value, int step = 1, int fast = 100, ImGuiInputTextFlags flags = 0) { return ImGui::InputInt(Label(label).c_str(), value, step, fast, flags); }
 inline bool InputText(const char* label, char* value, size_t size, ImGuiInputTextFlags flags = 0, ImGuiInputTextCallback callback = nullptr, void* data = nullptr) { return ImGui::InputText(Label(label).c_str(), value, size, flags, callback, data); }
-inline bool BeginCombo(const char* label, const char* preview, ImGuiComboFlags flags = 0) { return ImGui::BeginCombo(Label(label).c_str(), preview ? Display(preview).c_str() : nullptr, flags); }
-inline bool Selectable(const char* label, bool selected = false, ImGuiSelectableFlags flags = 0, const ImVec2& size = ImVec2(0.f, 0.f)) { return ImGui::Selectable(Label(label).c_str(), selected, flags, size); }
-inline bool CollapsingHeader(const char* label, ImGuiTreeNodeFlags flags = 0) { return ImGui::CollapsingHeader(Label(label).c_str(), flags); }
-inline void OpenPopup(const char* id, ImGuiPopupFlags flags = 0) { ImGui::OpenPopup(Label(id).c_str(), flags); }
-inline bool IsPopupOpen(const char* id, ImGuiPopupFlags flags = 0) { return ImGui::IsPopupOpen(Label(id).c_str(), flags); }
-inline bool BeginPopupModal(const char* name, bool* open = nullptr, ImGuiWindowFlags flags = 0) { return ImGui::BeginPopupModal(Label(name).c_str(), open, flags); }
 }  // namespace uplift::ui::gui

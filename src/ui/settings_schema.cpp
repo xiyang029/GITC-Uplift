@@ -1,5 +1,6 @@
 #include "ui/settings_schema.hpp"
 #include "nr/types.hpp"
+#include "nvfp4/NrNvfp4.h"
 #include "ui/settings.hpp"
 
 #include <algorithm>
@@ -14,19 +15,18 @@ namespace uplift::ui {
 namespace {
 
 constexpr std::array<std::string_view, 3> MODELS = {"Style A", "Style B", "Style C"};
-constexpr std::array<std::string_view, 11> NR_NETWORKS = {"Default", "A: Legacy", "B: Small FP8",
-                                                          "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one",
-                                                          "FP8: 2x in one", "FP8: 3x in one", "FP8: 2x in one v2", "FP8: 3x in one v2",
-                                                          "NVFP4: B feed-forward"};
+constexpr std::array<std::string_view, 9> NR_NETWORKS = {
+    "Default", "A: Legacy", "B: Small FP8", "NVFP4: Original", "NVFP4: 2x in one", "NVFP4: 3x in one",
+    "FP8: 2x in one", "FP8: 3x in one", "NVFP4: B feed-forward"};
 constexpr auto PASS_NETWORKS = [] {
   auto choices = NR_NETWORKS;
   choices[0] = "Same as pass 1";
   return choices;
 }();
-// Choice order differs from NGX preset order: NVFP4 2x is 16, 3x is 15; FP8 uses 18-21; Model B's feed-forward is 22,
-// which is not a runtime preset at all (it asks the runtime for its preset 2, the small FP8 network).
-// Choice indices are stored in the config: append new models to preserve every existing selection.
-constexpr std::array<uint32_t, 11> NETWORK_PRESET_VALUES = {0u, 1u, 2u, 4u, 16u, 15u, 18u, 19u, 20u, 21u, 22u};
+namespace nvfp4 = DlssNr::Nvfp4;
+constexpr std::array<uint32_t, 9> NETWORK_PRESET_VALUES = {
+    0u, 1u, 2u, nvfp4::ModelANvfp4, nvfp4::ModelTwoDouble, nvfp4::ModelTwoTriple,
+    nvfp4::ModelFp8Double, nvfp4::ModelFp8Triple, nvfp4::ModelBFeedForward};
 static_assert(NR_NETWORKS.size() == NETWORK_PRESET_VALUES.size());
 
 double NetworkPresetIndex(uint32_t preset) {
@@ -235,6 +235,17 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 255.0,
         .get = [](const Settings& s) { return static_cast<double>(s.enable_key); },
         .set = [](Settings& s, double v) { s.enable_key = static_cast<uint32_t>(v); },
+    },
+    {
+        .key = "PanelKey",
+        .kind = SettingKind::KEY,
+        .section = SettingSection::HOTKEYS,
+        .label = "Panel hotkey",
+        .tooltip = "Opens this panel; ReShade's own panel keeps its own key. Click, then press a key; right-click clears it.",
+        .min = 0.0,
+        .max = 255.0,
+        .get = [](const Settings& s) { return static_cast<double>(s.panel_key); },
+        .set = [](Settings& s, double v) { s.panel_key = static_cast<uint32_t>(v); },
     },
     {
         .key = "ResolutionMode",

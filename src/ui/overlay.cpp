@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <format>
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -57,11 +58,75 @@ bool UpsamplingRowHidden(std::string_view key, const SetupView& setup, const Set
   return !reduced_any || (key == "GuidedBaseGain" && settings.upsampling != color::Upsampling::EDGE_AWARE);
 }
 
+// Only keys and input history survive the frame. The detail picker may capture this draw's local values.
+struct DetailFocus {
+  struct Option {
+    std::string label;
+    std::string why;
+  };
+  std::string key;
+  std::string title;
+  std::string body;
+  std::string why;
+  std::vector<Option> options;
+  int option_value = 0;
+  std::function<bool(int)> pick;
+};
+
+struct DetailFrame {
+  enum class Source { NONE, RETAINED, NAVIGATION, POINTER, ACTIVATION };
+  DetailFocus focus;
+  Source source = Source::NONE;
+  ImGuiID nav_choice = 0;
+  std::string_view hovered_row;
+
+  bool Select(const OverlayState& state, std::string_view key, bool hovered, ImGuiID nav_id = 0, bool activated = false) {
+    if (hovered) hovered_row = key;
+    if (nav_id != 0) nav_choice = nav_id;
+    const ImGuiIO& io = gui::GetIO();
+    const bool pointer_changed = hovered && (state.panel_hovered_row != key || io.MouseDelta.x != 0.f || io.MouseDelta.y != 0.f);
+    const bool nav_changed = nav_id != 0 && nav_id != state.panel_nav_choice && io.NavVisible;
+    const Source candidate = activated ? Source::ACTIVATION : pointer_changed ? Source::POINTER
+                             : nav_changed ? Source::NAVIGATION : key == state.panel_focus ? Source::RETAINED : Source::NONE;
+    if (candidate <= source) return false;
+    source = candidate;
+    return true;
+  }
+};
+
+DetailFrame& PendingDetail() {
+  static thread_local DetailFrame frame;
+  return frame;
+}
+
+// Both columns use the same setter. Choice details are rebuilt from this row's live value and
+// availability, including when the pointer has moved over to the right column.
+bool DrawChoice(OverlayState& state, std::string_view key, const char* title, const char* const* names,
+                int count, int value, const std::string_view* reasons, std::string_view body,
+                std::string_view disabled, std::function<bool(int)> apply) {
+  gui::BeginDisabled(!disabled.empty());
+  const auto hit = widgets::ChoiceRow("##choice_row", title, names, count, value, reasons);
+  gui::EndDisabled();
+  auto& frame = PendingDetail();
+  if (frame.Select(state, key, hit.hovered, hit.nav_id, hit.activated)) {
+    auto& detail = frame.focus;
+    detail = {std::string(key), gui::Visible(title), std::string(body), std::string(disabled), {}, value, {}};
+    detail.options.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+      const auto reason = !disabled.empty() ? disabled : reasons != nullptr ? reasons[i] : std::string_view();
+      detail.options.push_back({names[i], std::string(reason)});
+    }
+    if (disabled.empty()) detail.pick = apply;
+  }
+  return disabled.empty() && hit.picked >= 0 && apply(hit.picked);
+}
+
 // Draw a settings-schema row with its normal availability, reset and commit rules.
-bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state, bool grouped = false) {
+bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state,
+             const char* label_override = nullptr) {
   if (descriptor.key == "BeforeFGMotion" && (settings->fg_present != Settings::FgPresent::BEFORE
       || (settings->motion_vectors != MotionVectorSource::LAUNCHPAD && settings->motion_vectors != MotionVectorSource::LUMENITE))) return false;
-  std::string label(descriptor.label);
+  std::string label(label_override ? std::string_view(label_override) : descriptor.label);
   if (descriptor.key == "ResolutionPresent") label = std::format("Resolution at {}", view.SharedPresentName(*settings));
   if (descriptor.key == "ResolutionScalePresent") label = std::format("Custom scale at {}", view.SharedPresentName(*settings));
   // Plan 6 (D6): with Compare = Built-in, a look-group row shows its built-in value, read-only: edits never reach `settings`.
@@ -103,13 +168,15 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     return false;
   }
 
-  gui::PushID(label.c_str());
+  gui::PushID(descriptor.key.data());
   // The row's note, if it has one, drawn once the reset arrow is placed: RowIconButton centres the arrow on the
   // row's last item, and a note is a line of its own, so drawing it earlier took the arrow down a line on the five
   // rows that have one -- Pass count's frame-generation warning, Mask, UICorrection, UseD3D9Ex and VulkanNr.
   std::string deferred_note;
   bool deferred_note_wraps = false;
   const ImVec2 row_top = gui::GetCursorScreenPos();  // the row's own top: its tooltip is asked for over the whole row
+  // On the press frame the control can start blocking window hover: sample before submitting it as well.
+  const bool mouse_in_column = descriptor.kind != SettingKind::CHOICE && gui::IsWindowHovered();
   // ui-review.md §3 rule 1 / §2 finding 5: Game state after NR only matters once NR can run inside the
   // game's frame; while no DLSS placement can run this session, it is greyed and says why.
   // The Direct3D 9Ex row is greyed the same way where it does nothing (every game but a Direct3D 9 one).
@@ -138,7 +205,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   if (descriptor.key == "SkinStructure") {
     bool follows = (settings->skin_structure < 0.f);
     widgets::RowLabel("Skin follows Structure");
-    if (widgets::Switch("##SkinFollows", &follows, /*at_row_end=*/true)) {
+    if (widgets::Switch("##SkinFollows", &follows)) {
       settings->skin_structure = (follows ? SKIN_SAME_AS_STRUCTURE : settings->local_structure);
       changed = true;
     }
@@ -146,33 +213,26 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   if (descriptor.key == "DiffuseWhiteNits") {
     bool automatic = (settings->diffuse_white_nits <= 0.f);
     widgets::RowLabel("Automatic diffuse white");
-    if (widgets::Switch("##AutoDiffuseWhite", &automatic, /*at_row_end=*/true)) {
+    if (widgets::Switch("##AutoDiffuseWhite", &automatic)) {
       settings->diffuse_white_nits = (automatic ? 0.f : std::clamp(view.effective_diffuse_white_nits, 48.f, 500.f));
       changed = true;
     }
   }
-  const bool captioned = grouped && descriptor.kind != SettingKind::BOOL;
+  // A choice row draws its own caption inside ChoiceRow, so it needs no caption line of its own.
+  const bool captioned = descriptor.kind != SettingKind::BOOL && descriptor.kind != SettingKind::CHOICE;
+  const std::string caption = descriptor.key == "ResolutionMode" ? "Working resolution"
+                            : descriptor.key == "ResolutionScale" ? "Custom scale"
+                                                                  : label;
   if (captioned) {
-    const char* caption = descriptor.key == "ResolutionMode" ? "Working resolution" : descriptor.key == "ResolutionScale" ? "Custom scale" : label.c_str();
     // Two rows (Skin follows Structure, Automatic diffuse white) drew their own label and switch just above:
     // their control goes on the line under it, from the row's control column to its end slot, and still names
     // itself there -- the switch's words say "follows", the number below has to say what it is.
     // Nothing is disabled around that label: the only row that can be inherited is SkinStructure, whose own
     // switch already carried the disable when it was drawn above.
-    widgets::RowLabel(caption);
+    widgets::RowLabel(caption.c_str());
     label = "##value";
   }
-  std::string saved_note;  // the Resolution combo's tooltip, while the mode that runs is not the stored one
-  if (grouped && descriptor.key == "MaskBlendMode") {
-    static constexpr std::array<const char*, 4> modes{"0", "1", "2", "3"};
-    const std::array<std::string_view, 4> why{disabled_reason, disabled_reason, disabled_reason, disabled_reason};
-    const std::array<std::string_view, 4> tips{descriptor.tooltip, descriptor.tooltip, descriptor.tooltip, descriptor.tooltip};
-    const int clicked = widgets::Segmented("##MaskBlendMode", modes.data(), 4, static_cast<int>(settings->mask_blend_mode), why.data(), tips.data());
-    if (clicked >= 0) {
-      descriptor.set(*settings, clicked);
-      changed = true;
-    }
-  } else if (descriptor.key == "SkinStructure") {
+  if (descriptor.key == "SkinStructure") {
     const bool follows = settings->skin_structure < 0.f;
     gui::BeginDisabled(follows);
     float skin = (follows ? settings->local_structure : settings->skin_structure);
@@ -201,15 +261,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
     switch (descriptor.kind) {
       case SettingKind::BOOL: {
         bool value = (descriptor.get(*settings) != 0.0);
-        // The top row (Enable) carries the hotkey button and the language combo after its switch, so its switch
-        // sits right after the label instead of at the row's end; every other BOOL row puts it at the end.
-        const bool top_row = (descriptor.section == SettingSection::TOP);
-        if (top_row) {
-          widgets::InlineLabel(descriptor.label.data());
-        } else {
-          widgets::RowLabel(descriptor.label.data());
-        }
-        if (widgets::Switch(label.c_str(), &value, /*at_row_end=*/!top_row)) {
+        widgets::RowLabel(descriptor.label.data());
+        if (widgets::Switch(label.c_str(), &value)) {
           if (value && !descriptor.enable_warning.empty()) {
             state->enable_warning_key = descriptor.key;
           } else {
@@ -302,84 +355,60 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       case SettingKind::CHOICE: {
         int value = static_cast<int>(descriptor.get(*settings));
         if ((descriptor.flags & setting_flags::NETWORK_PRESET) != 0u && view.legacy_runtime) value = 1;
-        if (descriptor.choices.size() <= 3u) {
-          // User decision: at most three short choices draws as the RadioRow segmented control above,
-          // never a Combo (Model, Upsampling, Stabilise, NR mask, UI correction and the like).
-          std::array<const char*, 3> labels = {};
-          std::array<std::string_view, 3> why = {};
-          if (!disabled_reason.empty()) {
-            why.fill(disabled_reason);  // e.g. Game state after NR, greyed while no DLSS placement can run
+        const int count = static_cast<int>(descriptor.choices.size());
+        if (count > 0) {
+          std::vector<const char*> choices(static_cast<size_t>(count));
+          for (int index = 0; index < count; ++index) {
+            choices[static_cast<size_t>(index)] = descriptor.choices[static_cast<size_t>(index)].data();  // literals: NUL-terminated
           }
-          if (descriptor.key == "PresentWithFrameGen") why[static_cast<size_t>(Settings::FgPresent::BEFORE)] = view.before_fg_unavailable;
-          if (descriptor.key == "VulkanNr" && disabled_reason.empty()) {
+          // One reason per option; an option with one is stepped over, never landed on (the schema carries no
+          // per-option text, so the column's radio list says what each choice is and this says which can run).
+          std::vector<std::string_view> why(static_cast<size_t>(count), disabled_reason);
+          int shown = std::clamp(value, 0, count - 1);
+          std::string note;
+          if (descriptor.key == "ResolutionMode" || descriptor.key == "ResolutionAfterDlss" || descriptor.key == "ResolutionPresent") {
+            // The entries that cannot run now carry their reason, and the preview is the mode that runs.
+            // Split chain: a later stage group's Resolution greys the same entries (Match game reads the same DLSS render size),
+            // but its preview is its own stored mode, since Setup's highlight is pass 1's.
+            const bool setup_row = (descriptor.key == "ResolutionMode");
+            const size_t stored_index = std::min(static_cast<size_t>(value), static_cast<size_t>(count - 1));
+            const size_t highlighted = std::min(setup_row ? static_cast<size_t>(view.setup.resolution) : stored_index,
+                                               static_cast<size_t>(count - 1));
+            shown = static_cast<int>(highlighted);
+            const OptionState& stored = view.setup.resolution_options[stored_index];
+            if (highlighted != stored_index && (stored.why.empty() || stored.temporary)) {  // a fixed cause never clears: no promise
+              note = SavedNote(choices[stored_index]);
+            }
+            for (int index = 0; index < count; ++index) {
+              const OptionState& option = view.setup.resolution_options[static_cast<size_t>(index)];
+              if (!option.why.empty() && (setup_row || static_cast<size_t>(index) != highlighted)) {
+                why[static_cast<size_t>(index)] = option.why;
+              }
+            }
+          } else if (descriptor.key == "PresentWithFrameGen") {
+            why[static_cast<size_t>(Settings::FgPresent::BEFORE)] = view.before_fg_unavailable;
+          } else if (descriptor.key == "VulkanNr" && disabled_reason.empty()) {
             // Native greyed where it cannot run, with why; the highlight is the route that runs. Direct3D 12 too.
             why[static_cast<size_t>(VulkanNrMode::NATIVE)] = view.vulkan_native_unavailable;
             why[static_cast<size_t>(VulkanNrMode::DIRECT3D_12)] = view.vulkan_d3d12_unavailable;
             if (view.vulkan_nr_running) {
-              value = static_cast<int>(*view.vulkan_nr_running);
+              shown = static_cast<int>(*view.vulkan_nr_running);
             }
           }
-          std::array<std::string_view, 3> tips = {};
-          tips.fill(descriptor.tooltip);
-          for (size_t index = 0u; index < descriptor.choices.size(); ++index) {
-            labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
-          }
-          const std::span<const char* const> options(labels.data(), descriptor.choices.size());
-          const std::span<const std::string_view> why_span(why.data(), descriptor.choices.size());
-          const std::span<const std::string_view> tips_span(tips.data(), descriptor.choices.size());
-          // Shown in the order the schema declares its choices (FG_PRESENT_MODES); the stored values are the ones presets use.
-          if (const int clicked = widgets::Segmented(label.c_str(), options.data(), static_cast<int>(options.size()), value,
-                                                     why_span.data(), tips_span.data()); clicked >= 0) {
-            if (descriptor.key == "PresentWithFrameGen" && clicked == static_cast<int>(Settings::FgPresent::AFTER)) {
-              state->confirm_present_stage = false;
-              state->enable_warning_key = descriptor.key;
-            } else {
-              descriptor.set(*settings, static_cast<double>(clicked));
-              changed = true;
-            }
-          }
-        } else if (descriptor.key == "ResolutionMode" || descriptor.key == "ResolutionAfterDlss" || descriptor.key == "ResolutionPresent") {
-          // The entries that cannot run now are greyed, each with its reason, and the preview is the mode that runs.
-          // Split chain: a later stage group's Resolution greys the same entries (Match game reads the same DLSS render size); its preview is its
-          // stored mode, since Setup's highlight is pass 1's.
-          const bool setup_row = (descriptor.key == "ResolutionMode");
-          std::array<const char*, 6> labels = {};
-          for (size_t index = 0u; index < labels.size(); ++index) {
-            labels[index] = descriptor.choices[index].data();  // literals: NUL-terminated
-          }
-          const size_t stored_index = std::min(static_cast<size_t>(value), labels.size() - 1u);
-          const size_t shown = (setup_row ? static_cast<size_t>(view.setup.resolution) : stored_index);
-          const OptionState& stored = view.setup.resolution_options[stored_index];
-          if (shown != stored_index && (stored.why.empty() || stored.temporary)) {  // a fixed cause never clears: no promise
-            saved_note = SavedNote(labels[stored_index]);
-          }
-          // Fix round 1 (M5): Setup's row greys every entry that cannot run, its highlight included (as before the
-          // split chain); a later stage's row keeps its stored mode selectable, since its preview is that mode and
-          // not what runs.
-          std::array<std::string_view, 6> why = {};
-          for (size_t index = 0u; index < labels.size(); ++index) {
-            const OptionState& option = view.setup.resolution_options[index];
-            if (!option.why.empty() && (setup_row || index != shown)) why[index] = option.why;
-          }
-          if (const int picked = widgets::Combo("resolution", labels.data(), static_cast<int>(labels.size()),
-                                                static_cast<int>(shown), why.data()); picked >= 0) {
-            descriptor.set(*settings, static_cast<double>(picked));
-            if (setup_row) {
-              state->setup_settle.Clicked(SetupRow::RESOLUTION, static_cast<uint32_t>(picked));
-            }
-            changed = true;
-          }
-        } else {
-          std::vector<const char*> labels;
-          labels.reserve(descriptor.choices.size());
-          for (const std::string_view choice : descriptor.choices) labels.push_back(choice.data());  // literals
-          const std::vector<std::string_view> why(disabled_reason.empty() ? 0u : labels.size(), disabled_reason);
-          const int clicked = widgets::Segmented(label.c_str(), labels.data(), static_cast<int>(labels.size()), value,
-                                                  why.empty() ? nullptr : why.data());
-          if (clicked >= 0 && clicked != value) {
-            descriptor.set(*settings, static_cast<double>(clicked));
-            changed = true;
-          }
+          const std::string body = note.empty() ? std::string(descriptor.tooltip)
+                                                 : std::format("{}\n{}", descriptor.tooltip, note);
+          const auto blocked = read_only ? std::string_view("Built-in settings are read-only.") : disabled_reason;
+          changed |= DrawChoice(*state, descriptor.key, caption.c_str(), choices.data(), count, shown, why.data(), body, blocked,
+              [settings, state, row = &descriptor](int picked) {
+                if (row->key == "PresentWithFrameGen" && picked == static_cast<int>(Settings::FgPresent::AFTER)) {
+                  state->confirm_present_stage = false;
+                  state->enable_warning_key = row->key;
+                  return false;
+                }
+                row->set(*settings, static_cast<double>(picked));
+                if (row->key == "ResolutionMode") state->setup_settle.Clicked(SetupRow::RESOLUTION, static_cast<uint32_t>(picked));
+                return true;
+              });
         }
         break;
       }
@@ -394,31 +423,20 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       case SettingKind::KEY: break;  // the Enable hotkey is drawn beside Enable
     }
   }
-  // The row answers a hover over the whole of itself, never through gui::IsItemHovered: the row's own widgets
-  // draw their rail and their value after ImGui's own control (overlay_widgets.hpp:292/355), and a segment group
-  // its surfaces after its last InvisibleButton, so the last item by now is a label with no ID. Asking it left a
-  // slider answering only over its number and a 2-3 choice row only over its last segment. The end slot is the
-  // reset arrow's own cell, which carries its own tooltip and must not collect this one as well.
-  const float row_bottom = gui::GetCursorScreenPos().y - gui::GetStyle().ItemSpacing.y;
-  const float row_right = (std::min)(widgets::row_slot_x, gui::GetWindowPos().x + gui::GetWindowSize().x);
-  const bool over_row = gui::IsWindowHovered()
-                        && gui::IsMouseHoveringRect(ImVec2(gui::GetWindowPos().x, row_top.y), ImVec2(row_right, row_bottom));
-  // Unless a control inside the row already drew one: a segment group explains its own segments as it draws
-  // them (overlay_widgets.hpp's SegmentTip), and ImGui opens a window per BeginTooltip call, so asking here
-  // too showed the row's text twice, one bubble behind the other.
-  if (over_row && !widgets::TooltipDrawnThisFrame() && (!descriptor.tooltip.empty() || !disabled_reason.empty())) {
-    std::string tooltip;
-    if (!disabled_reason.empty()) {
-      tooltip = std::format("Greyed: {}", disabled_reason);
-      if (!descriptor.tooltip.empty()) {
-        tooltip += "\n";
-      }
+  if (descriptor.kind != SettingKind::CHOICE) {
+    // Test the full row: the last ImGui item may only be the slider value. Exclude the reset cell.
+    const float row_bottom = gui::GetCursorScreenPos().y - gui::GetStyle().ItemSpacing.y;
+    const float row_right = (std::min)(widgets::row_slot_x, gui::GetWindowPos().x + gui::GetWindowSize().x);
+    const bool over_row = (mouse_in_column || gui::IsWindowHovered())
+                          && gui::IsMouseHoveringRect(ImVec2(gui::GetWindowPos().x, row_top.y), ImVec2(row_right, row_bottom));
+    auto& frame = PendingDetail();
+    if (frame.Select(*state, descriptor.key, over_row)) {
+      frame.focus = {std::string(descriptor.key), gui::Visible(caption), std::string(descriptor.tooltip),
+                     std::string(disabled_reason), {}, 0, {}};
     }
-    tooltip += descriptor.tooltip;
-    if (!saved_note.empty()) {
-      tooltip += "\n" + saved_note;
+    if (over_row && !disabled_reason.empty()) {
+      widgets::MouseTooltip(gui::GetID("##row-tooltip"), "%s", std::format("Greyed: {}", disabled_reason).c_str());
     }
-    widgets::MouseTooltip(ImGui::GetID("##row-tooltip"), "%s", tooltip.c_str());
   }
   if (descriptor.key == "Mask") {
     deferred_note = view.mask_note;
@@ -446,18 +464,19 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   return changed && !read_only;
 }
 
-bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, OverlayState* state, bool explicit_dlss) {
-  // The name ImGui shows, then the id it keeps: the dialog stays open by the key, so two rows cannot collide.
+bool DrawEnableWarning(Settings* settings, OverlayState* state, bool explicit_dlss) {
+  if (state->enable_warning_key.empty()) return false;
+  const auto& descriptor = *FindSetting(state->enable_warning_key);
+  const bool frame_gen = descriptor.key == "PresentWithFrameGen";
+  // The visible title can be translated without changing the ImGui ID.
   const std::string title = std::format("{} - performance warning###enable_warning_{}", descriptor.label, descriptor.key);
-  bool open = (state->enable_warning_key == descriptor.key);
-  if (!open) return false;
-  const bool enable = widgets::ConfirmDialog(
-      title.c_str(), descriptor.enable_warning.data(),
-      descriptor.key == "PresentWithFrameGen" ? "Keep current mode" : "Keep disabled", "Enable anyway", &open, 112.f);
-  if (!open) state->enable_warning_key = {};  // answered either way: the row's request is spent
+  bool open = true;
+  const bool enable = widgets::ConfirmDialog(title.c_str(), descriptor.enable_warning,
+      frame_gen ? "Keep current mode" : "Keep disabled", "Enable anyway", open, 96.f);
+  if (!open) state->enable_warning_key = {};
   if (enable) {
     descriptor.set(*settings, 1.0);
-    if (descriptor.key == "PresentWithFrameGen" && state->confirm_present_stage) {
+    if (frame_gen && state->confirm_present_stage) {
       SetSourcePick(settings, SourcePick::PRESENT, explicit_dlss);
       state->setup_settle.Clicked(SetupRow::STAGE, static_cast<uint32_t>(SourcePick::PRESENT));
     }
@@ -465,38 +484,29 @@ bool DrawEnableWarning(const SettingDescriptor& descriptor, Settings* settings, 
   return enable;
 }
 
-// Split chain: pass n's Runs at row, as the NR stage row but a combo (four long choices): a choice that cannot run is greyed with why,
-// the preview is where the pass runs, and the stored pick is named while it runs elsewhere. Where every pass runs at one stage the whole row is greyed.
-// Not folded into DrawRow: its choices' states come from Setup's pass rows, not from the schema.
+// Later passes get their stage and availability from the resolved chain.
 bool DrawPassStageRow(const SettingDescriptor& descriptor, const OverlayView& view, Settings* settings, OverlayState* state) {
-  const size_t later = descriptor.pass - 2u;
-  const PassStageRow& row = view.setup.pass_stages[later];
-  const std::string label(descriptor.label);
-  gui::PushID(label.c_str());
-  gui::BeginDisabled(!view.setup.split_capable || view.setup.stopped);  // greyed with Setup's other rows once NR stopped
-  const auto stored = static_cast<size_t>(settings->passes[later].stage);
+  const auto& row = view.setup.pass_stages[descriptor.pass - 2u];
+  const auto stored = static_cast<size_t>(settings->passes[descriptor.pass - 2u].stage);
   const auto shown = static_cast<size_t>(row.shown);
   const std::array names{descriptor.choices[0].data(), NR_STAGE_NAMES[0], NR_STAGE_NAMES[1], view.SharedPresentName(*settings)};
-  bool changed = false;
-  widgets::RowLabel(label.c_str());
-  std::array<std::string_view, 4> why = {};
-  for (size_t index = 0u; index < row.options.size(); ++index) {
-    why[index] = row.options[index].why;
+  const std::string label(descriptor.label);
+  std::string tooltip(descriptor.tooltip);
+  if (shown != stored && (row.options[stored].why.empty() || row.options[stored].temporary)) {
+    tooltip += "\n" + SavedNote(names[stored]);
   }
-  if (const int picked = widgets::Combo("stage", names.data(), static_cast<int>(names.size()),
-                                        static_cast<int>(shown), why.data()); picked >= 0 && static_cast<size_t>(picked) != stored) {
-    descriptor.set(*settings, static_cast<double>(picked));
-    changed = true;
-  }
-  if (gui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-    std::string tooltip(descriptor.tooltip);
-    if (!view.setup.split_capable) {
-      tooltip = std::format("Greyed: {}\n{}", ONE_STAGE_REASON, descriptor.tooltip);
-    } else if (shown != stored && (row.options[stored].why.empty() || row.options[stored].temporary)) {  // a fixed cause never clears: no promise
-      tooltip += "\n" + SavedNote(names[stored]);
-    }
-    widgets::ItemTooltip("%s", tooltip.c_str());
-  }
+  std::array<std::string_view, 4> why{};
+  for (size_t i = 0; i < why.size(); ++i) why[i] = row.options[i].why;
+  const std::string_view blocked = !view.setup.split_capable ? ONE_STAGE_REASON : view.setup.stopped ? "NR has stopped" : "";
+  gui::PushID(descriptor.key.data());
+  bool changed = DrawChoice(*state, descriptor.key, label.c_str(), names.data(), static_cast<int>(names.size()),
+                            static_cast<int>(shown), why.data(), tooltip, blocked,
+      [settings, row = &descriptor, stored](int picked) {
+        if (static_cast<size_t>(picked) == stored) return false;
+        row->set(*settings, static_cast<double>(picked));
+        return true;
+      });
+  gui::BeginDisabled(!blocked.empty());
   changed |= DrawReset(descriptor, *settings, *state, view.setup);
   gui::EndDisabled();
   gui::PopID();
@@ -535,17 +545,80 @@ bool DrawMotionRow(const OverlayView& view, Settings* settings, OverlayState* st
     tip_note = std::format("{}\n{}", tips[static_cast<size_t>(shown)], tip_note);
     tips[static_cast<size_t>(shown)] = tip_note;
   }
-  // The row's label in its column, the segments across the control column, the reset arrow in the end slot:
-  // the same RowLabel every other row goes through, which is also what gives Segmented its width. A bare
-  // TextUnformatted left the row without a SetNextItemWidth, so the segments got CalcItemWidth's default.
-  widgets::RowLabel("Motion vectors");
-  bool changed = false;
-  if (const int clicked = widgets::Segmented("##MotionVectors", OPTIONS.data(), 4, shown, why.data(), tips.data()); clicked >= 0) {
-    SetMotionPick(settings, static_cast<MotionPick>(clicked));
-    state->setup_settle.Clicked(SetupRow::MOTION, static_cast<uint32_t>(clicked));
-    changed = true;
-  }
+  bool changed = DrawChoice(*state, "MotionVectors", "Motion vectors", OPTIONS.data(), static_cast<int>(OPTIONS.size()),
+                            shown, why.data(), tips[static_cast<size_t>(shown)], {},
+      [settings, state](int picked) {
+        SetMotionPick(settings, static_cast<MotionPick>(picked));
+        state->setup_settle.Clicked(SetupRow::MOTION, static_cast<uint32_t>(picked));
+        return true;
+      });
   changed |= DrawReset(*FindSetting("MotionVectors"), *settings, *state, view.setup);
+  gui::PopID();
+  return changed;
+}
+
+// The NR stage row -- Pre-DLSS / After DLSS / Before Framegen / On Present -- as one ordinary choice row.
+// It replaced the pipeline diagram (2026-11-23): the six drawn nodes said nothing these four names do not,
+// and the diagram took a third of the card. The last two names share SourcePick::PRESENT, so Present while
+// frame generation is on goes through the same warning dialog the diagram opened, because it changes what
+// the generated frames see.
+bool DrawStageRow(const OverlayView& view, Settings* settings, OverlayState* state) {
+  static constexpr std::array<const char*, 4> TIPS = {
+      "Run pass 1 on the game's render-resolution input before DLSS upscales it.",
+      "Run pass 1 on the upscaled image before the game's remaining post-processing.",
+      "Run Present passes on the finished real frame before Streamline frame generation.",
+      "Run Present passes at ReShade's Present placement. With downstream ReShade this includes generated frames."};
+  gui::PushID("Source");
+  bool changed = false;
+  const bool before_framegen = view.frame_generation_active && settings->fg_present == Settings::FgPresent::BEFORE;
+  const SourcePick preferred = SourcePickOf(*settings, view.dlss_explicit);
+  const size_t shown = preferred == SourcePick::PRESENT ? (before_framegen ? 2u : 3u) : static_cast<size_t>(preferred);
+  std::array<std::string_view, 4> why = {};
+  for (size_t index = 0u; index < why.size(); ++index) {
+    const auto source = static_cast<SourcePick>((std::min)(index, size_t{2}));
+    std::string_view reason = view.setup.stage_options[static_cast<size_t>(source)].why;
+    // Present's "turn Present with frame generation on" note explains a switch, not this row's own choice.
+    if (source == SourcePick::PRESENT && reason == FG_PRESENT_OFF_REASON) reason = {};
+    // Before Framegen has no setting of its own: what blocks it is the game's Streamline integration.
+    if (index == 2u && !view.before_fg_unavailable.empty()) reason = view.before_fg_unavailable;
+    why[index] = reason;
+  }
+  // Owned, because the stored-preference note is appended to the tip and a view into the array would dangle.
+  std::array<std::string, 4> tip_text = {};
+  std::array<std::string_view, 4> tips = {};
+  for (size_t index = 0u; index < tip_text.size(); ++index) {
+    tip_text[index] = (index == 0u && view.setup.before_upscaling_on_rr) ? "NR works on Ray Reconstruction's input." : TIPS[index];
+  }
+  // What runs differs from what is stored (a temporary fallback): say what is stored, as the Motion row does.
+  const OptionState& stored = view.setup.stage_options[static_cast<size_t>(preferred)];
+  if (view.setup.stage != preferred && (stored.why.empty() || stored.temporary)) {
+    tip_text[shown] += std::format("\n{}", SavedNote(StageLabel(preferred, before_framegen)));
+  }
+  for (size_t index = 0u; index < tips.size(); ++index) {
+    tips[index] = tip_text[index];
+  }
+  changed |= DrawChoice(*state, "Source", "NR stage", NR_STAGE_NAMES.data(), static_cast<int>(NR_STAGE_NAMES.size()),
+                        static_cast<int>(shown), why.data(), tips[shown], view.setup.stopped ? "NR has stopped" : "",
+      [&view, settings, state](int picked) {
+        const auto source = static_cast<SourcePick>((std::min)(picked, 2));
+        if (picked == 3 && view.frame_generation_active && settings->fg_present != Settings::FgPresent::AFTER) {
+          state->confirm_present_stage = true;
+          state->enable_warning_key = "PresentWithFrameGen";
+          return false;
+        }
+        SetSourcePick(settings, source, view.dlss_explicit);
+        if (picked == 2) settings->fg_present = Settings::FgPresent::BEFORE;
+        state->setup_settle.Clicked(SetupRow::STAGE, static_cast<uint32_t>(source));
+        return true;
+      });
+  if (!IsDefault(*settings, *FindSetting("Source")) || !IsDefault(*settings, *FindSetting("PreUpscale"))) {
+    if (widgets::ResetButton("Source", view.dlss_explicit ? "Present on Vulkan" : "After DLSS")) {
+      const SourcePick pick = view.dlss_explicit ? SourcePick::PRESENT : SourcePick::AFTER_DLSS;
+      SetSourcePick(settings, pick, view.dlss_explicit);
+      state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(pick), view.setup);
+      changed = true;
+    }
+  }
   gui::PopID();
   return changed;
 }
@@ -580,22 +653,17 @@ void DrawWorkingSize(const OverlayView& view, const Settings& settings) {
   }
   const bool pending = !size.Empty() && !view.first_stage_canvas.Empty() && size != view.first_stage_canvas;
   widgets::NextGap(style::BlockGap());
-  gui::TextUnformatted(pending ? "Target NR size" : "NR working size");
   const std::string dimensions = size.Empty() ? gui::Display("Unknown") : std::format("{} × {}", size.width, size.height);
-  const float remaining = style::SnapDown(gui::GetContentRegionAvail().x) - style::SnapUp(gui::CalcTextSize(dimensions.c_str()).x);
-  const float x = gui::GetCursorPosX() + remaining;
-  if (remaining >= gui::CalcTextSize(pending ? "Target NR size" : "NR working size").x + gui::GetStyle().ItemSpacing.x) {
-    gui::SameLine(); gui::SetCursorPosX(x);
-  }
-  gui::TextUnformatted(dimensions.c_str());
+  const float right = gui::GetCursorScreenPos().x + gui::GetContentRegionAvail().x - style::RowGap() * 1.5f;
+  widgets::Readout(pending ? "Target NR size" : "NR working size", dimensions.c_str(), right);
   if (!view.output_size.Empty()) {
-    const std::string output = std::format("{}  {} × {}", gui::Display("Output"), view.output_size.width, view.output_size.height);
-    widgets::NextGap(style::LabelGap());
-    widgets::SecondaryText(output.c_str());
+    const std::string output = std::format("{} × {}", view.output_size.width, view.output_size.height);
+    widgets::NextGap(style::RowGap());
+    widgets::Readout("Output", output.c_str(), right);
   }
 }
 
-// The DLSS / Reflex card's sub-captions: the first row of each group names the group. The rows are drawn in
+// The DLSS / Reflex tab's sub-captions: the first row of each group names the group. The rows are drawn in
 // schema order, so these keys are where a group begins.
 constexpr const char* DlssReflexGroup(std::string_view key) {
   if (key == "DLSSPresetDLAA") return "DLSS presets";
@@ -608,130 +676,90 @@ constexpr const char* DlssReflexGroup(std::string_view key) {
   return nullptr;
 }
 
-// The live DLSS, frame-generation and Reflex overrides: the switches players come to the panel for, not the
-// diagnostics and tuning that stay in Advanced.
-void DrawDlssReflexSection(const OverlayView& view, Settings* settings, OverlayState* state, bool& changed) {
-  const bool section_changed = SectionChanged(*settings, SettingSection::DLSS_REFLEX);
-  widgets::Panel("##dlss_body", [&] {
-    bool reset = false;
-    const bool open = widgets::SectionHeader("DLSS / Reflex", "Presets · Frame generation · Reflex", "Reset",
-                                             section_changed && !state->defaults_view, &reset);
-    if (reset) {
-      ResetSection(settings, SettingSection::DLSS_REFLEX);
-      changed = true;
+bool DrawDlssReflexTab(const OverlayView& view, Settings* settings, OverlayState* state) {
+  bool changed = false;
+  const char* group = nullptr;
+  for (const SettingDescriptor& descriptor : SettingsSchema()) {
+    if (descriptor.section != SettingSection::DLSS_REFLEX || descriptor.kind == SettingKind::KEY) continue;
+    if (const char* const next = DlssReflexGroup(descriptor.key); next != nullptr && next != group) {
+      if (group != nullptr) widgets::NextGap(style::BlockGap());
+      widgets::GroupHeading(next);
+      group = next;
     }
-    if (!open) return;
+    const char* label = nullptr;
+    if (descriptor.key == "XmxGenerator") label = "Intel XeFG generator";
+    if (descriptor.key == "ReflexMode") label = "Mode";
+    if (descriptor.key == "ReflexFpsCap") label = "FPS cap";
+    changed |= DrawRow(descriptor, view, settings, state, label);
+  }
+  // What actually runs, gathered in one place at the bottom: a row says what was asked for, these say what the
+  // runtime is doing with it.
+  const std::array<const std::string*, 8> live = {&view.dlss_live_line,     &view.rr_live_line,     &view.fg_live_line,
+                                                  &view.fg_multiplier_line, &view.dynamic_mfg_line, &view.frame_rate_line,
+                                                  &view.reflex_live_line,   &view.xmx_live_line};
+  if (std::ranges::any_of(live, [](const std::string* line) { return !line->empty(); })) {
     widgets::NextGap(style::BlockGap());
-    const char* group = nullptr;
-    for (const SettingDescriptor& descriptor : SettingsSchema()) {
-      if (descriptor.section != SettingSection::DLSS_REFLEX || descriptor.kind == SettingKind::KEY) continue;
-      if (const char* const next = DlssReflexGroup(descriptor.key); next != nullptr && next != group) {
-        if (group != nullptr) widgets::NextGap(style::BlockGap());
-        widgets::GroupHeading(next);
-        group = next;
-      }
-      changed |= DrawRow(descriptor, view, settings, state, true);
+    widgets::GroupHeading("Currently");
+    for (const std::string* line : live) {
+      if (!line->empty()) widgets::SecondaryWrapped(line->c_str());
     }
-    // What actually runs, gathered in one place at the bottom: a row says what was asked for, these say what the
-    // runtime is doing with it.
-    const std::array<const std::string*, 8> live = {&view.dlss_live_line,     &view.rr_live_line,     &view.fg_live_line,
-                                                    &view.fg_multiplier_line, &view.dynamic_mfg_line, &view.frame_rate_line,
-                                                    &view.reflex_live_line,   &view.xmx_live_line};
-    if (std::ranges::any_of(live, [](const std::string* line) { return !line->empty(); })) {
-      widgets::NextGap(style::BlockGap());
-      widgets::GroupHeading("Currently");
-      for (const std::string* line : live) {
-        if (!line->empty()) widgets::SecondaryWrapped(line->c_str());
-      }
-    }
-  });
+  }
+  return changed;
 }
 
 bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
   bool changed = false;
-  // Setup's rows sit in a card of their own, as Look's do (2026-11-06): straight on the panel background they
-  // read as part of whatever was above them, while Look's card edge said where its own rows began.
-  widgets::Panel("##setup_body", [&] {
-    // Frame inputs and Passes in the left half, NR processing in the right: upstream's own split, so the two
-    // halves of Setup can be read side by side instead of as one long column.
-    widgets::PairedGroups("##setup_groups", [&] {
-      widgets::GroupHeading("Frame inputs");
-      changed |= DrawMotionRow(view, settings, state);
-      changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state, true);
-      widgets::NextGap(style::BlockGap());
-      widgets::GroupHeading("Passes");
-      changed |= DrawRow(*FindSetting("PassCount"), view, settings, state, true);
-    }, [&] {
-      widgets::GroupHeading("NR processing", "Pass 1 defaults");
-      changed |= DrawRow(*FindSetting("Preset"), view, settings, state, true);
-      changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state, true);
-      changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state, true);
-      // Anamorphic (2026-10-29): Custom's two axes apart, under the mode they belong to.
-      if (settings->resolution_mode == ResolutionMode::CUSTOM) {
-        changed |= DrawRow(*FindSetting("ResolutionAsymmetric"), view, settings, state, true);
-        if (settings->resolution_asymmetric) changed |= DrawRow(*FindSetting("ResolutionScaleY"), view, settings, state, true);
-      }
-      DrawWorkingSize(view, *settings);
-      changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state, true);
-      // Edge-aware's base band gain, right below the choice it depends on.
-      changed |= DrawRow(*FindSetting("GuidedBaseGain"), view, settings, state, true);
-      // The rows stay at every Resolution mode: edge scaling acts on whichever grid the axes land on.
-      changed |= DrawRow(*FindSetting("Foveation"), view, settings, state, true);
-      if (settings->foveation) {
-        changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state, true);
-        changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state, true);
-        changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state, true);
-        changed |= DrawRow(*FindSetting("FoveationFalloffY"), view, settings, state, true);
-        changed |= DrawRow(*FindSetting("FoveationEdgeX"), view, settings, state, true);
-        changed |= DrawRow(*FindSetting("FoveationEdgeY"), view, settings, state, true);
-      }
-    });
-  });
+  widgets::GroupHeading("Frame inputs");
+  changed |= DrawMotionRow(view, settings, state);
+  changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state);
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Passes");
+  changed |= DrawRow(*FindSetting("PassCount"), view, settings, state);
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("NR processing", "Pass 1 defaults");
+  changed |= DrawRow(*FindSetting("Preset"), view, settings, state);
+  changed |= DrawRow(*FindSetting("ResolutionMode"), view, settings, state);
+  changed |= DrawRow(*FindSetting("ResolutionScale"), view, settings, state);
+  // Anamorphic (2026-10-29): Custom's two axes apart, under the mode they belong to.
+  if (settings->resolution_mode == ResolutionMode::CUSTOM) {
+    changed |= DrawRow(*FindSetting("ResolutionAsymmetric"), view, settings, state);
+    if (settings->resolution_asymmetric) changed |= DrawRow(*FindSetting("ResolutionScaleY"), view, settings, state);
+  }
+  changed |= DrawRow(*FindSetting("Upsampling"), view, settings, state);
+  // Edge-aware's base band gain, right below the choice it depends on.
+  changed |= DrawRow(*FindSetting("GuidedBaseGain"), view, settings, state);
+  // The rows stay at every Resolution mode: edge scaling acts on whichever grid the axes land on.
+  changed |= DrawRow(*FindSetting("Foveation"), view, settings, state);
+  if (settings->foveation) {
+    changed |= DrawRow(*FindSetting("FoveationWidth"), view, settings, state);
+    changed |= DrawRow(*FindSetting("FoveationHeight"), view, settings, state);
+    changed |= DrawRow(*FindSetting("FoveationFalloffX"), view, settings, state);
+    changed |= DrawRow(*FindSetting("FoveationFalloffY"), view, settings, state);
+    changed |= DrawRow(*FindSetting("FoveationEdgeX"), view, settings, state);
+    changed |= DrawRow(*FindSetting("FoveationEdgeY"), view, settings, state);
+  }
   return changed;
 }
 
 bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
-  static constexpr std::array<const char*, 2> options{"Mine", "Built-in"};
-  static constexpr std::array<std::string_view, 2> why{}, tips{"", "The built-in look, read-only; your own settings are kept."};
+  static constexpr const char* options[] = {"Mine", "Built-in"};
   bool changed = false;
-  const auto row = [&](const char* key, bool grouped = true) { changed |= DrawRow(*FindSetting(key), view, settings, state, grouped); };
-  // The Look rows live in a card of their own, title included (2026-11-06): a bare caption on the panel background
-  // read as naming the card above, and a section that ends on a bare row leaves the next collapsible header at a
-  // different offset than one that ends on a card. Compare joined them inside it: the section's one row left outside.
-  widgets::Panel("##look_body", [&] {
-    if (widgets::SectionCaption("Look", "Reset", SectionChanged(*settings, SettingSection::LOOK) && !state->defaults_view)) {
-      ResetSection(settings, SettingSection::LOOK);
-      changed = true;
-    }
-    // Compare draws through the same row layout as everything else: its two segments take the control column and
-    // the reset slot stays empty (there is no reset for a view switch).
-    widgets::RowLabel("Compare");
-    {
-      gui::PushID("Compare");
-      if (const int pick = widgets::Segmented("##Compare", options.data(), 2, state->defaults_view ? 1 : 0, why.data(), tips.data());
-          pick >= 0) {
-        state->defaults_view = pick == 1;
-      }
-      gui::PopID();
-    }
-    widgets::NextGap(style::BlockGap());
-    // Image in the left half, Characters in the right, as upstream draws them: the two are read against each
-    // other, and one long column of nine rows hides that they are two groups.
-    widgets::PairedGroups("##look_groups", [&] {
-      widgets::GroupHeading("Image", "Pass 1");
-      row("Style");
-      row("Intensity");
-      row("LocalStructure");
-      row("LocalTone");
-    }, [&] {
-      widgets::GroupHeading("Characters");
-      row("AutoMask");
-      row("SkinStructure");
-      row("KeepFaces");
-      row("FaceProtection");
-      row("LightingScale");
-    });
-  });
+  DrawChoice(*state, "Compare", "Compare", options, 2, state->defaults_view ? 1 : 0, nullptr,
+             "Show your own settings, or the built-in look read-only.", {},
+      [state](int picked) {
+        state->defaults_view = picked == 1;
+        return false;
+      });
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Image", "Pass 1");
+  for (const char* key : {"Style", "Intensity", "LocalStructure", "LocalTone"}) {
+    changed |= DrawRow(*FindSetting(key), view, settings, state);
+  }
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Characters");
+  for (const char* key : {"AutoMask", "SkinStructure", "KeepFaces", "FaceProtection", "LightingScale"}) {
+    changed |= DrawRow(*FindSetting(key), view, settings, state);
+  }
   return changed;
 }
 
@@ -766,10 +794,10 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
   const auto fact = [](const char* key, const std::string& value) {
     gui::TableNextRow();
     gui::TableSetColumnIndex(0); widgets::SecondaryText(gui::Display(key).c_str());
-    gui::TableSetColumnIndex(1); widgets::Wrapped("%s", value.c_str());
+    gui::TableSetColumnIndex(1); gui::TextWrapped("%s", value.c_str());
   };
   widgets::Table("##runtime_facts", 2, ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_SizingStretchProp,
-                 {0.f, style::LabelGap()}, [&] {
+                 {0.f, style::RowGap()}, [&] {
     const float label_width = std::max({gui::CalcTextSize("Backend").x, gui::CalcTextSize("Display output").x, gui::CalcTextSize("Frame generation").x});
     gui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthFixed, style::SnapUp(label_width) + style::BlockGap());
     gui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
@@ -790,18 +818,12 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
   });
 
   widgets::NextGap(style::BlockGap());
-  const bool compact = gui::GetContentRegionAvail().x < style::Units(112);
   bool any = false;
-  widgets::Table("##executed_passes", compact ? 2 : 5,
+  widgets::Table("##executed_passes", 2,
                  ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings,
-                 {style::RowGap(), style::LabelGap()}, [&] {
-    const auto column = [](const char* label, float weight) { gui::TableSetupColumn(gui::Display(label).c_str(), ImGuiTableColumnFlags_WidthStretch, weight); };
-    column("Pass", 0.5f);
-    if (compact) column("NR evaluation", 3.f);
-    else {
-      column("Ran at", 1.15f); column("Network / style", 1.3f); column("NR size", 1.f); column("Motion used", 1.25f);
-    }
-    if (!compact) gui::TableHeadersRow();
+                 {style::RowGap(), style::RowGap()}, [&] {
+    gui::TableSetupColumn("##pass", ImGuiTableColumnFlags_WidthStretch, 0.5f);
+    gui::TableSetupColumn("##evaluation", ImGuiTableColumnFlags_WidthStretch, 3.f);
     for (size_t i = 0; i < view.stage_runs.size(); ++i) {
       const auto& group = view.stage_runs[i];
       for (uint32_t n = 0; n < group.count && group.first + n < view.pass_models.size(); ++n) {
@@ -824,12 +846,10 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
         }
         gui::TableNextRow();
         gui::TableNextColumn(); gui::Text("P%u", pass + 1u);
-        const auto record = [compact](const char* label, const std::string& value) {
-          if (!compact) gui::TableNextColumn();
-          if (compact) widgets::Wrapped("%s  %s", gui::Display(label).c_str(), value.c_str());
-          else widgets::Wrapped("%s", value.c_str());
+        gui::TableNextColumn();
+        const auto record = [](const char* label, const std::string& value) {
+          gui::TextWrapped("%s  %s", gui::Display(label).c_str(), value.c_str());
         };
-        if (compact) gui::TableNextColumn();
         record("Ran at", gui::Display(NR_STAGE_NAMES[i]));
         record("Network / style", name);
         record("NR size", group.resolution.Empty() ? gui::Display("Unknown") : std::format("{} × {}", group.resolution.width, group.resolution.height));
@@ -839,12 +859,12 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
     }
   });
   if (!any) widgets::SecondaryText("No pass recorded.");
-  if (!view.details_note.empty()) widgets::Wrapped("%s", view.details_note.c_str());
+  if (!view.details_note.empty()) gui::TextWrapped("%s", view.details_note.c_str());
   for (const auto& group : view.stage_runs) {
     if (group.skip.empty() || group.planned <= group.count) continue;
     const uint32_t first = group.first + group.count + 1u, last = group.first + group.planned;
     const std::string passes = first == last ? std::format("P{}", first) : std::format("P{}-{}", first, last);
-    widgets::Wrapped("%s: %s", passes.c_str(), gui::Display(group.skip).c_str());
+    gui::TextWrapped("%s: %s", passes.c_str(), gui::Display(group.skip).c_str());
   }
   const auto now = std::chrono::steady_clock::now();
   const double elapsed = std::chrono::duration<double>(now - state.activity_since).count();
@@ -866,13 +886,13 @@ void DrawDetails(const OverlayView& view, const Settings& settings, OverlayState
       const auto& delta = state.activity_delta;
       const auto line = std::format("{} {:.1f} s: {} {} / {} {} / {} {}", gui::Display("FG activity over"), state.activity_seconds,
           delta.real, gui::Display("real frames"), delta.reshade, gui::Display("ReShade Presents"), delta.passes, gui::Display("Present-pass runs"));
-      widgets::Wrapped("%s", line.c_str());
+      gui::TextWrapped("%s", line.c_str());
     }
   } else {
     state.activity_since = {};
     state.activity_seconds = 0.0;
   }
-  widgets::Wrapped("%s", VramLine(view).c_str());
+  gui::TextWrapped("%s", VramLine(view).c_str());
 }
 }  // namespace
 
@@ -888,148 +908,227 @@ void OverlayView::AddStartupLocks(const Settings& settings, bool vulkan, bool d3
   }
 }
 
-static bool DrawOverlayContent(const OverlayView& view, Settings* settings, OverlayState* state) {
-  state->drag.pass_slider = false;  // the rows OR into it
-  state->language_changed = false;
-  const gui::LanguageScope language_scope(settings->language);
+// ---------------------------------------------------------------------------------------------------------
+// The panel (2026-11-23). One window with its own chrome: a title row, capsule tabs, a column of settings and a
+// column that explains whatever the pointer is on.
+// The tabs are the panel's jobs, not new settings -- every row is still drawn by DrawRow from the schema, so a
+// row on this tab and a row on that one cannot drift apart, and no setting exists here that is not in ReShade.ini.
+// ---------------------------------------------------------------------------------------------------------
+namespace panel {
+enum Tab : int { GENERAL, SETUP, LOOK, LAYERS, FIXES, DLSS_REFLEX, ADVANCED, COUNT };
+inline constexpr std::array<const char*, COUNT> kNames{"General", "Setup", "Look", "Layers", "Fixes", "DLSS / Reflex", "Advanced"};
+// What the detail column says before the pointer rests on a row.
+inline constexpr std::array<const char*, COUNT> kBlurb{
+    "Turns NR on, sets the two hotkeys and the language, and says what the panel is doing right now.",
+    "Where the passes run and what size they work at, with the DLSS stage choices underneath.",
+    "Style, intensity, local structure, tone and settings for additional passes.",
+    "Result shaping, NR change stabilisation, and mask and HUD settings.",
+    "Colour, exposure and motion repair.",
+    "DLSS and Reflex overrides, frame generation, and their current runtime status.",
+    "Routing, memory, logging, and recorded passes."};
+}  // namespace panel
+
+// One schema row group: the rows every tab body draws, in schema order, grouped so the label column is shared.
+bool DrawRows(const OverlayView& view, Settings* settings, OverlayState* state, std::initializer_list<std::string_view> keys) {
   bool changed = false;
+  for (const auto key : keys) changed |= DrawRow(*FindSetting(key), view, settings, state);
+  return changed;
+}
 
-  const float toolbar_left = gui::GetCursorPosX();
-  const float toolbar_right = toolbar_left + style::SnapDown(gui::GetContentRegionAvail().x);
-  changed |= DrawRow(*FindSetting(ENABLED_KEY), view, settings, state);
-  gui::SameLine();
-  gui::SetCursorPosX(toolbar_left + style::SnapUp(gui::GetCursorPosX() - toolbar_left));
+// A virtual-key code as the name the keyboard gave it, so both hotkeys and the footer print the same words.
+std::string KeyName(uint32_t key) {
+  if (key >= VK_F1 && key <= VK_F24) return std::format("F{}", key - VK_F1 + 1u);
+  if (key == 0u) return {};
+  std::array<wchar_t, 64> key_name = {};
+  const auto scan_code = static_cast<LONG>(MapVirtualKeyW(key, MAPVK_VK_TO_VSC) << 16u);
+  const int length = GetKeyNameTextW(scan_code, key_name.data(), static_cast<int>(key_name.size()));
+  if (length <= 0) return std::format("key {:#04x}", key);
+  const int bytes = WideCharToMultiByte(CP_UTF8, 0, key_name.data(), length, nullptr, 0, nullptr, nullptr);
+  std::string utf8(static_cast<size_t>(bytes), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, key_name.data(), length, utf8.data(), bytes, nullptr, nullptr);
+  return utf8;
+}
 
-  // 1.1.0 (a player's report): Esc also closes ReShade's overlay, so it cannot be the way to clear the hotkey. A right-click on the button clears it
-  // (capturing or not); Esc only cancels a capture. A capture whose overlay closed ends by itself (ExpireKeyCapture), so the hotkey never stays off.
-  if (state->capturing_key) {
-    state->capture_seen = std::chrono::steady_clock::now();
-    const widgets::KeyCaptureHit hit = widgets::KeyCaptureButton("", /*capturing=*/true);
+// The key capture button and its label, shared by the two hotkeys. Returns true when the captured key changed.
+bool DrawHotkeyButton(const OverlayView& view, const char* label, const char* tooltip, uint32_t* key, bool* capturing, OverlayState* state) {
+  bool changed = false;
+  widgets::RowLabel(label, tooltip);
+  if (*capturing) {
+    state->capture_seen = std::chrono::steady_clock::now();  // a capture the tab stops drawing ends on its own
+    const widgets::KeyCaptureHit hit = widgets::KeyCaptureButton(label, "", /*capturing=*/true);
     if (hit.right_clicked) {
-      settings->enable_key = 0u;
-      state->capturing_key = false;
+      *key = 0u;
+      *capturing = false;
       changed = true;
     } else if (view.last_key_pressed != 0u) {
       if (view.last_key_pressed != VK_ESCAPE) {
-        settings->enable_key = view.last_key_pressed;
+        *key = view.last_key_pressed;
         changed = true;
+        state->key_captured_this_frame = true;  // this frame's press must not also trigger the key it just bound
       }
-      state->capturing_key = false;
-      state->key_captured_this_frame = true;
+      *capturing = false;
     }
-  } else {
-    std::string key_label = "Hotkey: none";
-    if (settings->enable_key >= VK_F1 && settings->enable_key <= VK_F24) {
-      key_label = std::format("Hotkey: F{}", settings->enable_key - VK_F1 + 1u);
-    } else if (settings->enable_key != 0u) {
-      std::array<wchar_t, 64> key_name = {};
-      const auto scan_code = static_cast<LONG>(MapVirtualKeyW(settings->enable_key, MAPVK_VK_TO_VSC) << 16u);
-      const int length = GetKeyNameTextW(scan_code, key_name.data(), static_cast<int>(key_name.size()));
-      if (length > 0) {
-        const int bytes = WideCharToMultiByte(CP_UTF8, 0, key_name.data(), length, nullptr, 0, nullptr, nullptr);
-        std::string utf8(static_cast<size_t>(bytes), '\0');
-        WideCharToMultiByte(CP_UTF8, 0, key_name.data(), length, utf8.data(), bytes, nullptr, nullptr);
-        key_label = std::format("Hotkey: {}", utf8);
-      } else {
-        key_label = std::format("Hotkey: key {:#04x}", settings->enable_key);
-      }
-    }
-    const widgets::KeyCaptureHit hit = widgets::KeyCaptureButton(key_label.c_str(), /*capturing=*/false);
-    if (hit.clicked) {
-      state->capturing_key = true;
-      state->capture_seen = std::chrono::steady_clock::now();
-    } else if (hit.right_clicked && settings->enable_key != 0u) {
-      settings->enable_key = 0u;
-      changed = true;
-    }
-    if (hit.hovered) {
-      widgets::ItemTooltip("Click, then press a key. Right-click clears it.");
-    }
+    return changed;
+  }
+  const std::string name = KeyName(*key);
+  const std::string key_label = name.empty() ? std::string("Hotkey: none") : "Hotkey: " + name;
+  const widgets::KeyCaptureHit hit = widgets::KeyCaptureButton(label, key_label.c_str(), /*capturing=*/false);
+  if (hit.clicked) {
+    *capturing = true;
+    state->capture_seen = std::chrono::steady_clock::now();
+  } else if (hit.right_clicked && *key != 0u) {
+    *key = 0u;
+    changed = true;
+  }
+  widgets::ItemTooltip("Click, then press a key. Right-click clears it.");
+  return changed;
+}
+
+// The title row: the name, what it is doing, and the cross. Dragging it moves the window by the mouse delta,
+// which DrawPanelHeader reads back into the position the window is placed at next frame.
+bool DrawPanelHeader(const OverlayView& view, OverlayState* state) {
+  const float font = gui::GetFontSize();
+  const float height = style::SnapUp(font * 1.9f);
+  const float cross = style::SnapUp(font * 1.75f);
+  const ImVec2 at = gui::GetCursorScreenPos();
+  const float width = style::SnapDown(gui::GetContentRegionAvail().x);
+  gui::SetCursorScreenPos(at);
+  ImGui::InvisibleButton("##panel_drag", ImVec2((std::max)(1.f, width - cross - style::RowGap()), height));
+  if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+    const ImVec2 delta = gui::GetIO().MouseDelta;
+    state->panel_x += delta.x;
+    state->panel_y += delta.y;
+  }
+  // The name, then its state in the panel's quiet ink.
+  gui::SetCursorScreenPos(ImVec2(at.x, at.y + (height - font * style::tokens::kHeadingScale) * 0.5f));
+  widgets::Heading("GITC Uplift");
+  gui::SameLine(0.f, style::BlockGap());
+  const char* state_text = view.card.working ? "Live" : "Idle";
+  const ImVec4 state_color = view.card.working ? style::tokens::kAccent : style::tokens::kTextTertiary;
+  {
+    style::StyleScope scope;
+    scope.Color(ImGuiCol_Text, state_color);
+    gui::SetCursorScreenPos(ImVec2(gui::GetCursorScreenPos().x, at.y + (height - font) * 0.5f));
+    gui::TextUnformatted(state_text);
+  }
+  gui::SetCursorScreenPos(ImVec2(at.x + width - cross, at.y + (height - cross) * 0.5f));
+  const bool close = widgets::CloseButton("###panel_close", cross);
+  widgets::NextGap(style::BlockGap());
+  return close;
+}
+
+// The columns carry NoScrollWithMouse so a wheel notch is handled once, by the column under the pointer.
+void ScrollColumnWithWheel() {
+  const ImGuiIO& io = gui::GetIO();
+  if (io.MouseWheel == 0.f || io.WantTextInput || !gui::IsWindowHovered()) return;
+  const float range = gui::GetScrollMaxY();
+  if (range <= 0.f) return;
+  const float step = gui::GetTextLineHeight() * 3.f;  // a notch and a half rows: RowHeight is two
+  gui::SetScrollY(std::clamp(gui::GetScrollY() - io.MouseWheel * step, 0.f, range));
+}
+
+// The tab bar owns reset commands so the content can start directly with its first control or group.
+std::span<const SettingSection> PanelSections(int tab) {
+  static constexpr SettingSection setup[] = {SettingSection::PLACEMENT};
+  static constexpr SettingSection look[] = {SettingSection::LOOK};
+  static constexpr SettingSection layers[] = {SettingSection::RESULT, SettingSection::LIMITS, SettingSection::MASK};
+  static constexpr SettingSection fixes[] = {SettingSection::FIXES_COLOR, SettingSection::FIXES_GUIDES};
+  static constexpr SettingSection dlss[] = {SettingSection::DLSS_REFLEX};
+  static constexpr SettingSection advanced[] = {SettingSection::ADVANCED};
+  switch (tab) {
+    case panel::SETUP: return setup;
+    case panel::LOOK: return look;
+    case panel::LAYERS: return layers;
+    case panel::FIXES: return fixes;
+    case panel::DLSS_REFLEX: return dlss;
+    case panel::ADVANCED: return advanced;
+    default: return {};
+  }
+}
+
+bool DrawPanelTabs(const OverlayView& view, Settings* settings, OverlayState* state) {
+  int tab = state->panel_tab;
+  const auto sections = PanelSections(tab);
+  const bool editable = !state->defaults_view || tab == panel::ADVANCED || tab == panel::DLSS_REFLEX;
+  const char* label = "Reset";
+  bool enabled = false;
+  if (tab == panel::GENERAL) {
+    label = "Restore all defaults";
+    enabled = true;
+  } else if (editable) {
+    enabled = std::ranges::any_of(sections, [settings](SettingSection section) { return SectionChanged(*settings, section); });
   }
 
-  gui::SameLine();
-  const float min_language_width = style::SnapUp(gui::CalcTextSize(settings->language == Language::ENGLISH ? "English" : "简体中文 / Chinese").x + gui::GetFrameHeight()) + style::RowGap();
-  if (toolbar_right - gui::GetCursorPosX() < min_language_width) gui::NewLine();
-  const float available = std::max(1.f, toolbar_right - toolbar_left - style::SnapUp(gui::GetCursorPosX() - toolbar_left));
-  const float language_width = std::min(available, std::max(min_language_width, style::SnapUp(12.f * gui::GetFontSize())));
-  gui::SetCursorPosX(toolbar_right - language_width);
-  gui::SetNextItemWidth(language_width);
-  int selected_language = static_cast<int>(settings->language);
-  const char* languages[] = {"English", "简体中文 / Chinese"};
-  if (const int picked = widgets::Combo("UpliftLanguage", languages, 2, selected_language); picked >= 0) {
-    FindSetting("Language")->set(*settings, picked);
-    state->language_changed = true;
+  bool reset = false;
+  if (widgets::CapsuleTabBar("##panel_tabs", panel::kNames.data(), panel::COUNT, &tab, label, enabled, &reset)) {
+    state->panel_tab = tab;
+    state->panel_focus.clear();
+    if (tab == panel::SETUP) state->panel_focus = "Source";
   }
-  if (gui::IsItemHovered()) {
-    const gui::LanguageScope tooltip_language(settings->language);
-    widgets::ItemTooltip("English / Simplified Chinese. If Chinese appears as boxes, choose a Chinese-capable Global font in ReShade Settings (for example C:\\Windows\\Fonts\\msyh.ttc). No extra Uplift files are needed.");
+  widgets::NextGap(style::BlockGap());
+  if (!reset) return false;
+  if (tab == panel::GENERAL) {
+    state->confirm_restore = true;
+    return false;
   }
+  for (SettingSection section : sections) ResetSection(settings, section);
+  if (tab == panel::SETUP) {
+    const Settings& defaults = DefaultSettings();
+    state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(SourcePickOf(defaults, view.dlss_explicit)), view.setup);
+    state->setup_settle.ClickedBest(SetupRow::MOTION, static_cast<uint32_t>(MotionPickOf(defaults)), view.setup, true);
+    state->setup_settle.ClickedBest(SetupRow::RESOLUTION, static_cast<uint32_t>(defaults.resolution_mode), view.setup);
+  }
+  return true;
+}
 
-  if (!view.safety_locks.empty()) {
-    widgets::Panel("##safety_locks", [&] {
-      widgets::Heading("SAFETY LATCH ACTIVE", style::tokens::kBad);
-      for (const auto& lock : view.safety_locks) {
-        gui::PushID(lock.feature.data());
-        widgets::NextGap(style::BlockGap());
-        widgets::GroupHeading(lock.feature.data());
-        widgets::Wrapped("%s", lock.reason.c_str());
-        if (lock.setting != nullptr) {
-          if (settings->*(lock.setting) == lock.restore_value) {
-            widgets::Wrapped("Latch cleared for next launch. Restart the game to retry.");
-          } else if (widgets::QuietAction("Clear latch for next launch")) {
-            settings->*(lock.setting) = lock.restore_value;
-            changed = true;
-          }
-        } else if (lock.retry_now) {
-          if (widgets::QuietAction("Retry now")) state->retry_now = true;
-        } else {
-          widgets::Wrapped("Restart the game to retry this feature.");
-        }
-        gui::PopID();
-      }
-    });
+// The status card: what the panel says about the running frames, in the same words it used before the tabs.
+// Prefer recorded stages to the live estimate in both status summaries.
+std::string RunningStages(const OverlayView& view) {
+  std::string recorded;
+  for (size_t i = 0; i < view.stage_runs.size(); ++i) {
+    if (view.stage_runs[i].count == 0) continue;
+    if (!recorded.empty()) recorded += " · ";
+    recorded += gui::Display(NR_STAGE_NAMES[i]);
   }
+  return recorded.empty() ? view.live.stage : recorded;
+}
 
+void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
   const StatusCard& card = view.card;
-  widgets::Panel("##status_card", [&] {
-    widgets::Heading(card.title.c_str());
-    widgets::NextGap(style::RowGap());
+  if (card.title.empty() && card.reason.empty() && card.before_fg_note.empty() && card.fixes.empty()
+      && !card.working && card.button == CardButton::NONE) return;
+  widgets::Section("##status_card", [&] {
+    if (!card.title.empty()) {
+      widgets::Heading(card.title.c_str());
+      widgets::NextGap(style::RowGap());
+    }
     if (card.working) {
       const bool split = std::count_if(view.stage_runs.begin(), view.stage_runs.end(), [](const auto& run) { return run.planned != 0; }) > 1;
-      // Two numbers per stage: the evaluation alone (the TRACE line's "evaluate") and the whole chain (copy/remap,
-      // encode and exposure meter, evaluation, compose/Look, decode). A chain number without the evaluation in front
-      // reads as a regression to everyone who has watched this row.
       std::string nr_time;
       for (size_t i = 0; i < view.stage_runs.size(); ++i) {
         const auto evaluation = view.stage_runs[i].gpu_ms;
-        const auto total = view.stage_runs[i].gpu_total_ms ? view.stage_runs[i].gpu_total_ms : evaluation;
+        const auto total = view.stage_runs[i].gpu_total_ms;
         if (!evaluation && !total) continue;
         if (!nr_time.empty()) nr_time += " · ";
         if (split) nr_time += gui::Display(NR_STAGE_NAMES[i]) + " ";
         if (evaluation && total) {
           nr_time += std::format("{:.2f} · {:.2f} ms", *evaluation, *total);
         } else {
-          nr_time += std::format("{:.2f} ms", *evaluation ? *evaluation : *total);
+          nr_time += std::format("{:.2f} ms", total ? *total : *evaluation);
         }
       }
       const float timing_width = nr_time.empty() ? 0.f : gui::CalcTextSize("NR GPU time (inference · chain)").x;
-      const float key_width = std::max({timing_width, gui::CalcTextSize("Running at").x, gui::CalcTextSize("Motion vectors").x,
-                                       gui::CalcTextSize("Backend").x, gui::CalcTextSize("Resolution").x});
+      const float key_width = (std::max)({timing_width, gui::CalcTextSize("Running at").x, gui::CalcTextSize("Motion vectors").x,
+                                          gui::CalcTextSize("Backend").x, gui::CalcTextSize("Resolution").x});
       const float value_offset = style::SnapUp(key_width) + style::BlockGap();
       const float value_x = gui::GetCursorPosX() + value_offset;
       const bool inline_values = value_offset <= gui::GetContentRegionAvail().x * 0.40f;
       const auto row = [inline_values, value_x](const char* key, const std::string& value) {
         widgets::SecondaryWrapped(key);
         if (inline_values) gui::SameLine(value_x);
-        widgets::Wrapped("%s", value.c_str());
+        gui::TextWrapped("%s", value.c_str());
       };
-      std::string recorded;
-      for (size_t i = 0; i < view.stage_runs.size(); ++i) {
-        if (view.stage_runs[i].count == 0) continue;
-        if (!recorded.empty()) recorded += " · ";
-        recorded += gui::Display(NR_STAGE_NAMES[i]);
-      }
-      row("Running at", recorded.empty() ? view.live.stage : recorded);
+      row("Running at", RunningStages(view));
       row("Motion vectors", view.live.motion);
       if (!view.details_backend.empty()) row("Backend", view.details_backend);
       row("Resolution", view.live.resolution);
@@ -1042,22 +1141,16 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
       if (!view.setup.why.empty()) {
         const std::string why = "Why: " + view.setup.why;
         widgets::SecondaryWrapped(why.c_str());
-        if (gui::IsItemHovered()) {
-          widgets::ItemTooltip("%s", why.c_str());
-        }
+        widgets::ItemTooltip("%s", why.c_str());
       } else {
         if (!view.live.note.empty()) widgets::SecondaryText(view.live.note.c_str());
         if (!card.before_fg_note.empty()) gui::TextDisabled("%s", card.before_fg_note.c_str());
       }
       if (!view.live.footer.empty()) widgets::SecondaryText(view.live.footer.c_str());
     } else {
-      if (!card.reason.empty()) {
-        widgets::Wrapped("%s", card.reason.c_str());
-      }
+      if (!card.reason.empty()) gui::TextWrapped("%s", card.reason.c_str());
       if (!card.before_fg_note.empty()) gui::TextDisabled("%s", card.before_fg_note.c_str());
-      for (const std::string& fix : card.fixes) {
-        gui::BulletText("%s", fix.c_str());
-      }
+      for (const std::string& fix : card.fixes) gui::BulletText("%s", fix.c_str());
     }
     switch (card.button) {
       case CardButton::NONE: break;
@@ -1065,208 +1158,380 @@ static bool DrawOverlayContent(const OverlayView& view, Settings* settings, Over
         widgets::NextGap(style::BlockGap());
         if (widgets::PrimaryButton("Retry now")) state->retry_now = true;
         break;
-      case CardButton::CLEAR_LATCH:  // Each blocked feature has its own explicit recovery action above the card.
+      case CardButton::CLEAR_LATCH:
         break;
     }
   });
+}
 
-  const auto rows = [&](std::initializer_list<std::string_view> keys) {
-    for (const auto key : keys) changed |= DrawRow(*FindSetting(key), view, settings, state, true);
-  };
-  // The NR stage and Motion vectors toggles, in pipeline order, at the top
-  // of the panel -- the decisions that shape everything else, because they determine which later controls apply.
-  widgets::Panel("##stage_picker", [&] {
-    const bool placement_changed = SectionChanged(*settings, SettingSection::PLACEMENT);
-    if (widgets::SectionCaption("Setup", "Reset", placement_changed && !state->defaults_view)) {
-      ResetSection(settings, SettingSection::PLACEMENT);
-      const Settings defaults = DefaultSettings();
-      state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(SourcePickOf(defaults, view.dlss_explicit)), view.setup);
-      state->setup_settle.ClickedBest(SetupRow::MOTION, static_cast<uint32_t>(MotionPickOf(defaults)), view.setup, true);
-      state->setup_settle.ClickedBest(SetupRow::RESOLUTION, static_cast<uint32_t>(defaults.resolution_mode), view.setup);
-      changed = true;
-    }
-    widgets::NextGap(style::BlockGap());
-    changed |= DrawStagePicker(view, settings, state);
-  });
-  changed |= DrawSetupGroups(view, settings, state);
-
-  // ui-review.md §2 finding 7: Compare (Mine/Built-in) moves here, the first row of Look. The section's own
-  // title lives in its card now (2026-11-06), drawn inside DrawLookGroups, so nothing sits bare on the panel.
-  changed |= DrawLookGroups(view, settings, state);
-  DrawDlssReflexSection(view, settings, state, changed);
-
-  // Pass 2..pass_count, each its own collapsible tree, so the per-pass rows do not
-  // flood the panel for the common one-pass case. The tree's own label shows its state.
-  // Split chain: Runs at first; on the first pass of a later stage group, that stage's Resolution (and Custom scale) and, while Keep
-  // faces is on, its Keep faces here; while the chain is split the tree's label names where the pass runs.
-  for (uint32_t pass = 2u; pass <= settings->pass_count; ++pass) {
-    const bool follows = settings->passes[pass - 2u].follow_pass1;
-    const PassStageRow& stage_row = view.setup.pass_stages[pass - 2u];
-    const char* stage = view.RecordedStageName(pass - 1u);
-    if (!stage) stage = stage_row.runs == SourcePick::PRESENT ? view.SharedPresentName(*settings) : StageLabel(stage_row.runs);
-    const std::string summary = gui::Display(stage) + " · " + gui::Display(follows ? "Same look as pass 1" : "Own look");
-    gui::PushID(static_cast<int>(pass));
-    widgets::Panel("##pass_body", [&] {
-      const auto title = std::format("Pass {}", pass);
-      if (widgets::SectionHeader(title.c_str(), summary.c_str(), nullptr, false, nullptr)) {
-        widgets::NextGap(style::BlockGap());
-        widgets::PairedGroups("##pass_groups", [&] {
-          widgets::GroupHeading("Placement and network");
-          changed |= DrawPassStageRow(*FindSetting(std::format("Pass{}Stage", pass)), view, settings, state);
-          changed |= DrawRow(*FindSetting(std::format("Pass{}Preset", pass)), view, settings, state, true);
-          if (stage_row.starts_group && stage_row.runs != SourcePick::BEFORE_UPSCALING) {
-            if (stage_row.runs == SourcePick::AFTER_DLSS) rows({"ResolutionAfterDlss", "ResolutionScaleAfterDlss", "KeepFacesAfterDlss"});
-            else rows({"ResolutionPresent", "ResolutionScalePresent", "KeepFacesPresent"});
-          }
-        }, [&] {
-          widgets::GroupHeading("Pass look");
-          for (const SettingDescriptor& descriptor : SettingsSchema()) {
-            if (descriptor.pass == pass && (descriptor.flags & (setting_flags::PASS_STAGE | setting_flags::NETWORK_PRESET)) == 0u)
-              changed |= DrawRow(descriptor, view, settings, state, true);
-          }
-        });
+void DrawSafetyPanel(const OverlayView& view, Settings* settings, OverlayState* state, bool* changed) {
+  if (view.safety_locks.empty()) return;
+  widgets::Section("##safety_locks", [&] {
+    widgets::Heading("SAFETY LATCH ACTIVE", style::tokens::kBad);
+    for (const auto& lock : view.safety_locks) {
+      gui::PushID(lock.feature.data());
+      widgets::NextGap(style::BlockGap());
+      widgets::GroupHeading(lock.feature.data());
+      gui::TextWrapped("%s", lock.reason.c_str());
+      if (lock.setting != nullptr) {
+        if (settings->*(lock.setting) == lock.restore_value) {
+          gui::TextWrapped("Latch cleared for next launch. Restart the game to retry.");
+        } else if (widgets::QuietAction("Clear latch for next launch")) {
+          settings->*(lock.setting) = lock.restore_value;
+          *changed = true;
+        }
+      } else if (lock.retry_now) {
+        if (widgets::QuietAction("Retry now")) state->retry_now = true;
+      } else {
+        gui::TextWrapped("Restart the game to retry this feature.");
       }
-    });
-    gui::PopID();
+      gui::PopID();
+    }
+  });
+}
+
+bool DrawGeneralTab(const OverlayView& view, Settings* settings, OverlayState* state) {
+  bool changed = false;
+  gui::PushID("##general_body");
+  changed |= DrawRow(*FindSetting(ENABLED_KEY), view, settings, state);
+  widgets::NextGap(style::BlockGap());
+  changed |= DrawHotkeyButton(view, "NR hotkey", "Switches NR on and off without opening this panel.", &settings->enable_key, &state->capturing_key, state);
+  widgets::NextGap(style::BlockGap());
+  changed |= DrawHotkeyButton(view, "Panel hotkey", "Opens and closes this panel. ReShade's own panel keeps its own key.", &settings->panel_key, &state->capturing_panel_key, state);
+  if (settings->panel_key == 0x24u) {
+    // ReShade consumes its own overlay key before an add-on sees the press, so Home can never reach this panel.
+    style::StyleScope scope;
+    scope.Color(ImGuiCol_Text, style::tokens::kBad);
+    gui::TextWrapped("Home is ReShade's own overlay key, so it cannot open this panel. Pick another key here.");
   }
-
-  const bool shaping_changed = SectionChanged(*settings, SettingSection::RESULT) || SectionChanged(*settings, SettingSection::LIMITS);
-  const bool shaping_enabled = state->defaults_view ? DefaultSettings().look.enabled : settings->look.enabled;
-  const bool change_enabled = state->defaults_view ? DefaultSettings().look.stabilize_change : settings->look.stabilize_change;
-  widgets::Panel("##shaping_body", [&] {
-    bool reset = false;
-    gui::SetNextItemOpen(shaping_enabled || change_enabled, ImGuiCond_Once);
-    const bool shaping = widgets::SectionHeader("Result shaping", shaping_enabled ? "On" : "Off", "Reset",
-                                                shaping_changed && !state->defaults_view, &reset);
-    if (reset) {
-      ResetSection(settings, SettingSection::RESULT);
-      ResetSection(settings, SettingSection::LIMITS);
-      changed = true;
-    }
-    if (!shaping) return;
-    widgets::NextGap(style::BlockGap());
-    rows({"ShapeResult"});
-    if (shaping_enabled) {
-      widgets::NextGap(style::BlockGap());
-      widgets::PairedGroups("##result_groups", [&] {
-        widgets::GroupHeading("Strength and colour");
-        rows({"EditStrength", "Brighten", "Darken", "ResultColor", "HueShift"});
-      }, [&] {
-        widgets::GroupHeading("Tonal range");
-        rows({"Shadows", "Midtones", "Highlights"});
+  widgets::NextGap(style::BlockGap());
+  static constexpr const char* languages[] = {"English", "简体中文 / Chinese"};
+  changed |= DrawChoice(*state, "Language", "Language", languages, 2, static_cast<int>(settings->language),
+                        nullptr, FindSetting("Language")->tooltip, {},
+      [settings, state](int picked) {
+        FindSetting("Language")->set(*settings, static_cast<double>(picked));
+        state->language_changed = true;
+        return true;
       });
-      widgets::NextGap(style::BlockGap());
-      widgets::PairedGroups("##limit_groups", [&] {
-        widgets::GroupHeading("Limits");
-        rows({"MaxBrighten", "MaxDarken", "MaxColorChange"});
-      }, [&] {
-        widgets::GroupHeading("Detail and stability");
-        rows({"LargeScaleTone", "FineDetail", "DetailRadius", "HaloSuppression", "Stabilize", "StabilizeMs", "StabilizeDetail"});
-      });
-    }
-    // Its own group and its own switch: it runs after the shape and without Shape result, so it must be reachable with the section's master off.
-    widgets::NextGap(style::BlockGap());
-    widgets::GroupHeading("NR change");
-    rows({"StabilizeChange", "StabilizeChangeMs"});
-  });
-
-  const bool mask_changed = SectionChanged(*settings, SettingSection::MASK);
-  widgets::Panel("##mask_body", [&] {
-    bool reset = false;
-    const bool mask = widgets::SectionHeader("Mask and HUD", nullptr, "Reset", mask_changed && !state->defaults_view, &reset);
-    if (reset) { ResetSection(settings, SettingSection::MASK); changed = true; }
-    if (!mask) return;
-    widgets::NextGap(style::BlockGap());
-    widgets::PairedGroups("##mask_groups", [&] { widgets::GroupHeading("Mask"); rows({"Mask"}); },
-                                         [&] { widgets::GroupHeading("HUD"); rows({"UICorrection"}); });
-  });
-
-  const bool fixes_changed = SectionChanged(*settings, SettingSection::FIXES_COLOR) || SectionChanged(*settings, SettingSection::FIXES_GUIDES);
-  widgets::Panel("##fixes_body", [&] {
-    bool reset = false;
-    const bool fixes = widgets::SectionHeader("Fixes", "Colour · Exposure · Motion", "Reset",
-                                             fixes_changed && !state->defaults_view, &reset);
-    if (reset) {
-      ResetSection(settings, SettingSection::FIXES_COLOR);
-      ResetSection(settings, SettingSection::FIXES_GUIDES);
-      changed = true;
-    }
-    if (!fixes) return;
-    widgets::NextGap(style::BlockGap());
-    widgets::SecondaryText("Only change these if you know what you are doing.");
-    widgets::NextGap(style::BlockGap());
-    // Manual exposure is Diffuse white alone: its row moves under Input exposure then (DiffuseWhiteInExposureGroup), so the control sits with the choice.
-    widgets::PairedGroups("##colour_groups", [&] {
-      widgets::GroupHeading("Colour");
-      if (DiffuseWhiteInExposureGroup(*settings)) rows({"Encoding", "TransferStrength", "ColorStrength"});
-      else rows({"Encoding", "DiffuseWhiteNits", "TransferStrength", "ColorStrength"});
-    }, [&] {
-      widgets::GroupHeading("Exposure");
-      rows({"InputExposure"});
-      if (DiffuseWhiteInExposureGroup(*settings)) rows({"DiffuseWhiteNits"});
-      rows({"AutoExposureMode", "AutoExposureBlend", "ExposureAdapt", "AdaptBrighterStops", "AdaptDarkerStops"});
-    });
-    widgets::NextGap(style::BlockGap());
-    widgets::PairedGroups("##guide_groups", [&] {
-      widgets::GroupHeading("Colour conversion");
-      rows({"LinearUnitNits", "SourcePrimaries", "NeuralTransfer", "ChromaClamp", "NearBlackGuard"});
-    }, [&] {
-      widgets::GroupHeading("Motion and game state");
-      rows({"MotionScaleX", "MotionScaleY", "ChainedHistory", "StateRestore"});
-    });
-  });
-
-  widgets::Panel("##advanced_body", [&] {
-    if (!widgets::SectionHeader("Advanced", "Routing · Runtime · Diagnostics", nullptr, false, nullptr)) return;
-    widgets::NextGap(style::BlockGap());
-    widgets::PairedGroups("##advanced_groups", [&] {
-      widgets::GroupHeading("Routing");
-      rows({"PresentWithFrameGen", "BeforeFGMotion", "VulkanNr", "AllowCrossQueuePasses", "UseD3D9Ex"});
-    }, [&] {
-      widgets::GroupHeading("Memory and recovery");
-      rows({"VramCheck", "BudgetMarginMB", "GraceSeconds", "AutoResume", "AutoRetry"});
-    });
-    widgets::NextGap(style::BlockGap());
-    widgets::GroupHeading("Runtime and logging");
-    rows({"SnippetPath", "NgxHooks", "ForeignNr", "LogLevel", "ShowNvIndicator"});
-    if (settings->keep_faces) {
-      widgets::NextGap(style::BlockGap());
-      if (widgets::SectionHeader("Face mask tuning", "Keep faces", nullptr, false, nullptr)) {
-        widgets::NextGap(style::BlockGap());
-        rows({"ShowFaceMask", "FaceMaskThreshold", "FaceMaskFull", "FaceMaskStrength", "FaceMaskSoftness", "FaceEdgeFalloff",
-              "FaceLightingDensity", "FaceSpeckSize", "FaceFillSkin", "FaceFillRadius", "FaceFillTolerance"});
-      }
-    }
-  });
-  widgets::Panel("##details_body", [&] {
-    if (widgets::SectionHeader("Details", "Recorded passes", nullptr, false, nullptr)) {
-      widgets::NextGap(style::BlockGap());
-      DrawDetails(view, *settings, *state);
-    }
-  });
-  widgets::NextGap(style::CardGap());
-
-  // Restore all defaults, confirmed once before it takes effect.
-  if (widgets::QuietAction("Restore all defaults")) {
-    state->confirm_restore = true;
-  }
+  gui::PopID();
+  DrawStatusPanel(view, state);
+  DrawSafetyPanel(view, settings, state, &changed);
   if (widgets::ConfirmDialog("Restore all defaults###restore_defaults",
-                            "Every setting returns to its default, the hotkey included; Enable stays as it is.",
-                            "Keep my settings", "Restore all", &state->confirm_restore, 96.f)) {
+                             "Every setting returns to its default, the hotkey included; Enable stays as it is.",
+                             "Keep my settings", "Restore all", state->confirm_restore, 88.f)) {
     RestoreAllDefaults(settings);
     changed = true;
   }
-
-  changed |= DrawEnableWarning(*FindSetting("PresentWithFrameGen"), settings, state, view.dlss_explicit);
-  changed |= DrawEnableWarning(*FindSetting("AllowCrossQueuePasses"), settings, state, view.dlss_explicit);
   return changed;
 }
 
-bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state) {
-  // The panel's own look, applied every frame: ReShade writes its own style back whenever its settings are
-  // touched (see style::RefreshForDpi), which would otherwise put ReShade's colours and corners over the panel's.
-  style::RefreshForDpi();
-  return DrawOverlayContent(view, settings, state);
+bool DrawSetupTab(const OverlayView& view, Settings* settings, OverlayState* state) {
+  bool changed = false;
+  changed |= DrawStageRow(view, settings, state);
+  changed |= DrawSetupGroups(view, settings, state);
+  return changed;
+}
+
+bool DrawLayersTab(const OverlayView& view, Settings* settings, OverlayState* state) {
+  widgets::GroupHeading("Result");
+  bool changed = false;
+  changed |= DrawRows(view, settings, state, {"ShapeResult"});
+  const bool shaping_enabled = state->defaults_view ? DefaultSettings().look.enabled : settings->look.enabled;
+  if (shaping_enabled) {
+    widgets::NextGap(style::BlockGap());
+    widgets::GroupHeading("Strength and colour");
+    changed |= DrawRows(view, settings, state, {"EditStrength", "Brighten", "Darken", "ResultColor", "HueShift"});
+    widgets::NextGap(style::BlockGap());
+    widgets::GroupHeading("Tonal range");
+    changed |= DrawRows(view, settings, state, {"Shadows", "Midtones", "Highlights"});
+    widgets::NextGap(style::BlockGap());
+    widgets::GroupHeading("Limits");
+    changed |= DrawRows(view, settings, state, {"MaxBrighten", "MaxDarken", "MaxColorChange"});
+    widgets::NextGap(style::BlockGap());
+    widgets::GroupHeading("Detail and stability");
+    changed |= DrawRows(view, settings, state, {"LargeScaleTone", "FineDetail", "DetailRadius", "HaloSuppression", "Stabilize", "StabilizeMs", "StabilizeDetail"});
+  }
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("NR change");
+  changed |= DrawRows(view, settings, state, {"StabilizeChange", "StabilizeChangeMs"});
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Mask and HUD");
+  changed |= DrawRows(view, settings, state, {"Mask", "UICorrection"});
+  return changed;
+}
+
+bool DrawLookTab(const OverlayView& view, Settings* settings, OverlayState* state) {
+  bool changed = DrawLookGroups(view, settings, state);
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Passes");
+  changed |= DrawRows(view, settings, state, {"PassCount"});
+  if (state->defaults_view) return changed;
+  if (settings->pass_count < 2u) {
+    state->edited_pass = 2u;
+    widgets::SecondaryWrapped("Increase Pass count to configure additional passes.");
+    return changed;
+  }
+
+  const uint32_t count = std::clamp(settings->pass_count, 2u, MAX_PASSES);
+  const uint32_t previous = std::clamp(state->edited_pass, 2u, count);
+  state->edited_pass = previous;
+  std::array<std::string, MAX_PASSES - 1u> pass_labels;
+  std::array<const char*, MAX_PASSES - 1u> names{};
+  for (uint32_t pass = 2u; pass <= count; ++pass) {
+    pass_labels[pass - 2u] = std::format("Pass {}", pass);
+    names[pass - 2u] = pass_labels[pass - 2u].c_str();
+  }
+  DrawChoice(*state, "EditedPass", "Edit pass", names.data(), static_cast<int>(count - 1u), static_cast<int>(previous - 2u),
+             nullptr, "Select which additional pass to edit. Pass 1 uses Setup and Look.", {},
+      [state](int picked) {
+        state->edited_pass = static_cast<uint32_t>(picked) + 2u;
+        return false;
+      });
+  const uint32_t pass = state->edited_pass;
+  const auto pass_key = [pass](const char* suffix) { return std::format("Pass{}{}", pass, suffix); };
+  const PassStageRow& stage_row = view.setup.pass_stages[pass - 2u];
+  const char* stage = view.RecordedStageName(pass - 1u);
+  if (!stage) stage = stage_row.runs == SourcePick::PRESENT ? view.SharedPresentName(*settings) : StageLabel(stage_row.runs);
+  gui::PushID(static_cast<int>(pass));
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Placement and network", stage);
+  changed |= DrawPassStageRow(*FindSetting(pass_key("Stage")), view, settings, state);
+  changed |= DrawRow(*FindSetting(pass_key("Preset")), view, settings, state);
+  if (stage_row.starts_group && stage_row.runs != SourcePick::BEFORE_UPSCALING) {
+    widgets::SecondaryWrapped("Resolution and face protection are shared within this stage.");
+    if (stage_row.runs == SourcePick::AFTER_DLSS) {
+      changed |= DrawRows(view, settings, state, {"ResolutionAfterDlss", "ResolutionScaleAfterDlss", "KeepFacesAfterDlss"});
+    } else {
+      changed |= DrawRows(view, settings, state, {"ResolutionPresent", "ResolutionScalePresent", "KeepFacesPresent"});
+    }
+  }
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Pass look");
+  for (const SettingDescriptor& descriptor : SettingsSchema()) {
+    if (descriptor.pass == pass && (descriptor.flags & (setting_flags::PASS_STAGE | setting_flags::NETWORK_PRESET)) == 0u) {
+      changed |= DrawRow(descriptor, view, settings, state);
+    }
+  }
+  const auto pass_settings = SettingsSchema();
+  if (std::ranges::any_of(pass_settings, [settings, pass](const SettingDescriptor& descriptor) {
+        return descriptor.pass == pass && !IsDefault(*settings, descriptor);
+      })) {
+    style::StyleScope quiet;
+    quiet.FlatButton();
+    if (gui::Button("Reset pass")) {
+      for (const SettingDescriptor& descriptor : pass_settings) {
+        if (descriptor.pass == pass) ResetSetting(settings, descriptor);
+      }
+      changed = true;
+    }
+  }
+  gui::PopID();
+  return changed;
+}
+
+bool DrawFixesTab(const OverlayView& view, Settings* settings, OverlayState* state) {
+  bool changed = false;
+  widgets::GroupHeading("Colour");
+  changed |= DrawRows(view, settings, state, {"Encoding"});
+  const bool white_in_exposure = DiffuseWhiteInExposureGroup(*settings);
+  if (!white_in_exposure) changed |= DrawRows(view, settings, state, {"DiffuseWhiteNits"});
+  changed |= DrawRows(view, settings, state, {"TransferStrength", "ColorStrength"});
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Exposure");
+  changed |= DrawRows(view, settings, state, {"InputExposure"});
+  if (white_in_exposure) changed |= DrawRows(view, settings, state, {"DiffuseWhiteNits"});
+  changed |= DrawRows(view, settings, state, {"AutoExposureMode", "AutoExposureBlend", "ExposureAdapt", "AdaptBrighterStops", "AdaptDarkerStops"});
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Colour conversion");
+  changed |= DrawRows(view, settings, state, {"LinearUnitNits", "SourcePrimaries", "NeuralTransfer", "ChromaClamp", "NearBlackGuard"});
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Motion and game state");
+  changed |= DrawRows(view, settings, state, {"MotionScaleX", "MotionScaleY", "ChainedHistory", "StateRestore"});
+  return changed;
+}
+
+bool DrawAdvancedTab(const OverlayView& view, Settings* settings, OverlayState* state) {
+  bool changed = false;
+  widgets::GroupHeading("Routing");
+  changed |= DrawRows(view, settings, state, {"PresentWithFrameGen", "BeforeFGMotion", "VulkanNr", "AllowCrossQueuePasses", "UseD3D9Ex"});
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Memory and recovery");
+  changed |= DrawRows(view, settings, state, {"VramCheck", "BudgetMarginMB", "GraceSeconds", "AutoResume", "AutoRetry"});
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Runtime and logging");
+  changed |= DrawRows(view, settings, state, {"SnippetPath", "NgxHooks", "ForeignNr", "LogLevel", "ShowNvIndicator"});
+  if (settings->keep_faces) {
+    widgets::NextGap(style::BlockGap());
+    widgets::GroupHeading("Face mask tuning");
+    changed |= DrawRows(view, settings, state, {"ShowFaceMask", "FaceMaskThreshold", "FaceMaskFull", "FaceMaskStrength", "FaceMaskSoftness", "FaceEdgeFalloff",
+                                               "FaceLightingDensity", "FaceSpeckSize", "FaceFillSkin", "FaceFillRadius", "FaceFillTolerance"});
+  }
+  widgets::NextGap(style::BlockGap());
+  widgets::Heading("Details");
+  DrawDetails(view, *settings, *state);
+  return changed;
+}
+
+// A choice row's metadata and setter stay alive until the detail pane consumes them in this draw.
+bool DrawDetailColumn(const OverlayView& view, const Settings& settings, const OverlayState& state) {
+  const int tab = std::clamp(state.panel_tab, 0, static_cast<int>(panel::COUNT) - 1);
+  const auto& focus = PendingDetail().focus;
+  bool changed = false;
+  if (focus.title.empty()) {
+    widgets::DetailText(panel::kBlurb[tab]);
+  } else {
+    widgets::Heading(focus.title.c_str());
+    if (!focus.options.empty()) {
+      widgets::NextGap(style::BlockGap());
+      gui::PushID(focus.key.c_str());
+      for (size_t index = 0; index < focus.options.size(); ++index) {
+        const auto& option = focus.options[index];
+        const int value = static_cast<int>(index);
+        if (widgets::DetailOption(option.label.c_str(), option.why, value, value == focus.option_value) && focus.pick) {
+          changed |= focus.pick(value);
+        }
+      }
+      gui::PopID();
+    }
+    if (focus.key == "ResolutionMode" || focus.key == "ResolutionScale" || focus.key == "ResolutionScaleY" ||
+        focus.key == "ResolutionAsymmetric") {
+      DrawWorkingSize(view, settings);
+    }
+    if (!focus.body.empty()) {
+      widgets::NextGap(style::BlockGap());
+      widgets::DetailText(focus.body);
+    }
+    if (!focus.why.empty()) {
+      widgets::NextGap(style::RowGap());
+      widgets::DetailText(focus.why, style::tokens::kBad);
+    }
+  }
+  const std::string stage_line = RunningStages(view);
+  // A line with nothing to say is dropped, and the whole block with it: with NR off all three strings are empty,
+  // and three dots with no words beside them read as a broken panel rather than as an idle one.
+  const bool now_anything = !stage_line.empty() || !view.live.motion.empty() || !view.live.resolution.empty();
+  if (now_anything) {
+    widgets::NextGap(style::CardGap());
+    {
+      style::StyleScope scope;
+      scope.Color(ImGuiCol_Text, style::tokens::kTextTertiary);
+      gui::TextUnformatted("Now");
+    }
+    widgets::NextGap(style::RowGap());
+    if (!stage_line.empty()) widgets::DetailLine(stage_line.c_str(), view.card.working);
+    if (!view.live.motion.empty()) widgets::DetailLine(view.live.motion.c_str(), false);
+    if (!view.live.resolution.empty()) widgets::DetailLine(view.live.resolution.c_str(), false);
+  }
+  if (!view.live.footer.empty()) {
+    widgets::NextGap(style::RowGap());
+    widgets::DetailText(view.live.footer);
+  }
+  return changed;
+}
+
+bool DrawPanel(const OverlayView& view, Settings* settings, OverlayState* state) {
+  state->drag.pass_slider = false;  // the rows OR into it
+  state->language_changed = false;
+  const gui::LanguageScope language_scope(settings->language);
+  bool changed = false;
+  if (DrawPanelHeader(view, state)) state->panel_open = false;
+  // The focused modal handles its own Escape; do not close the panel behind it.
+  constexpr auto panel_focus_flags = ImGuiFocusedFlags_RootAndChildWindows | ImGuiFocusedFlags_NoPopupHierarchy;
+  if (gui::IsWindowFocused(panel_focus_flags) && gui::IsKeyPressed(ImGuiKey_Escape) && !state->capturing_key
+      && !state->capturing_panel_key) {
+    state->panel_open = false;
+  }
+  auto& detail = PendingDetail();
+  detail = {};
+  changed |= DrawPanelTabs(view, settings, state);
+  const float total = style::SnapDown(gui::GetContentRegionAvail().x);
+  const float gutter = style::SnapDown((std::min)(style::Units(5.f), total * 0.04f));
+  const float right_width = style::SnapDown((total - gutter) * 0.41f);
+  const float left_width = (std::max)(1.f, total - right_width - gutter);
+  const float body_height = (std::max)(1.f, style::SnapDown(gui::GetContentRegionAvail().y));
+
+  // The wheel is handled by hand inside each column (ScrollColumnWithWheel); NoScrollWithMouse keeps ImGui from
+  // scrolling them a second time under the pointer.
+  {
+    style::StyleScope column;
+    column.Var(ImGuiStyleVar_WindowPadding, {style::CardInset(), style::CardInset()})
+        .Color(ImGuiCol_ScrollbarBg, style::tokens::kTransparent);
+    constexpr auto flags = ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened;
+    gui::PushID(state->panel_tab);  // each tab keeps its own scroll offset and navigation history
+    if (gui::BeginChild("##panel_left", ImVec2(left_width, body_height), flags,
+                        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse)) {
+      ScrollColumnWithWheel();
+      switch (state->panel_tab) {
+        case panel::GENERAL: changed |= DrawGeneralTab(view, settings, state); break;
+        case panel::SETUP: changed |= DrawSetupTab(view, settings, state); break;
+        case panel::LOOK: changed |= DrawLookTab(view, settings, state); break;
+        case panel::LAYERS: changed |= DrawLayersTab(view, settings, state); break;
+        case panel::FIXES: changed |= DrawFixesTab(view, settings, state); break;
+        case panel::DLSS_REFLEX: changed |= DrawDlssReflexTab(view, settings, state); break;
+        case panel::ADVANCED: changed |= DrawAdvancedTab(view, settings, state); break;
+        default: break;
+      }
+    }
+    gui::EndChild();
+    gui::PopID();
+  }
+  // Resolve once after all rows have offered their detail. A stale nav cursor and a mouse exit are not new hits.
+  state->panel_focus = detail.focus.key;
+  state->panel_hovered_row = detail.hovered_row;
+  state->panel_nav_choice = detail.nav_choice;
+  gui::SameLine(0.f, gutter);
+  {
+    // The detail pane shares the panel background. Its child window only provides clipping and scrolling.
+    style::StyleScope column;
+    column.Var(ImGuiStyleVar_WindowPadding, {0.f, style::CardInset()});
+    constexpr auto flags = ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened;
+    if (gui::BeginChild("##panel_right", ImVec2(right_width, body_height), flags,
+                        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse)) {
+      ScrollColumnWithWheel();
+      changed |= DrawDetailColumn(view, *settings, *state);
+    }
+    gui::EndChild();
+  }
+  detail = {};
+  changed |= DrawEnableWarning(settings, state, view.dlss_explicit);
+  return changed;
+}
+
+bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState* state) {
+  // ReShade draws its own windows from the same global style, so the panel's look is lent for exactly this frame.
+  const style::PanelStyle panel_style;
+  // ImGui::GetMainViewport() and IO.DisplayPos are not available in this build (no viewport support), so the panel is
+  // clamped to the same rectangle the dialogs are centred in: the IO display, whose origin is (0, 0).
+  const ImVec2 origin(0.f, 0.f);
+  const ImVec2 room = gui::GetIO().DisplaySize;
+  // Wide enough for both columns at ReShade's default font, and never wider than the screen minus a margin.
+  const float width = std::clamp(room.x - style::Units(4.f), 1.f, style::Units(200.f));
+  const float height = std::clamp(room.y - style::Units(4.f), 1.f, style::Units(120.f));
+  if (state->panel_x < 0.f || state->panel_y < 0.f) {
+    state->panel_x = origin.x + style::Units(6.f);
+    state->panel_y = origin.y + style::Units(10.f);
+  }
+  state->panel_x = std::clamp(state->panel_x, origin.x, (std::max)(origin.x, origin.x + room.x - width));
+  state->panel_y = std::clamp(state->panel_y, origin.y, (std::max)(origin.y, origin.y + room.y - height));
+  gui::SetNextWindowPos(ImVec2(state->panel_x, state->panel_y), ImGuiCond_Always);
+  gui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+  bool changed = false;
+  {
+    style::StyleScope window;
+    window.Color(ImGuiCol_Border, style::tokens::Fade(style::tokens::kTextPrimary, 0.07f))
+        .Var(ImGuiStyleVar_WindowBorderSize, (std::max)(1.f, style::Px(1.f)))
+        .Var(ImGuiStyleVar_WindowPadding, ImVec2(style::Units(5.f), style::Units(4.f)));
+    const bool visible = gui::Begin("GITC Uplift###UpliftPanel", nullptr,
+                                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove
+                                        | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings
+                                        | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (visible) {
+      state->panel_drew = true;  // the present handler blocks the game's input only while this window really draws
+      changed = DrawPanel(view, settings, state);
+    }
+    gui::End();
+  }
+  return changed;
 }
 
 }  // namespace uplift::ui

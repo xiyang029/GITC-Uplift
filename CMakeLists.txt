@@ -439,7 +439,6 @@ add_library(uplift_addon SHARED
   src/addon/reshade_gl_host.cpp
   src/addon/reshade_d3d12_host.cpp
   src/ui/overlay.cpp
-  src/ui/stage_picker.cpp
   # The XMX payload's RCDATA. A static library's resource members carry no symbol, so the linker
   # would drop them; they live on the add-on itself, which is also where they are read from.
   ${UPLIFT_XMX_GENERATED}/embedded_xess_programs.rc
@@ -516,8 +515,7 @@ add_library(uplift_addon32 SHARED
   src/addon/reshade_vk_host.cpp
   src/addon/reshade_gl_host.cpp
   src/addon/reshade_d3d12_host.cpp
-  src/ui/overlay.cpp
-  src/ui/stage_picker.cpp)
+  src/ui/overlay.cpp)
 set_target_properties(uplift_addon32 PROPERTIES OUTPUT_NAME "gitc-uplift" SUFFIX ".addon32")
 target_include_directories(uplift_addon32 SYSTEM PRIVATE "${UPLIFT_RESHADE_INCLUDE}" "${UPLIFT_IMGUI_INCLUDE}")
 target_include_directories(uplift_addon32 PRIVATE "${UPLIFT_GENERATED}")

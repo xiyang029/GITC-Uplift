@@ -386,7 +386,7 @@ void Helper::FillStatus(ipc::Status* out) const {
   ipc::CopyText(out->output_problem, status.output_problem);
   ipc::CopyText(out->placement_note, status.placement_note);
   ipc::CopyText(out->skip_reason, nr::SkipReasonText(status.skip_reason));
-  // As addon.cpp's OnDrawOverlay builds it, so the card's "working" line and the overlay's status line are the 64-bit ones.
+  // As addon.cpp's panel view builds it, so the card's "working" line and the overlay's status line are the 64-bit ones.
   ipc::CopyText(out->status_line,
                 ui::FormatStatusLine({
                     .state = session.state,

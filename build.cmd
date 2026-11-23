@@ -20,5 +20,11 @@ rem Known trap: this toolchain's cl prints /showIncludes notes in the localized 
 rem records header dependencies and editing only a header keeps the previous object files. After a
 rem header-only edit, touch a .cpp of the same target (VSLANG=1033 does not change cl's language here).
 call tools\fetch_deps.cmd || exit /b 1
+if /i "%PRESET%"=="preview" goto preview
 cmake --preset %PRESET% || exit /b 1
 cmake --build --preset %PRESET% || exit /b 1
+exit /b 0
+
+:preview
+call tools\ui_preview\build.cmd
+exit /b %errorlevel%

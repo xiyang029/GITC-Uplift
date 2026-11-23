@@ -19,7 +19,7 @@ namespace uplift::ui {
 // What the panel shows besides the settings.
 struct OverlayView {
   std::string status_line;
-  // The DLSS / Reflex card's live block: what the runtime actually holds, as opposed to the choice that asks for
+  // The DLSS / Reflex tab's live block: what the runtime actually holds, as opposed to the choice that asks for
   // it (ui/status_text.hpp's FormatXLive). Empty lines are left out.
   std::string dlss_live_line;       // the mode, its preset, and a driver override that wins over it
   std::string rr_live_line;         // Ray Reconstruction's preset, when the game runs RR
@@ -137,38 +137,52 @@ struct OverlayState {
   // Set on the frame a new hotkey is captured. That key press is still "pressed" in the same
   // frame's input snapshot, so the hotkey handler must skip it once instead of toggling Enable.
   bool key_captured_this_frame = false;
-  // 1.1.0: when DrawOverlay last showed the capture; a capture not shown for a moment (the overlay closed, another tab) ends (ExpireKeyCapture).
+  // 1.1.0: when the panel last showed the capture; a capture not shown for a moment (the panel closed, another tab) ends (ExpireKeyCapture).
   std::chrono::steady_clock::time_point capture_seen;
   bool defaults_view = false;   // session only; the add-on keeps it when the overlay closes
   std::string_view enable_warning_key;  // requested checkbox confirmation; ImGui owns the open modal
   bool confirm_present_stage = false;  // The diagram changes both Source and FG placement when the warning is accepted.
   bool confirm_restore = false;  // requested Restore all defaults modal, cleared on dismissal
-  bool retry_now = false;        // the add-on calls DeviceContext::RetryNow after DrawOverlay and clears it
+  bool retry_now = false;        // the add-on calls DeviceContext::RetryNow after drawing the panel and clears it
   // An APPLY_ON_RELEASE slider being held: the value it shows. The setting keeps the applied one until release.
   std::optional<int> pending_release;
   std::string_view pending_key;  // the held row's key (schema keys are static)
   // The Setup highlights' settle, for the device they belong to (a change of device starts it afresh).
   SetupSettle setup_settle;
   const void* setup_device = nullptr;
+
+  // The panel's own state (2026-11-23). Session-only: nothing here is persisted, and ReShade's own close resets it.
+  int panel_tab = 1;         // 0 General, 1 Setup, 2 Look, 3 Layers, 4 Fixes, 5 DLSS / Reflex, 6 Advanced
+  bool panel_open = false;   // set by the panel hotkey, cleared by the cross, Escape or ReShade's own panel opening
+  // True while ReShade's own settings window is up (reshade_open_overlay). The two windows exclude each other: this
+  // panel is not drawn while it is true, and neither opening nor closing ReShade's window ever opens this one -- only
+  // the panel hotkey does.
+  bool reshade_overlay_open = false;
+  bool panel_drew = false;   // set by DrawOverlayWindow when the window actually drew; input is blocked only then
+  float panel_x = -1.f;      // where the window was last dragged; negative means the default corner
+  float panel_y = -1.f;
+  bool capturing_panel_key = false;
+  // Last row inspected in this tab. Retained through row gaps and while using the right pane.
+  std::string panel_focus = "Source";
+  std::string panel_hovered_row;
+  uint32_t panel_nav_choice = 0;
+  uint32_t edited_pass = 2u;  // selected later pass in Look
 };
 
 // Resolves Setup from `facts` (the shown device's), settles its highlights in `state` and, for a working card, builds the card's rows. Sets
 // `view->setup` and `view->live`; `view->card` must be set already. `device`: the shown device's identity. `facts`' views must outlive the draw.
 void FinishSetup(OverlayView* view, OverlayState* state, const void* device, const SetupFacts& facts, std::chrono::steady_clock::time_point now);
 
-// Draws inside the Setup card. The diagram and the other cards share the same column breakpoint.
-bool DrawStagePicker(const OverlayView& view, Settings* settings, OverlayState* state);
-
-// Draws the Uplift panel inside the window ReShade opened for it, editing `settings`
-// in place. Returns true when a setting changed; the caller then sanitises, saves and applies.
-bool DrawOverlay(const OverlayView& view, Settings* settings, OverlayState* state);
+// Draws the standalone panel while OverlayState::panel_open is set. Returns true when `settings`
+// changed, so the caller can sanitise, save and apply.
+bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState* state);
 
 // 1.1.0: a hotkey capture the overlay has not shown for a moment (Esc closed ReShade's overlay, or another tab is open) ends, keeping the old hotkey, so
 // the hotkey (which a capture holds off) works again. Called at each present.
 inline void ExpireKeyCapture(OverlayState* state, std::chrono::steady_clock::time_point now) {
-  if (state->capturing_key && now - state->capture_seen > std::chrono::milliseconds(250)) {
-    state->capturing_key = false;
-  }
+  if (now - state->capture_seen <= std::chrono::milliseconds(250)) return;
+  state->capturing_key = false;
+  state->capturing_panel_key = false;
 }
 
 }  // namespace uplift::ui

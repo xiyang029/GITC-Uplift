@@ -42,7 +42,6 @@
 #include "ui/settings.hpp"
 #include "ui/settings_schema.hpp"
 #include "ui/status_text.hpp"
-#include "ui/overlay_style.hpp"
 #include "vk/device_hook.hpp"
 
 // The name ReShade shows in its Add-ons list. The log lines keep their "[Uplift]" prefix (addon/log_bridge.cpp).
@@ -256,7 +255,7 @@ void OnFinishEffects(api::effect_runtime* runtime, api::command_list* cmd_list, 
 
 void OnReshadePresent(api::effect_runtime* runtime) {
   try {
-    const std::unique_lock lock(g_state->mutex);
+    std::unique_lock lock(g_state->mutex);
     AddonState32& state = *g_state;
     const auto found = state.devices.find(runtime->get_device());
     if (found != state.devices.end() && found->second.runtime == runtime) {
@@ -264,13 +263,37 @@ void OnReshadePresent(api::effect_runtime* runtime) {
       found->second.motion_links.early.BeginObserving();
     }
     ui::ExpireKeyCapture(&state.overlay, std::chrono::steady_clock::now());
+    // Only capture game input if the standalone panel actually drew in ReShade's ImGui frame.
+    const bool panel_drew = std::exchange(state.overlay.panel_drew, false);
+    if (state.overlay.panel_open && panel_drew) runtime->block_input_next_frame();
     if (state.overlay.key_captured_this_frame) {
       // The press that bound the hotkey is still in this frame's input: do not let it toggle Enable.
       state.overlay.key_captured_this_frame = false;
       return;
     }
+    if (state.overlay.capturing_key || state.overlay.capturing_panel_key) return;  // a capture owns the next press
+    // The panel hotkey toggles this panel only; ReShade's own key is never touched. The two windows exclude each other:
+    // opening this one closes ReShade's first, and ReShade opening its own closes this one (host::OnOpenOverlay).
+    const uint32_t panel_key = state.settings.panel_key;
+    if (panel_key != 0u && runtime->is_key_pressed(panel_key) && found != state.devices.end() && found->second.runtime == runtime) {
+      if (state.overlay.panel_open) {
+        state.overlay.panel_open = false;
+      } else {
+        // open_overlay dispatches reshade_open_overlay synchronously and that handler takes this same lock, so the
+        // lock is released around the call; the handler clears the panel, hence the assignment after it.
+        lock.unlock();
+        runtime->open_overlay(false, api::input_source::keyboard);
+        lock.lock();
+        // open_overlay's handler already cleared this; the assignment keeps the panel alive even if ReShade ever stops
+        // dispatching that event, because a stuck flag would otherwise hide the panel forever.
+        state.overlay.reshade_overlay_open = false;
+        state.overlay.panel_open = true;
+      }
+      nr::Logf(nr::LogLevel::INFO, "Hotkey: Uplift panel {}", state.overlay.panel_open ? "open" : "closed");
+      return;
+    }
     const uint32_t key = state.settings.enable_key;
-    if (key == 0u || state.overlay.capturing_key || !runtime->is_key_pressed(key)) return;
+    if (key == 0u || !runtime->is_key_pressed(key)) return;
     if (found == state.devices.end()) return;
     [[maybe_unused]] const auto& [device, entry] = *found;
     if (entry.runtime != runtime) return;  // toggle once per frame: the primary swap chain's runtime only
@@ -281,10 +304,14 @@ void OnReshadePresent(api::effect_runtime* runtime) {
   UPLIFT_CATCH("reshade_present", )
 }
 
-void OnDrawOverlay(api::effect_runtime* runtime) {
+// Builds the view the panel draws and draws the panel's own window. Leaves before building anything while the panel is
+// closed: a closed panel costs one bool test per ReShade frame.
+void OnReshadeOverlay(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState32& state = *g_state;
+    // The standalone panel yields to ReShade's own overlay.
+    if (!state.overlay.panel_open || state.overlay.reshade_overlay_open) return;
     const auto now = std::chrono::steady_clock::now();
     ui::OverlayView view = {.status_line = "OFF", .last_key_pressed = runtime->last_key_pressed()};
     view.dlss_unavailable = std::string(ui::BRIDGED_DLSS_REASON);  // no DLSS placement without a Direct3D 12 game
@@ -310,7 +337,8 @@ void OnDrawOverlay(api::effect_runtime* runtime) {
     }
     view.before_fg_unavailable = "Before FG needs a game-facing 64-bit Streamline integration";
     view.AddStartupLocks(state.settings, overlay_api == api::device_api::vulkan, overlay_api == api::device_api::d3d9);
-    if (ui::DrawOverlay(view, &state.settings, &state.overlay)) {
+    const bool edited = ui::DrawOverlayWindow(view, &state.settings, &state.overlay);
+    if (edited) {
       SaveAndApply(&state);
     } else if (state.overlay.language_changed) {
       ui::SaveSettings(state.settings, &state.config);
@@ -377,12 +405,14 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   reshade::register_event<reshade::addon_event::reshade_render_technique>(OnRenderTechnique);
   reshade::register_event<reshade::addon_event::reshade_finish_effects>(OnFinishEffects);
   reshade::register_event<reshade::addon_event::reshade_open_overlay>(addon::host::OnOpenOverlay<g_state>);
+  // The panel's own window is drawn here: ReShade dispatches this inside its ImGui frame, so a window opened from it is
+  // drawn by the same frame (and block_input_next_frame is what keeps its clicks out of the game).
+  reshade::register_event<reshade::addon_event::reshade_overlay>(OnReshadeOverlay);
   reshade::register_event<reshade::addon_event::reshade_present>(OnReshadePresent);
   addon::RegisterCreateDeviceEvent(&addon::host::OnCreateDevice<g_state, NOTE_INSTANCE_API_VERSION>);
   addon::RegisterCreateSwapchainEvent(reshade_vulkan_events);  // copy access on a Vulkan swap chain's images (event 97, raw)
-  // ReShade's own overlay window: it calls OnDrawOverlay only while the panel is open, inside the window it
-  // opened for it, so the panel draws no title bar and no border of its own.
-  reshade::register_overlay(addon::host::OVERLAY_TITLE, OnDrawOverlay);
+  // No register_overlay: the panel is its own window (reshade_overlay above). A tab in ReShade's strip would draw the
+  // same rows a second time and leave "GITC Uplift" in the strip ReShade shows for every add-on.
 
   nr::Logf(nr::LogLevel::INFO, "Uplift {} (32-bit) registered (ReShade API {}, Dear ImGui {}, ReShade {})", UPLIFT_VERSION,
            RESHADE_API_VERSION, IMGUI_VERSION_NUM,
@@ -398,7 +428,6 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon_module, HMODULE 
   if (g_state == nullptr) return;
   g_state->front->Quit();  // QUIT, a capped wait for the exit, then the job closes: the helper never outlives the game
   addon::RemoveLogBridge();
-  ui::style::Restore();
   reshade::unregister_addon(addon_module, reshade_module);
 }
 

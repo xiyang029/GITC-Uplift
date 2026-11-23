@@ -23,8 +23,9 @@ inline constexpr char CONFIG_SECTION[] = "Uplift";
 inline constexpr char ENABLED_KEY[] = "Enabled";  // the one key the add-on polls every present
 inline constexpr float SKIN_SAME_AS_STRUCTURE = -1.f;
 
-// The version written into the settings file; 3 is the one in which InputExposure's default became Auto. LoadSettings migrates older files.
-inline constexpr uint32_t CONFIG_VERSION = 4u;
+// The version written into the settings file; 3 is the one in which InputExposure's default became Auto, 5 the one in
+// which PanelKey stopped defaulting to Home (ReShade's own overlay key). LoadSettings migrates older files.
+inline constexpr uint32_t CONFIG_VERSION = 5u;
 
 // Every combo is stored as its index, in the order below.
 enum class PlacementSource : uint32_t {
@@ -234,7 +235,8 @@ struct PassSettings {
 struct Settings {
   Language language = Language::SIMPLIFIED_CHINESE;
   bool enabled = false;
-  uint32_t enable_key = 0u;  // Win32 virtual-key code; 0 = no hotkey
+  uint32_t enable_key = 0u;                      // Win32 virtual-key code; 0 = no hotkey
+  uint32_t panel_key = 0x2Du;                    // VK_INSERT: opens this panel; ReShade's own panel keeps Home
   float intensity = 1.f;     // slider 0-1; typed values up to 10 pass through
   uint32_t style = 0u;       // 0-2 = Model A/B/C
   float local_structure = 1.f;
@@ -421,7 +423,9 @@ class ConfigStore {
 [[nodiscard]] Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnings);
 void SaveSettings(const Settings& settings, ConfigStore* store);
 // A file written before CONFIG_VERSION 3 (1.0.0 stored every key, its default InputExposure Game included) reads InputExposure Game as Auto, the
-// new default; Metered and Manual stay. The next save writes the current version, so an explicit Game chosen after that stays Game.
+// new default; Metered and Manual stay. A file written before CONFIG_VERSION 5 that still holds Home for PanelKey (the old default) moves to
+// Insert: Home cannot be taken over, because ReShade handles its own overlay key before this add-on sees the input.
+// The next save writes the current version, so an explicit Game chosen after that stays Game.
 void MigrateSettings(Settings* settings);
 // After an overlay edit: a non-finite value returns to its default, a number is clamped into its
 // range (a documented special value such as 0 = automatic is kept), an unknown combo index or key

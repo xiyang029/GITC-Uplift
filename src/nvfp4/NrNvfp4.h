@@ -6,14 +6,14 @@
 //
 // A pass asks for them with a model choice above the runtime's own presets (DlssNr Preset / pass preset):
 //   4  Model A with the 4-bit kernels (fused blocks 256 and 128, split blocks, transformer, feed-forward; trained weights)
-//   15 NVFP4 3xPass-in-one (weight set 12)
-//   16 NVFP4 2xPass-in-one (weight set 13)
-//   18 FP8 2xPass-in-one, 19 FP8 3xPass-in-one: NVIDIA's own FP8 kernels with weight records of ours (NrFp8; RTX 40
-//       and 50 series; files nvfp4/fp8/fp8_set1.* and fp8_set2.*). No 4-bit kernel runs in such a pass.
-//   20 FP8 2xPass-in-one v2, 21 FP8 3xPass-in-one v2: the same with their v2 weights (fp8_set3.*, fp8_set4.*).
-// Any other value from 4 up (including retired presets 5..14 and 17) is refused, never run as another model.
-// The runtime itself is given preset 1 (Model A) for custom models, whose launches are replaced one by one.
-// Assets: <OptiScaler.dll's folder>/OptiScaler/nvfp4, laid out as the Display Filter package's nvfp4 folder.
+//   15 NVFP4 3xPass-in-one (weight set 11)
+//   16 NVFP4 2xPass-in-one (weight set 10)
+//   18 FP8 2xPass-in-one, 19 FP8 3xPass-in-one: NVIDIA's own FP8 kernels with our weight records (NrFp8; RTX 40/50,
+//      files nvfp4/fp8/fp8_set5.* and fp8_set6.*). No 4-bit kernel runs in such a pass.
+//   22 Model B with 4-bit feed-forward only.
+// Any other value from 4 up (including retired presets 5..14, 17, 20 and 21) is refused, never run as another model.
+// The runtime is given preset 1 (Model A) for custom models, except 22 uses preset 2 (Model B).
+// Assets: nvfp4 beside the add-on, laid out as the Display Filter package's nvfp4 folder.
 //
 // NO FALLBACK. A pass that asks for one of these and does not get it (files missing, another runtime build, the Vulkan
 // path, a layer that did not recognise the model) is never shown as a plain Model A pass: OursRan() says so, the
@@ -26,26 +26,35 @@ struct ID3D12Device;
 
 namespace DlssNr::Nvfp4
 {
-// The 4-bit numbers are the Display Filter application's (standalone/NrCapture/Common.h).
-// Keep the existing local FP8 IDs (18-21) so saved presets select the same weights.
+// Keep local preset IDs stable when changing weights. Upstream uses 21 and 22 for different models.
 inline constexpr unsigned ModelANvfp4 = 4,
                           ModelTwoTriple = 15, // one pass with the look of three
                           ModelTwoDouble = 16, // one pass with the look of two
                           ModelFp8Double = 18, // FP8: one pass with the look of two
-                          ModelFp8Triple = 19, // FP8: one pass with the look of three
-                          ModelFp8Double2 = 20, // the same, v2 weights
-                          ModelFp8Triple2 = 21;
+                          ModelFp8Triple = 19; // FP8: one pass with the look of three
 // Model B with the transformer's feed-forward exchanged for the 4-bit one: the runtime asks for 2, and only that layer
 // is ours, so its 4-bit weights live in nvfp4/modelB.
 inline constexpr unsigned ModelBFeedForward = 22;
 constexpr bool IsPassInOne(unsigned preset) { return preset == ModelTwoTriple || preset == ModelTwoDouble; }
-constexpr bool IsFp8(unsigned preset) { return preset >= ModelFp8Double && preset <= ModelFp8Triple2; }
-constexpr unsigned Fp8Set(unsigned preset) { return IsFp8(preset) ? preset - ModelFp8Double + 1 : 0; } // nvfp4/fp8/fp8_set<n>
+constexpr unsigned Fp8Set(unsigned preset) { // nvfp4/fp8/fp8_set<n>
+    switch (preset) {
+    case ModelFp8Double: return 5;
+    case ModelFp8Triple: return 6;
+    default: return 0;
+    }
+}
+constexpr bool IsFp8(unsigned preset) { return Fp8Set(preset) != 0; }
 constexpr bool IsModelB(unsigned preset) { return preset == ModelBFeedForward; }
 constexpr bool IsKnown(unsigned preset) { return preset == ModelANvfp4 || IsPassInOne(preset) || IsFp8(preset) || IsModelB(preset); }
 // Unknown custom presets are refused by BeginEvaluation.
 constexpr bool IsNvfp4(unsigned preset) { return preset >= ModelANvfp4; }
-constexpr unsigned WeightSet(unsigned preset) { return IsPassInOne(preset) ? preset - 3 : 0; } // 0: the trained 4-bit codes
+constexpr unsigned WeightSet(unsigned preset) {
+    switch (preset) {
+    case ModelTwoDouble: return 10;
+    case ModelTwoTriple: return 11;
+    default: return 0; // the trained 4-bit codes
+    }
+}
 // What the runtime is asked for: the model our kernels have the weights of. Model B asks for its own preset 2.
 constexpr unsigned RuntimePreset(unsigned preset) {
     if (IsModelB(preset)) return 2u;

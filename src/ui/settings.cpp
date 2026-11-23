@@ -89,6 +89,11 @@ void MigrateSettings(Settings* settings) {
   if (settings->config_version < 3u && settings->input_exposure == color::InputExposure::GAME) {
     settings->input_exposure = color::InputExposure::AUTO;
   }
+  // Home is ReShade's own overlay key: it handles that key itself, so the add-on never sees the press and cannot claim it.
+  // A file written while Home was the default moves to Insert; a key the user then picks is saved and left alone (version 5).
+  if (settings->config_version < 5u && settings->panel_key == 0x24u) {
+    settings->panel_key = 0x2Du;
+  }
   settings->config_version = CONFIG_VERSION;
 }
 

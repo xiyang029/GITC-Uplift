@@ -300,7 +300,7 @@ void BeginEvaluation(unsigned requestedPreset)
         const bool complete = NrSwin4::SetComplete(taken, &file) && NrNet4::SetComplete(taken, &file) &&
                               NrFfnV2::SetComplete(taken, &file);
         if (!complete)
-            gSetMissing = "a weight file of this model is missing or incomplete (OptiScaler/nvfp4/" + file + ")";
+            gSetMissing = "a weight file of this model is missing or incomplete (nvfp4/" + file + ")";
     }
     PauseForEvaluation(!gOn || !gSetMissing.empty() || !gEnableProblem.empty());
     if (gOn && gSetMissing.empty() && gEnableProblem.empty())
