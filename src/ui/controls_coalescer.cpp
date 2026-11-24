@@ -45,7 +45,6 @@ std::array<std::optional<nr::Controls>, MAX_PASSES - 1u> ControlsCoalescer::Late
           .auto_mask = pass.auto_mask,
           .skin_structure = pass.skin_structure,
           .style = pass.style,
-          .mask_blend_mode = live.mask_blend_mode,
       };
     }
   }

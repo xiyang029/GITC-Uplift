@@ -1951,8 +1951,8 @@ void BeforeFgDestroyChain(api::swapchain* chain, bool /*resize*/) noexcept {
 
 void BeforeFgInitChain(api::swapchain* chain, bool /*resize*/) { addon::streamline::NoteReshadeSwapchain(chain); }
 
-bool BeforeFgMaskConflicts(DeviceEntry& entry, const ui::Settings& settings) {
-  if (settings.mask == ui::MaskMode::AUTO && entry.runtime && entry.runtime->get_effects_state()) {
+bool BeforeFgMaskConflicts(DeviceEntry& entry) {
+  if (entry.runtime && entry.runtime->get_effects_state()) {
     const auto variable = entry.runtime->find_texture_variable(nullptr, uplift::text::UPLIFT_MASK_TEXTURE);
     return variable.handle && MaskEffectRunning(entry.runtime, variable);
   }
@@ -1980,7 +1980,7 @@ addon::BeforeFgDecision DecideBeforeFgFor(AddonState& state, DeviceEntry& entry,
       inputs.upscaler_live = state.bridge.Registry().UpscalerLive(
           device, route == addon::BeforeFgRoute::DX12 ? ngx_hooks::NgxApi::D3D12 : ngx_hooks::NgxApi::VULKAN);
     }
-    inputs.mask_conflicts = BeforeFgMaskConflicts(entry, state.settings);
+    inputs.mask_conflicts = BeforeFgMaskConflicts(entry);
   }
   return addon::DecideBeforeFg(inputs);
 }
@@ -2072,18 +2072,17 @@ std::string BlockedReason(AddonState& state, DeviceEntry& entry) {
 
 // Whether an UPLIFT_MASK is running on this device, and why not (the note). Looked up once per present, by the first path
 // that needs it. A declared UPLIFT_MASK variable also needs a technique of its effect still enabled.
-std::pair<bool, std::string_view> MaskState(AddonState& state, DeviceEntry& entry,
+std::pair<bool, std::string_view> MaskState(DeviceEntry& entry,
                                             std::optional<std::pair<bool, std::string_view>>& mask_lookup) {
   if (!mask_lookup) {
     const api::effect_texture_variable variable =
-        (state.settings.mask == ui::MaskMode::AUTO && entry.runtime != nullptr && entry.runtime->get_effects_state())
+        (entry.runtime != nullptr && entry.runtime->get_effects_state())
             ? entry.runtime->find_texture_variable(nullptr, uplift::text::UPLIFT_MASK_TEXTURE)
             : api::effect_texture_variable{0u};
     const bool declared = variable.handle != 0u;
     mask_lookup.emplace(declared && MaskEffectRunning(entry.runtime, variable),
-                        (state.settings.mask != ui::MaskMode::AUTO) ? std::string_view()
-                        : declared                                  ? std::string_view("NR mask: the UPLIFT_MASK effect is off")
-                                                                    : std::string_view("NR mask: no effect writes UPLIFT_MASK"));
+                        declared ? std::string_view("NR mask: the UPLIFT_MASK effect is off")
+                                 : std::string_view("NR mask: no effect writes UPLIFT_MASK"));
   }
   return *mask_lookup;
 }
@@ -2566,7 +2565,7 @@ bool VkDeviceRouter::RunNativeContext() {
                                                                    native_settings, native_facts, native_allowed, state.claim.Owner() == device, now, present_frame);
   ClearNativePresentMarker(device, native.NrState());
   NoteLatchIfTripped(&state, &native);
-  if (const auto [mask_running, mask_idle_note] = MaskState(state, entry, mask_lookup); !mask_running) {
+  if (const auto [mask_running, mask_idle_note] = MaskState(entry, mask_lookup); !mask_running) {
     // The native mask copy goes here too. The bridged context's branch below, which releases it as well, is never reached while that
     // context (or its bridge) could not start, nor when native NR alone runs the device.
     native.ReleaseMask();
@@ -3056,7 +3055,7 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         state.claim.Update(device, settings.enabled, before.dlss_seen, before.session.state != nr::SessionState::OFF);
     // Without a running UPLIFT_MASK there is no mask to bind; the copy is released (and the native context's too, in the Vulkan block
     // above, which a device whose bridge never started reaches alone).
-    const auto [mask_running, mask_idle_note] = MaskState(state, entry, mask_lookup);
+    const auto [mask_running, mask_idle_note] = MaskState(entry, mask_lookup);
     if (!mask_running) {
       entry.context->PrepareMaskCopy(nullptr);
       ReleaseBridgeMask(entry, device);
@@ -3319,13 +3318,12 @@ void OnFinishEffects(api::effect_runtime* runtime, api::command_list* cmd_list, 
     if (entry == nullptr && native == nullptr) return;
     if (entry != nullptr && entry->helper.HasClient() && native == nullptr) {
       // A Direct3D 9 device. A Vulkan device on the helper route, unless its native context runs NR at a DLSS placement (the helper yields).
-      g_state->front->FinishEffects(entry->helper, runtime, g_state->settings);
+      g_state->front->FinishEffects(entry->helper, runtime);
       return;
     }
     if (const auto found = g_state->devices.find(runtime->get_device()); found != g_state->devices.end() && found->second.before_fg.outer_owns_frame) return;
     // This frame's UPLIFT_MASK, copied now that the effects have run, on this same list,
     // into Uplift's own texture; every placement binds that copy from the next recording on.
-    if (g_state->settings.mask != ui::MaskMode::AUTO) return;
     const api::effect_texture_variable variable = runtime->find_texture_variable(nullptr, uplift::text::UPLIFT_MASK_TEXTURE);
     if (variable.handle == 0u) return;
     DeviceEntry& masked = (native != nullptr ? *native : *entry);
@@ -3578,8 +3576,12 @@ void OnReshadeOverlay(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState& state = *g_state;
-    // The standalone panel yields to ReShade's own overlay.
-    if (!state.overlay.panel_open || state.overlay.reshade_overlay_open) return;
+    // This event runs with ReShade's ImGui context active. Restore the cursor here after a hotkey close;
+    // ClosePanel also runs from reshade_present, where touching ImGui state is unsafe.
+    if (!state.overlay.panel_open || state.overlay.reshade_overlay_open) {
+      ImGui::GetIO().MouseDrawCursor = false;
+      return;
+    }
     const auto now = std::chrono::steady_clock::now();
     ui::OverlayView view = {.status_line = "OFF", .last_key_pressed = runtime->last_key_pressed()};
     const auto found = state.devices.find(runtime->get_device());

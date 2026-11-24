@@ -228,7 +228,7 @@ class HelperFront {
   // with fences). `rtv` is the event's render target (bit 0 marks sRGB).
   void Technique(HelperDevice& device, reshade::api::effect_runtime* runtime, bool is_marker, uint64_t rtv, const ui::Settings& settings);
   // Copy UPLIFT_MASK at finish-effects on the frame's own immediate list.
-  void FinishEffects(HelperDevice& device, reshade::api::effect_runtime* runtime, const ui::Settings& settings);
+  void FinishEffects(HelperDevice& device, reshade::api::effect_runtime* runtime);
   // A D3D9 device's destroy_command_queue, raised before every Reset and ResetEx: everything the client made on
   // the device goes (a live D3DPOOL_DEFAULT object fails the game's Reset) and the helper is detached; its Session stays.
   void DestroyQueue(HelperDevice& device, reshade::api::device* owner);

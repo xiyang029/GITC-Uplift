@@ -105,7 +105,7 @@ class Session {
 
   void SetEnabled(bool enabled);
   void SetPassCount(uint32_t passes);
-  void SetCreateOptions(const std::array<uint32_t, MAX_PASSES>& presets, uint32_t performance);
+  void SetCreateOptions(const std::array<uint32_t, MAX_PASSES>& presets);
   // Advanced settings; they take effect from the next Tick or Evaluate.
   void SetGrace(std::chrono::milliseconds grace) { config_.grace = grace; }
   void SetAutoResume(bool auto_resume) { config_.auto_resume = auto_resume; }
@@ -239,7 +239,6 @@ class Session {
   uint32_t pass_count_ = 1u;
   uint32_t passes_limit_ = 10u;
   std::array<uint32_t, MAX_PASSES> presets_ = {};
-  uint32_t performance_ = 3u;
   uint32_t consecutive_failures_ = 0u;
   uint32_t retry_attempts_ = 0u;  // automatic retries since the last recovery, settings change or Retry now
   bool retry_requested_ = false;  // RetryNow: reload at the next Tick that may

@@ -123,10 +123,9 @@ void Session::SetPassCount(uint32_t passes) {
   }
 }
 
-void Session::SetCreateOptions(const std::array<uint32_t, MAX_PASSES>& presets, uint32_t performance) {
+void Session::SetCreateOptions(const std::array<uint32_t, MAX_PASSES>& presets) {
   const bool network_changed = (presets_ != presets);
   presets_ = presets;
-  performance_ = performance;
   if (!network_changed) return;
   budget_.ResetCalibration();  // another network must not inherit a cheaper calibration from the previous configuration
   // All passes and Keep faces share the runtime pool; the existing retired-feature wait prevents old and new networks from overlapping.
@@ -618,7 +617,7 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
     auto feature = host_.NewFeature();
     const auto before = host_.QueryRuntimeBytes();
     last_use_mark_ = timeline_.MarkNow();  // Create is recorded on this frame's list, win or lose
-    const NVSDK_NGX_Result result = feature->Create(list, {.capacity = chain.size, .preset = preset, .performance = performance_});
+    const NVSDK_NGX_Result result = feature->Create(list, {.capacity = chain.size, .preset = preset});
     if (NVSDK_NGX_FAILED(result)) return result;
     first_use_paid_ = true;
     const auto after = host_.QueryRuntimeBytes();

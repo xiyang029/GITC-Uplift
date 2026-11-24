@@ -311,8 +311,12 @@ void OnReshadeOverlay(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState32& state = *g_state;
-    // The standalone panel yields to ReShade's own overlay.
-    if (!state.overlay.panel_open || state.overlay.reshade_overlay_open) return;
+    // This event runs with ReShade's ImGui context active. Restore the cursor here after a hotkey close;
+    // ClosePanel also runs from reshade_present, where touching ImGui state is unsafe.
+    if (!state.overlay.panel_open || state.overlay.reshade_overlay_open) {
+      ImGui::GetIO().MouseDrawCursor = false;
+      return;
+    }
     const auto now = std::chrono::steady_clock::now();
     ui::OverlayView view = {.status_line = "OFF", .last_key_pressed = runtime->last_key_pressed()};
     view.dlss_unavailable = std::string(ui::BRIDGED_DLSS_REASON);  // no DLSS placement without a Direct3D 12 game

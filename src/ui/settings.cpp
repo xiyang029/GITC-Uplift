@@ -190,7 +190,6 @@ nr::Controls ToControls(const Settings& settings) {
       .auto_mask = settings.auto_mask,
       .skin_structure = settings.skin_structure,
       .style = settings.style,
-      .mask_blend_mode = settings.mask_blend_mode,
   };
 }
 
@@ -205,7 +204,6 @@ SessionOptions ToSessionOptions(const Settings& settings) {
       .enabled = settings.enabled,
       .pass_count = settings.pass_count,
       .presets = presets,
-      .performance = settings.performance,
       .grace = std::chrono::milliseconds(std::lround(settings.grace_seconds * 1000.f)),
       .auto_resume = settings.auto_resume,
       .margin_override_bytes = (settings.budget_margin_mb == 0u ? std::nullopt

@@ -25,8 +25,8 @@ inline constexpr float SKIN_SAME_AS_STRUCTURE = -1.f;
 
 // The version written into the settings file; 3 is the one in which InputExposure's default became Auto, 5 the one in
 // which PanelKey stopped defaulting to Home (ReShade's own overlay key), 6 the one in which EnableKey stopped defaulting to
-// none and became F7. LoadSettings migrates older files.
-inline constexpr uint32_t CONFIG_VERSION = 6u;
+// none and became F7, and 7 the one that removed UICorrection Auto. Older config files should be regenerated.
+inline constexpr uint32_t CONFIG_VERSION = 7u;
 
 // Every combo is stored as its index, in the order below.
 enum class PlacementSource : uint32_t {
@@ -187,16 +187,10 @@ enum class VulkanNrMode : uint32_t {
 };
 
 // Auto binds an effect's UPLIFT_MASK, when one runs.
-enum class MaskMode : uint32_t {
-  AUTO = 0u,
-  OFF = 1u,
-};
-
 // Forwards DLSSNR.UICorrection on the Present path only, when On.
 enum class UiCorrection : uint32_t {
-  AUTO = 0u,
-  OFF = 1u,
-  ON = 2u,
+  OFF = 0u,
+  ON = 1u,
 };
 
 // Smooth adapts at AdaptBrighterStops/AdaptDarkerStops; Off applies the target every frame.
@@ -255,8 +249,6 @@ struct Settings {
   float transfer_strength = 1.f;
   float color_strength = 1.f;
   uint32_t preset = 1u;       // 310.9.16: 1 = legacy, 2 = small FP8; ignored by 310.8
-  uint32_t mask_blend_mode = 1u;
-  uint32_t performance = 3u;  // forwarded; no effect in NR 310.8
   float grace_seconds = 5.f;
   uint32_t budget_margin_mb = 0u;  // 0 = automatic: 512 MiB
   nr::VramCheck vram_check = nr::VramCheck::CAREFUL;
@@ -341,8 +333,7 @@ struct Settings {
   bool pre_upscale = false;  // Before upscaling (pre-SR), off by default
   std::array<PassSettings, MAX_PASSES - 1u> passes = {};  // passes 2..10
   look::LookSettings look;                                // Shape result and its rows
-  MaskMode mask = MaskMode::AUTO;
-  UiCorrection ui_correction = UiCorrection::AUTO;
+  UiCorrection ui_correction = UiCorrection::OFF;
   color::InputExposure input_exposure = color::InputExposure::AUTO;  // Auto (the game's when it agrees with the meter)
   color::AutoExposureMode auto_exposure_mode = color::AutoExposureMode::BLEND;  // how Auto uses a valid game exposure
   float auto_exposure_blend = 0.8f;                                             // Blend's point, 0 the game's, 1 the meter's
@@ -395,7 +386,6 @@ struct SessionOptions {
   bool enabled = false;
   uint32_t pass_count = 1u;
   std::array<uint32_t, MAX_PASSES> presets = {};
-  uint32_t performance = 3u;
   std::chrono::milliseconds grace{5000};
   bool auto_resume = true;
   std::optional<uint64_t> margin_override_bytes;
@@ -426,7 +416,6 @@ void SaveSettings(const Settings& settings, ConfigStore* store);
 // Insert: Home cannot be taken over, because ReShade handles its own overlay key before this add-on sees the input.
 // A file written before CONFIG_VERSION 6 that still holds none for EnableKey (the old default) moves to F7; a 0
 // written by a right-click after that is indistinguishable from the old default, so it moves too.
-// The next save writes the current version, so an explicit Game chosen after that stays Game.
 void MigrateSettings(Settings* settings);
 // After an overlay edit: a non-finite value returns to its default, a number is clamped into its
 // range (a documented special value such as 0 = automatic is kept), an unknown combo index or key

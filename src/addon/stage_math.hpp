@@ -291,7 +291,7 @@ void ApplySessionOptions(SessionSink& session, const FrameSettings& settings, co
   session.SetAutoResume(options.auto_resume);
   session.SetMarginOverride(options.margin_override_bytes);
   session.SetVramCheck(options.vram_check);
-  session.SetCreateOptions(options.presets, options.performance);
+  session.SetCreateOptions(options.presets);
   session.SetPassCount(options.pass_count);
   session.NoteFacesWanted(settings.look.keep_faces.enabled);
   for (uint32_t group = 1u; group < chain.group_count; ++group) {

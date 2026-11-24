@@ -65,8 +65,7 @@ constexpr std::array<std::string_view, 3> FG_PRESENT_MODES = {"Off", NR_STAGE_NA
 constexpr std::array<std::string_view, 2> UPSAMPLING_MODES = {"Classic", "Edge-aware"};
 // Split chain: a pass's Runs at after its first choice, "Same as pass n-1" (PassStageChoices), in stored-index order.
 constexpr std::array<std::string_view, 3> PASS_STAGES = {NR_STAGE_NAMES[0], NR_STAGE_NAMES[1], NR_STAGE_NAMES[3]};
-constexpr std::array<std::string_view, 2> MASK_MODES = {"Auto (UPLIFT_MASK)", "Off"};
-constexpr std::array<std::string_view, 3> UI_CORRECTION_MODES = {"Auto", "Off", "On"};
+constexpr std::array<std::string_view, 2> UI_CORRECTION_MODES = {"Off", "On"};
 constexpr std::array<std::string_view, 3> STABILIZE_MODES = {"Off", "Static", "Motion"};
 constexpr std::array<std::string_view, 4> INPUT_EXPOSURES = {"Auto", "Game", "Metered", "Manual"};
 constexpr std::array<std::string_view, 2> AUTO_EXPOSURE_MODES = {"Blend", "Switch"};
@@ -366,28 +365,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return static_cast<double>(s.lighting_scale); },
         .set = [](Settings& s, double v) { s.lighting_scale = static_cast<float>(v); },
         .hidden = KeepFacesOff,
-    },
-    {
-        .key = "Mask",
-        .kind = SettingKind::CHOICE,
-        .section = SettingSection::MASK,
-        .label = "NR mask",
-        .tooltip = "Use the uplift mask shader to mask NR output.",
-        .choices = MASK_MODES,
-        .get = [](const Settings& s) { return Index(s.mask); },
-        .set = [](Settings& s, double v) { s.mask = FromIndex<MaskMode>(v); },
-    },
-    {
-        .key = "MaskBlendMode",
-        .kind = SettingKind::UINT,
-        .section = SettingSection::PLACEMENT,
-        .label = "Native mask blend mode",
-        .tooltip = "Experimental NR 310.9.16 mask mode, 0 to 3 (default 1). May show little change.",
-        .min = 0.0,
-        .max = 3.0,
-        .flags = RESTARTS_HISTORY,
-        .get = [](const Settings& s) { return static_cast<double>(s.mask_blend_mode); },
-        .set = [](Settings& s, double v) { s.mask_blend_mode = static_cast<uint32_t>(v); },
     },
     {
         .key = "UICorrection",
@@ -1466,17 +1443,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .flags = RESTARTS_HISTORY | NETWORK_PRESET,
         .get = [](const Settings& s) { return NetworkPresetIndex(s.preset); },
         .set = [](Settings& s, double v) { s.preset = NetworkPresetValue(v); },
-    },
-    {
-        .key = "Performance",
-        .kind = SettingKind::UINT,
-        .section = SettingSection::HIDDEN,
-        .label = "Performance",
-        .tooltip = "Stored and forwarded; no effect in NR 310.8.",
-        .min = 1.0,
-        .max = 6.0,
-        .get = [](const Settings& s) { return static_cast<double>(s.performance); },
-        .set = [](Settings& s, double v) { s.performance = static_cast<uint32_t>(v); },
     },
     {
         .key = "GraceSeconds",

@@ -11,12 +11,12 @@
 namespace uplift::nr {
 
 [[nodiscard]] inline std::string FeatureDiagnostic(uint32_t pass, bool created, std::string_view network, bool evaluated,
-                                                  uint64_t enabled_evaluations, bool enabled, uint32_t style, uint32_t mask_mode) {
+                                                  uint64_t enabled_evaluations, bool enabled, uint32_t style) {
   if (!created) return {};
   if (network.empty()) network = "unconfirmed (no native creation message)";
   if (!evaluated) return std::format("NR pass {} network: {} | awaiting evaluation", pass, network);
-  return std::format("NR pass {} network: {} | enabled calls recorded: {} | {} | style {} | native mask mode {}",
-                     pass, network, enabled_evaluations, enabled ? "enabled" : "bypassed / zero intensity", style, mask_mode);
+  return std::format("NR pass {} network: {} | enabled calls recorded: {} | {} | style {}",
+                     pass, network, enabled_evaluations, enabled ? "enabled" : "bypassed / zero intensity", style);
 }
 
 // The caller has already proved GPU completion. Snippet routes ReleaseFeature to its bound API.

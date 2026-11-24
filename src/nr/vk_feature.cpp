@@ -49,7 +49,6 @@ NVSDK_NGX_Result VkFeature::Create(ID3D12GraphicsCommandList* list, const Create
   parameters_->Set(keys::HEIGHT, info.capacity.height);
   parameters_->Set(keys::PRESET, info.preset);
   parameters_->Set(keys::SCALING_RATIO, 1.f);
-  parameters_->Set(keys::PERF_QUALITY_VALUE, static_cast<int>(info.performance) - 1);
   const NVSDK_NGX_Result result = snippet_.CreateFeatureVulkan(VkListOf(list), parameters_, &handle_, &network_);
   if (NVSDK_NGX_FAILED(result) || handle_ == nullptr) {
     Logf(LogLevel::ERR, "CreateFeature {}x{} failed: {:#010x}", info.capacity.width, info.capacity.height, static_cast<uint32_t>(result));
@@ -94,7 +93,6 @@ NVSDK_NGX_Result VkFeature::Evaluate(ID3D12GraphicsCommandList* list, const Eval
   parameters_->Set(keys::LOCAL_TONE, controls.local_tone);
   parameters_->Set(keys::LOCAL_STRUCTURE, controls.local_structure);
   parameters_->Set(keys::USE_AUTO_MASK, controls.auto_mask ? 1 : 0);
-  parameters_->Set(keys::MASK_BLEND_MODE, controls.mask_blend_mode);
   parameters_->Set(keys::SKIN_STRUCTURE, controls.skin_structure);
   parameters_->Set(keys::STYLE, controls.style);
   parameters_->Set(keys::RESET, inputs.reset ? 1 : 0);
@@ -105,22 +103,22 @@ NVSDK_NGX_Result VkFeature::Evaluate(ID3D12GraphicsCommandList* list, const Eval
   if (NVSDK_NGX_SUCCEED(result)) {
     has_evaluation_ = true;
     const bool enabled = !inputs.bypass && controls.intensity > 0.f;
-    if (enabled && (enabled_evaluations_ == 0u || !last_enabled_ || last_style_ != controls.style || last_mask_mode_ != controls.mask_blend_mode)) {
-      Logf(LogLevel::INFO, "NR diagnostic: enabled Vulkan evaluation recorded (NGX {:#010x}, handle {}, style {}, mask mode {}, intensity {}, character mask {}, motion {}, native control mask {}); runtime network: {}",
-           static_cast<uint32_t>(result), static_cast<const void*>(handle_), controls.style, controls.mask_blend_mode, controls.intensity,
+    if (enabled && (enabled_evaluations_ == 0u || !last_enabled_ || last_style_ != controls.style || last_auto_mask_ != controls.auto_mask)) {
+      Logf(LogLevel::INFO, "NR diagnostic: enabled Vulkan evaluation recorded (NGX {:#010x}, handle {}, style {}, intensity {}, character mask {}, motion {}, native control mask {}); runtime network: {}",
+           static_cast<uint32_t>(result), static_cast<const void*>(handle_), controls.style, controls.intensity,
            controls.auto_mask, inputs.motion.resource != nullptr, inputs.control_mask.resource != nullptr,
            network_.empty() ? std::string_view("unconfirmed") : std::string_view(network_));
     }
     if (enabled) ++enabled_evaluations_;
     last_enabled_ = enabled;
     last_style_ = controls.style;
-    last_mask_mode_ = controls.mask_blend_mode;
+    last_auto_mask_ = controls.auto_mask;
   }
   return result;
 }
 
 std::string VkFeature::Diagnostic(uint32_t pass) const {
-  return FeatureDiagnostic(pass, handle_ != nullptr, network_, has_evaluation_, enabled_evaluations_, last_enabled_, last_style_, last_mask_mode_);
+  return FeatureDiagnostic(pass, handle_ != nullptr, network_, has_evaluation_, enabled_evaluations_, last_enabled_, last_style_);
 }
 
 NVSDK_NGX_Result VkFeature::Release() {

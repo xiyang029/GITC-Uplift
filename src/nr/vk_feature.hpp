@@ -32,7 +32,7 @@ class VkFeature final : public FeatureInterface {
   std::string network_;
   uint64_t enabled_evaluations_ = 0u;
   uint32_t last_style_ = 0u;
-  uint32_t last_mask_mode_ = 0u;
+  bool last_auto_mask_ = false;
   bool last_enabled_ = false;
   bool has_evaluation_ = false;
 };

@@ -410,16 +410,14 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   bool mask_running = false;
   if (entry.SharesImages()) {
     const api::effect_texture_variable mask_variable =
-        (settings.mask == ui::MaskMode::AUTO && frame.runtime != nullptr && frame.runtime->get_effects_state())
+        (frame.runtime != nullptr && frame.runtime->get_effects_state())
             ? frame.runtime->find_texture_variable(nullptr, uplift::text::UPLIFT_MASK_TEXTURE)
             : api::effect_texture_variable{0u};
     const bool mask_declared = mask_variable.handle != 0u;
     mask_running = mask_declared && MaskEffectRunning(frame.runtime, mask_variable);
     if (!mask_running) {
       entry.ReleaseMask(hosts.Pointers());
-      entry.mask_note = (settings.mask != ui::MaskMode::AUTO) ? ""
-                        : mask_declared                       ? "NR mask: the UPLIFT_MASK effect is off"
-                                                              : "NR mask: no effect writes UPLIFT_MASK";
+      entry.mask_note = mask_declared ? "NR mask: the UPLIFT_MASK effect is off" : "NR mask: no effect writes UPLIFT_MASK";
     }
   } else {
     entry.mask_note = (d3d10 ? "NR mask: not available on this Direct3D 10 device (no fences)"
@@ -577,10 +575,10 @@ void HelperFront::Technique(HelperDevice& device, api::effect_runtime* runtime, 
   RunClient(device, runtime->get_device(), runtime->get_command_queue(), point, EventImage(device, runtime, rtv), launchpad.handle, /*at_present=*/false);
 }
 
-void HelperFront::FinishEffects(HelperDevice& device, api::effect_runtime* runtime, const ui::Settings& settings) {
+void HelperFront::FinishEffects(HelperDevice& device, api::effect_runtime* runtime) {
   // This frame's UPLIFT_MASK, copied now that the effects have run, into the shared mask the next
   // RUN hands to NR. Direct3D 9, and 10 and 11 with fences (the note is set in the present event otherwise).
-  if (!device.SharesImages() || settings.mask != ui::MaskMode::AUTO) return;
+  if (!device.SharesImages()) return;
   const api::effect_texture_variable variable = runtime->find_texture_variable(nullptr, uplift::text::UPLIFT_MASK_TEXTURE);
   if (variable.handle == 0u) return;
   Hosts hosts = HostsOf(device, runtime->get_device(), runtime->get_command_queue());  // OpenGL: no present queue in an effect event

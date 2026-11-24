@@ -164,11 +164,6 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   }
 
   gui::PushID(descriptor.key.data());
-  // The row's note, if it has one, drawn once the reset arrow is placed: RowIconButton centres the arrow on the
-  // row's last item, and a note is a line of its own, so drawing it earlier took the arrow down a line on the five
-  // rows that have one -- Pass count's frame-generation warning, Mask, UICorrection, UseD3D9Ex and VulkanNr.
-  std::string deferred_note;
-  bool deferred_note_wraps = false;
   const ImVec2 row_top = gui::GetCursorScreenPos();  // the row's own top: its tooltip is asked for over the whole row
   // On the press frame the control can start blocking window hover: sample before submitting it as well.
   const bool mouse_in_column = descriptor.kind != SettingKind::CHOICE && gui::IsWindowHovered();
@@ -185,7 +180,6 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   const std::string_view fix_unavailable = ColorFixUnavailable(descriptor.key, view.encoding);
   const std::string_view disabled_reason =
       ((descriptor.flags & setting_flags::NETWORK_PRESET) != 0u && view.legacy_runtime)                   ? std::string_view("NR 310.8 only provides the Legacy network.")
-      : (descriptor.key == "MaskBlendMode" && view.legacy_runtime)            ? std::string_view("NR 310.8 does not support native mask blend mode.")
       : (descriptor.key == "StateRestore" && !view.dlss_unavailable.empty())   ? std::string_view(view.dlss_unavailable)
       : (descriptor.key == "UseD3D9Ex" && !view.d3d9ex_unavailable.empty())    ? std::string_view(view.d3d9ex_unavailable)
       : (descriptor.key == "VulkanNr" && !view.vulkan_nr_unavailable.empty()) ? std::string_view(view.vulkan_nr_unavailable)
@@ -195,6 +189,15 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       : (keep_faces_row && !view.keep_faces_unavailable.empty())               ? std::string_view(view.keep_faces_unavailable)
       : (descriptor.key == "ShowFaceMask" && !settings->keep_faces)            ? std::string_view("Turn on Keep faces (Look) first")
                                                                                : std::string_view();
+  // Contextual notes belong to the detail pane; unavailable reasons are shown separately there.
+  const std::string_view detail_note =
+      descriptor.key == "UICorrection" ? std::string_view(view.ui_correction_note)
+      : descriptor.key == "UseD3D9Ex" && disabled_reason.empty() ? std::string_view(view.d3d9ex_readout)
+      : descriptor.key == "VulkanNr" && disabled_reason.empty() ? std::string_view(view.vulkan_nr_note)
+      : descriptor.key == "PassCount" ? std::string_view(view.frame_generation_warning)
+                                       : std::string_view();
+  const std::string detail_body = detail_note.empty() ? std::string(descriptor.tooltip)
+                                                     : std::format("{}\n\n{}", descriptor.tooltip, detail_note);
   gui::BeginDisabled(!disabled_reason.empty());
   bool changed = false;
   if (descriptor.key == "SkinStructure") {
@@ -304,10 +307,6 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
             }
           }
         }
-        if (descriptor.key == "PassCount" && !view.frame_generation_warning.empty()) {
-          deferred_note = view.frame_generation_warning;
-          deferred_note_wraps = true;
-        }
         break;
       }
       case SettingKind::FLOAT: {
@@ -390,8 +389,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
               shown = static_cast<int>(*view.vulkan_nr_running);
             }
           }
-          const std::string body = note.empty() ? std::string(descriptor.tooltip)
-                                                 : std::format("{}\n{}", descriptor.tooltip, note);
+          const std::string body = note.empty() ? detail_body : std::format("{}\n{}", detail_body, note);
           changed |= DrawChoice(*state, descriptor.key, caption.c_str(), choices.data(), count, shown, why.data(), body,
               disabled_reason,
               [settings, state, row = &descriptor](int picked) {
@@ -426,34 +424,17 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
                           && gui::IsMouseHoveringRect(ImVec2(gui::GetWindowPos().x, row_top.y), ImVec2(row_right, row_bottom));
     auto& frame = PendingDetail();
     if (frame.Select(*state, descriptor.key, over_row)) {
-      frame.focus = {std::string(descriptor.key), gui::Visible(caption), std::string(descriptor.tooltip),
+      frame.focus = {std::string(descriptor.key), gui::Visible(caption), detail_body,
                      std::string(disabled_reason), {}, 0, {}};
     }
     if (over_row && !disabled_reason.empty()) {
       widgets::MouseTooltip(gui::GetID("##row-tooltip"), "%s", std::format("Greyed: {}", disabled_reason).c_str());
     }
   }
-  if (descriptor.key == "Mask") {
-    deferred_note = view.mask_note;
-  }
-  if (descriptor.key == "UICorrection") {
-    deferred_note = view.ui_correction_note;
-  }
-  if (descriptor.key == "UseD3D9Ex") {
-    deferred_note = (view.d3d9ex_unavailable.empty() ? view.d3d9ex_readout : view.d3d9ex_unavailable);
-  }
-  if (descriptor.key == "VulkanNr" && view.vulkan_nr_unavailable.empty()) {
-    deferred_note = view.vulkan_nr_note;
-  }
   // The reset arrow here, on the control's own line: RowLabel reserved its slot before the control was drawn, so
   // drawing it earlier moved the cursor to the row's end and the control itself wrapped to a new line. It has to
-  // come before the note above all, or the note becomes the row's last item and the arrow drops a line below it.
+  // stay after the control so the arrow remains on the same line.
   changed |= DrawReset(descriptor, *settings, *state, view.setup);
-  if (!deferred_note.empty()) {
-    if (deferred_note_wraps) gui::PushTextWrapPos(0.f);
-    widgets::SecondaryText(deferred_note.c_str());
-    if (deferred_note_wraps) gui::PopTextWrapPos();
-  }
   gui::EndDisabled();
   gui::PopID();
   return changed;
@@ -703,9 +684,7 @@ bool DrawDlssReflexTab(const OverlayView& view, Settings* settings, OverlayState
 
 bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
   bool changed = false;
-  widgets::GroupHeading("Frame inputs");
   changed |= DrawMotionRow(view, settings, state);
-  changed |= DrawRow(*FindSetting("MaskBlendMode"), view, settings, state);
   widgets::NextGap(style::BlockGap());
   widgets::GroupHeading("Passes");
   changed |= DrawRow(*FindSetting("PassCount"), view, settings, state);
@@ -1152,7 +1131,7 @@ bool DrawLayersTab(const OverlayView& view, Settings* settings, OverlayState* st
   changed |= DrawRows(view, settings, state, {"StabilizeChange", "StabilizeChangeMs"});
   widgets::NextGap(style::BlockGap());
   widgets::GroupHeading("Mask and HUD");
-  changed |= DrawRows(view, settings, state, {"Mask", "UICorrection"});
+  changed |= DrawRows(view, settings, state, {"UICorrection"});
   return changed;
 }
 
@@ -1422,7 +1401,6 @@ void ClosePanel(OverlayState* state) {
   state->panel_open = false;
   state->panel_drew = false;  // nothing is on screen from this frame on: the present handler must not block the game's input
   state->capturing_panel_key = false;
-  gui::GetIO().MouseDrawCursor = false;  // ImGui's context exists: ReShade creates it before its first present
   // The next open starts over: the intro replays and its first tab arrives without a tab transition.
   state->panel_intro_started = -1.0;
   state->panel_tab_transition_started = -1.0;

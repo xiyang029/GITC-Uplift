@@ -10,7 +10,6 @@ namespace uplift::nr {
 struct CreateInfo {
   Size capacity;
   uint32_t preset = 1u;       // DLSSNR.Hint.Render.Preset (no effect in 310.8)
-  uint32_t performance = 3u;  // PerfQualityValue = performance - 1 (inert in 310.8)
 };
 
 struct EvaluateInputs {
@@ -76,7 +75,7 @@ class Feature final : public FeatureInterface {
   std::string network_;
   uint64_t enabled_evaluations_ = 0u;
   uint32_t last_style_ = 0u;
-  uint32_t last_mask_mode_ = 0u;
+  bool last_auto_mask_ = false;
   bool last_enabled_ = false;
   bool has_evaluation_ = false;
   uint32_t requested_preset_ = 1u;  // before remapping to the runtime preset

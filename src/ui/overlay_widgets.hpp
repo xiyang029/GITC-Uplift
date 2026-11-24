@@ -139,10 +139,9 @@ inline float row_slot_x = 0.f;
 inline bool row_stacked = false;
 inline float row_label_left = 0.f;
 inline float row_label_right = 0.f;
-// A settings row: the label in the secondary colour in a fixed-width left column, then the control, then
+// A settings row: a single-line, ellipsised label in the fixed-width left column, then the control, then
 // the reset slot one frame high at the end. The slot is reserved whether or not the row shows its reset
-// button. Labels that do not fit the shared column use a full-width line above the control, so long
-// translations do not shift the grid. Switches can still share that line if there is room.
+// button. The full label remains available in the detail column.
 // Call right before a control whose own label is hidden ("##id"): the next item's width is the control
 // column.
 inline void RowLabel(const char* label, const char* tooltip = nullptr) {
@@ -157,9 +156,8 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
   // The reference panel's rows are labelled in white at a size above the body's; the fetch below measures in
   // the same font it draws in, or a label that fits would still be clipped.
   ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * tokens::kRowLabelScale);
-  const float text_width = ImGui::CalcTextSize(text.c_str()).x;
-  const bool stacked = avail < font * tokens::kStackEm || text_width + style.ItemSpacing.x > column;
-  row_stacked = stacked;
+  const std::string shown = Ellipsize(text.c_str(), (std::max)(1.f, column - style.ItemSpacing.x));
+  row_stacked = false;
   row_label_left = at.x;
   row_label_right = at.x;
   row_slot_x = bounds.reset_left;
@@ -168,20 +166,16 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
     ImGui::AlignTextToFramePadding();
     StyleScope label_color;
     label_color.Color(ImGuiCol_Text, tokens::kTextSecondary);
-    ImGui::TextWrapped("%s", text.c_str());
+    ImGui::TextUnformatted(shown.c_str());
     row_label_right = ImGui::GetItemRectMax().x;
     if (!tip.empty()) {
       ItemTooltip("%s", tip.c_str());
     }
   }
   ImGui::PopFont();
-  if (stacked) {
-    gui::SetNextItemWidth((std::max)(1.f, bounds.control_right - at.x));
-  } else {
-    gui::SameLine();
-    gui::SetCursorScreenPos(ImVec2(control_x, gui::GetCursorScreenPos().y));
-    gui::SetNextItemWidth((std::max)(1.f, bounds.control_right - control_x));
-  }
+  gui::SameLine();
+  gui::SetCursorScreenPos(ImVec2(control_x, gui::GetCursorScreenPos().y));
+  gui::SetNextItemWidth((std::max)(1.f, bounds.control_right - control_x));
 }
 
 inline bool GlyphButton(const char* glyph, const char* id, const ImVec2& size, float scale,

@@ -20,7 +20,6 @@ inline constexpr char WIDTH[] = "DLSSNR.Width";
 inline constexpr char HEIGHT[] = "DLSSNR.Height";
 inline constexpr char PRESET[] = "DLSSNR.Hint.Render.Preset";
 inline constexpr char SCALING_RATIO[] = "DLSSNR.ScalingRatio";
-inline constexpr char PERF_QUALITY_VALUE[] = "PerfQualityValue";
 
 inline constexpr Resource COLOR = {"DLSSNR.Color", {"DLSSNR.ColorSubrectBaseX", "DLSSNR.ColorSubrectBaseY", "DLSSNR.ColorSubrectWidth", "DLSSNR.ColorSubrectHeight"}};
 inline constexpr Resource OUTPUT = {"DLSSNR.Output", {"DLSSNR.OutputSubrectBaseX", "DLSSNR.OutputSubrectBaseY", "DLSSNR.OutputSubrectWidth", "DLSSNR.OutputSubrectHeight"}};
@@ -38,7 +37,6 @@ inline constexpr char INTENSITY[] = "DLSSNR.Intensity";
 inline constexpr char LOCAL_TONE[] = "DLSSNR.LocalToneStrength";
 inline constexpr char LOCAL_STRUCTURE[] = "DLSSNR.LocalStructureStrength";
 inline constexpr char USE_AUTO_MASK[] = "DLSSNR.UseAutoMask";
-inline constexpr char MASK_BLEND_MODE[] = "DLSSNR.MaskBlendMode";
 inline constexpr char SKIN_STRUCTURE[] = "DLSSNR.SkinStructureStrength";
 inline constexpr char STYLE[] = "DLSSNR.Style";
 inline constexpr char RESET[] = "DLSSNR.Reset";
