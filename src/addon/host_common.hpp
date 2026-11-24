@@ -286,6 +286,7 @@ template <auto& STATE>
 void OnDestroyEffectRuntime(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(STATE->mutex);
+    STATE->panel_renderer.Release(runtime);
     std::erase(STATE->runtimes, runtime);
     for ([[maybe_unused]] auto& [device, entry] : STATE->devices) {
       if (entry.runtime == runtime) {
@@ -332,7 +333,7 @@ bool OnOpenOverlay(api::effect_runtime* /*runtime*/, bool open, api::input_sourc
         nr::Logf(nr::LogLevel::INFO, "ReShade overlay opened: the Uplift panel yields");
       }
     } else {
-      // A slider held as the overlay closes must not stay coalesced, so the panel's state resets --
+      // A slider held as the overlay closes must not stay coalesced, so the panel resets --
       // except where the panel sits and which tab it is on, which are the user's, not the session's.
       // This also runs when the add-on closes ReShade's overlay to make room for its own panel; the caller opens the
       // panel after the reset, so nothing of value is lost.

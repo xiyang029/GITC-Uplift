@@ -128,7 +128,6 @@ struct OverlayView {
 // Panel state kept across frames.
 struct OverlayState {
   DragState drag;
-  bool language_changed = false;
   OverlayView::Activity activity_start{}, activity_delta{};
   std::chrono::steady_clock::time_point activity_since{};
   double activity_seconds = 0.0;
@@ -178,7 +177,7 @@ void FinishSetup(OverlayView* view, OverlayState* state, const void* device, con
 
 // Draws the standalone panel while OverlayState::panel_open is set. Returns true when `settings`
 // changed, so the caller can sanitise, save and apply.
-bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState* state);
+bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState* state, void* window_handle);
 
 // Closes the standalone panel. Every path (the header's cross, Escape, the panel hotkey) goes through this, so a closed
 // panel keeps nothing of its session: the cursor, the intro and the tab transition start over with the next open.

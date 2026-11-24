@@ -3,13 +3,12 @@
 #include <wrl/client.h>
 
 #include <chrono>
-#include <filesystem>
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
-#include "forkawesome.inl"
 #include "ui/overlay.hpp"
+#include "ui/panel_font.hpp"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 
@@ -66,26 +65,14 @@ bool RunPreview(HWND window) {
   auto& io = ImGui::GetIO();
   io.IniFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-  wchar_t windows_dir[MAX_PATH]{};
-  if (const UINT length = GetWindowsDirectoryW(windows_dir, MAX_PATH); length > 0 && length < MAX_PATH) {
-    const auto font = std::filesystem::path(windows_dir) / L"Fonts" / L"msyh.ttc";
-    if (std::filesystem::exists(font)) {
-      io.FontDefault = io.Fonts->AddFontFromFileTTF(font.string().c_str(), 19.f);
-    }
-  }
-  // Match the icon font used by the pinned ReShade build.
-  if (!io.FontDefault) io.Fonts->AddFontDefault();
-  ImFontConfig merge;
-  merge.MergeMode = true;
-  merge.PixelSnapH = true;
-  io.Fonts->AddFontFromMemoryCompressedBase85TTF(FONT_ICON_BUFFER_NAME_FK, 0.f, &merge);
+  const bool has_chinese_font = LoadPanelTypeface();
 
   const bool win32_ready = ImGui_ImplWin32_Init(window);
   const bool dx11_ready = win32_ready && ImGui_ImplDX11_Init(device.Get(), context.Get());
   bool ok = dx11_ready;
   if (ok) {
     Settings settings;
-    settings.language = io.FontDefault ? Language::SIMPLIFIED_CHINESE : Language::ENGLISH;
+    settings.language = has_chinese_font ? Language::SIMPLIFIED_CHINESE : Language::ENGLISH;
     settings.pass_count = 2u;
     SetSourcePick(&settings, SourcePick::PRESENT);
     OverlayState state;
@@ -159,7 +146,7 @@ bool RunPreview(HWND window) {
       for (size_t i = 0; i < facts.stored_stages.size(); ++i) facts.stored_stages[i] = settings.passes[i].stage;
       FinishSetup(&view, &state, nullptr, facts, now);
       if (state.panel_open) {
-        DrawOverlayWindow(view, &settings, &state);
+        DrawOverlayWindow(view, &settings, &state, window);
       } else {
         ImGui::SetNextWindowPos({24.f, 24.f}, ImGuiCond_Once);
         if (ImGui::Begin("GITC Uplift UI Preview", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {

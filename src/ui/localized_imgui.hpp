@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <string>
 
-#include "addon/reshade_api.hpp"
+#include <imgui.h>
 #include "ui/localization.hpp"
 
 namespace uplift::ui::gui {

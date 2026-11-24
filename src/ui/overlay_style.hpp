@@ -4,17 +4,9 @@
 // lends them to ImGui's global style for exactly one panel frame.
 //
 //   - `tokens` and `icons` are the shared vocabulary for built-in and hand-drawn controls.
-//   - PanelStyle copies the live style in, applies those tokens, and copies the live style back on the way out.
+//   - PanelStyle scopes those tokens to the draw in the panel's own context.
 //
-// ImGui's style is one global struct, and ReShade draws its own windows from it. Nothing here may outlive the
-// panel's frame: ReShade re-reads its style from ReShade.ini whenever its settings are touched, and a style
-// left applied by the panel was why ReShade's own UI came up in Uplift's colours and metrics.
-//
-// Nothing here touches ReShade's font atlas (an add-on must not load a font of its own) or ReShade's config,
-// and nothing calls ImGuiStyle::ScaleAllSizes (IMGUI_API, and this add-on links no ImGui) or
-// ImGui::SetWindowFontScale (obsolete, and global): sizes follow the window's already-scaled body font.
-//
-// Include after <imgui.h> and reshade.hpp (which ui/localized_imgui.hpp pulls in), as the rest of the panel does.
+// The panel uses its own typeface and scopes its font size and spacing to its draw.
 
 #include <algorithm>
 #include <cmath>
@@ -73,33 +65,28 @@ constexpr ImVec4 kSurfaceActive = Fade(kTextPrimary, 0.16f);
 // White is reserved for the navigation. Body rows use tonal fills to keep the text and controls readable.
 constexpr ImVec4 kPlateInk = Hex(0x0A0A0B);
 
-constexpr float kBaseFont = 13.f;
+constexpr float kBaseFont = 13.f;      // unit reference for the existing panel geometry
+constexpr float kBodyFont = 19.f;      // body size in pixels at 96 DPI
 constexpr float kHeadingScale = 1.2f;   // card and group headings: the reference panel's bold captions
 constexpr float kRowLabelScale = 1.03f;  // row labels, a touch larger than the body so they read as bold
 
 // Row geometry measured in the body font; the width limit is relative to the current column.
 constexpr float kLabelEm = 10.5f;
 constexpr float kLabelShare = 0.42f;
-constexpr float kStackEm = 9.f;
 constexpr float kTooltipEm = 35.f;
 
 }  // namespace tokens
 
 namespace icons {
-// ReShade v6.8 merges ForkAwesome into the UI font. Check coverage for other host atlases.
-inline const char* Glyph(ImWchar primary, const char* icon, ImWchar alternate, const char* symbol, const char* fallback) {
-  ImFont* const font = gui::GetFont();
-  if (font->IsGlyphInFont(primary)) return icon;
-  if (font->IsGlyphInFont(alternate)) return symbol;
-  return fallback;
-}
-inline const char* Undo() { return Glyph(0xF0E2, "\xef\x83\xa2", 0x21BA, "\xe2\x86\xba", "<"); }
-inline const char* RadioOn() { return Glyph(0xF192, "\xef\x86\x92", 0x25C9, "\xe2\x97\x89", "*"); }
-inline const char* RadioOff() { return Glyph(0xF10C, "\xef\x84\x8c", 0x25CB, "\xe2\x97\x8b", "o"); }
-inline const char* Previous() { return Glyph(0xF053, "\xef\x81\x93", 0x2039, "\xe2\x80\xb9", "<"); }
-inline const char* Next() { return Glyph(0xF054, "\xef\x81\x94", 0x203A, "\xe2\x80\xba", ">"); }
-inline const char* Close() { return Glyph(0xF00D, "\xef\x80\x8d", 0x00D7, "\xc3\x97", "x"); }
+enum class Action { Reset, Previous, Next, Close };
 }  // namespace icons
+
+// Resolution only caps the effective DPI scale; multiplying both would enlarge the panel twice on HiDPI displays.
+inline float PanelFontSize(float display_height, unsigned dpi) {
+  const float requested = tokens::kBodyFont * (static_cast<float>(dpi ? dpi : 96u) / 96.f);
+  const float limit = std::clamp(tokens::kBodyFont * display_height / 640.f, 14.f, 38.f);
+  return std::round(std::clamp(requested, 14.f, limit));
+}
 
 // Round the scaled 4 px step once so repeated gaps stay integral at fractional font scales.
 inline float Scale() { return gui::GetFontSize() / tokens::kBaseFont; }
@@ -118,8 +105,7 @@ inline float ControlRadius() { return SnapUp(Units(1.5f)); }
 inline float CardRadius() { return SnapUp(Units(2.5f)); }
 inline float CapsuleRadius() { return 999.f; }
 
-// A settings row is 2 em tall whatever the player's font size: 38 px at ReShade's default 19 px face, which
-// is the reference panel's row, and it grows with the Ctrl + wheel instead of clipping.
+// Leave two body lines of room before snapping to the panel grid.
 inline float RowHeight() { return SnapUp(gui::GetFontSize() * 2.f); }
 
 inline ImU32 ToU32(const ImVec4& color) { return ImGui::GetColorU32(color); }
@@ -146,8 +132,12 @@ namespace motion {
 constexpr float kSliderFollow = 0.06f;  // the rail catching up with a knob that is being dragged, not a transition
 constexpr float kToggle = 0.20f;        // a switch's track and thumb sliding over
 constexpr float kHover = 0.22f;         // a control's hover and press wash, and a tab's own
+constexpr float kChoiceFeedback = 0.075f;
+constexpr float kChoiceSlide = 0.16f;
 constexpr float kTabSlide = 0.32f;      // the plate and content moving between tabs
 constexpr float kIntro = 0.36f;         // the panel's opening slide and fade
+
+constexpr float EaseOut(float t) { return 1.f - (1.f - t) * (1.f - t); }
 }  // namespace motion
 
 // Pushes and pops in one object, so a return from the middle of a panel cannot leave a colour or a variable
@@ -195,8 +185,6 @@ class StyleScope {
   int vars_ = 0;
 };
 
-// The style half's own implementation, in one place and inline: the add-on links no ImGui source, so there is
-// no translation unit to put it in.
 namespace detail {
 
 // Every colour the panel puts into ImGui's style, as one table: a single list to read, and no call site
@@ -209,12 +197,10 @@ struct SlotColor {
 
 constexpr SlotColor kPalette[] = {
     {ImGuiCol_Text, tokens::kTextPrimary},
-    {ImGuiCol_TextDisabled, tokens::kTextSecondary},
     {ImGuiCol_TextLink, tokens::kTextSecondary},
     {ImGuiCol_WindowBg, tokens::kBgWindow},
     {ImGuiCol_PopupBg, tokens::kBgPopup},
     {ImGuiCol_Border, tokens::kTransparent},
-    {ImGuiCol_BorderShadow, tokens::kTransparent},
 
     // Text fields and native slider fallbacks.
     {ImGuiCol_FrameBg, tokens::kBgControl},
@@ -237,15 +223,13 @@ constexpr SlotColor kPalette[] = {
     {ImGuiCol_InputTextCursor, tokens::kAccent},
     {ImGuiCol_NavCursor, tokens::kAccentStrong},
     {ImGuiCol_TextSelectedBg, tokens::kAccentHalo},
-    {ImGuiCol_TableRowBg, tokens::kTransparent},
-    {ImGuiCol_TableRowBgAlt, tokens::Fade(tokens::kTextPrimary, 0.02f)},
 
     {ImGuiCol_NavWindowingHighlight, tokens::Fade(tokens::kTextPrimary, 0.70f)},
     {ImGuiCol_NavWindowingDimBg, tokens::Fade(tokens::Hex(0x000000), 0.35f)},
     {ImGuiCol_ModalWindowDimBg, tokens::Fade(tokens::Hex(0x000000), 0.55f)},
 };
 
-// Override only the panel's controls; preserve the host font and restore the base after drawing.
+// Override the metrics and palette for the panel and its controls.
 inline void ApplyPanelStyle() {
   ImGuiStyle& style = ImGui::GetStyle();
   const float scale = Scale();
@@ -267,16 +251,9 @@ inline void ApplyPanelStyle() {
 
   style.ScrollbarSize = step;
   style.ScrollbarPadding = 0.f;
-  style.WindowMinSize = ImVec2(style.WindowMinSize.x * scale, style.WindowMinSize.y * scale);
+  style.WindowMinSize = ImVec2(32.f * scale, 32.f * scale);
 
   style.DisabledAlpha = 0.55f;
-  style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
-
-  style.AntiAliasedLines = true;
-  style.AntiAliasedLinesUseTex = true;
-  style.AntiAliasedFill = true;
-  style.CurveTessellationTol = 1.25f;
-  style.CircleTessellationMaxError = 0.30f;
 
   for (const SlotColor& entry : kPalette) {
     style.Colors[entry.slot] = entry.color;
@@ -285,17 +262,21 @@ inline void ApplyPanelStyle() {
 
 }  // namespace detail
 
-// The panel's style, held for one panel frame. ImGui's style is one global struct, so a frame that returns
-// through the middle of a tab still has to put ReShade's copy back: the destructor does it.
-//
-// Copy-initialised on purpose: ImGuiStyle's default constructor lives in imgui.cpp (the add-on links no ImGui),
-// while its copy constructor is implicit, so `ImGuiStyle saved;` would not link.
+// Keep nested font and style overrides scoped to the panel frame.
 class PanelStyle {
  public:
-  PanelStyle() : saved_(ImGui::GetStyle()) { detail::ApplyPanelStyle(); }
+  explicit PanelStyle(float font_size) : saved_(ImGui::GetStyle()) {
+    auto& style = ImGui::GetStyle();
+    style.FontScaleMain = style.FontScaleDpi = 1.f;
+    ImGui::PushFont(nullptr, font_size);
+    detail::ApplyPanelStyle();
+  }
   PanelStyle(const PanelStyle&) = delete;
   PanelStyle& operator=(const PanelStyle&) = delete;
-  ~PanelStyle() { ImGui::GetStyle() = saved_; }
+  ~PanelStyle() {
+    ImGui::PopFont();
+    ImGui::GetStyle() = saved_;
+  }
 
  private:
   ImGuiStyle saved_;

@@ -735,7 +735,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   ID3D12Resource* output = chain.b;
   const bool reset = stage.reset_pending || inputs.reset_hint;
   // A pass-count decrease keeps its surplus features idle; Evaluate runs only the first `desired`, without a
-  // rebuild either. A pass that did not run the previous frame starts its history afresh (index >= evaluated_end,
+  // rebuild. A pass that did not run the previous frame starts its history afresh (index >= evaluated_end,
   // below). Split chain: the slice's live passes, in order, by their global index.
   const uint32_t desired = std::min(pass_count_, passes_limit_);
   const uint32_t slice_end = slice.first + slice.count;

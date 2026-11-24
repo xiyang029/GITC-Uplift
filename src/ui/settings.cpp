@@ -7,6 +7,7 @@
 #include <system_error>
 #include <utility>
 
+#include "ui/localization.hpp"
 #include "ui/settings_schema.hpp"
 
 namespace uplift::ui {
@@ -62,20 +63,31 @@ std::errc ApplySettingText(Settings& settings, const SettingDescriptor& descript
 
 Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnings) {
   Settings settings;
-  const auto warn = [warnings](std::string line) {
-    if (warnings != nullptr) {
-      warnings->push_back(std::move(line));
-    }
+  struct RejectedValue {
+    const SettingDescriptor* descriptor;
+    std::string text;
+    std::errc error;
   };
+  std::vector<RejectedValue> rejected;
   // Unknown keys are ignored, including the retired PedestalRemoval placeholder (it never affected rendering).
   for (const SettingDescriptor& descriptor : SettingsSchema()) {
-    const std::optional<std::string> text = store.Get(descriptor.key);
+    std::optional<std::string> text = store.Get(descriptor.key);
     if (!text) continue;
     const auto error = ApplySettingText(settings, descriptor, *text);
-    if (error == std::errc::invalid_argument) {
-      warn(std::format(UNREADABLE_SETTING_WARNING, descriptor.key, *text));
-    } else if (error == std::errc::result_out_of_range) {
-      warn(std::format(OUT_OF_RANGE_SETTING_WARNING, descriptor.key, *text, FormatSettingValue(descriptor, DefaultSettings())));
+    if (warnings != nullptr && error != std::errc{}) {
+      rejected.push_back({&descriptor, std::move(*text), error});
+    }
+  }
+  // The language is known now. Translate the template, not the literal INI key or rejected value.
+  if (warnings != nullptr) {
+    for (const auto& [descriptor, text, error] : rejected) {
+      const auto key = descriptor->key;
+      if (error == std::errc::invalid_argument) {
+        warnings->push_back(std::vformat(Localize(settings.language, UNREADABLE_SETTING_WARNING), std::make_format_args(key, text)));
+      } else if (error == std::errc::result_out_of_range) {
+        const auto fallback = Localize(settings.language, FormatSettingValue(*descriptor, DefaultSettings()));
+        warnings->push_back(std::vformat(Localize(settings.language, OUT_OF_RANGE_SETTING_WARNING), std::make_format_args(key, text, fallback)));
+      }
     }
   }
   if (settings.use_d3d9ex) settings.startup_latches &= ~Settings::LATCH_D3D9EX;

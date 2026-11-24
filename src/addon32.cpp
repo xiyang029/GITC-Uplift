@@ -30,6 +30,7 @@
 #include "addon/nr_claim.hpp"
 #include "addon/removal_latch.hpp"
 #include "addon/reshade_api.hpp"
+#include "addon/panel_renderer.hpp"
 #include "addon/reshade_config_store.hpp"
 #include "addon/reshade_version.hpp"
 #include "addon/reshade_vk_host.hpp"
@@ -83,6 +84,7 @@ struct DeviceEntry32 {
 struct AddonState32 {
   std::shared_mutex mutex;
   addon::ReshadeConfigStore config;
+  addon::PanelRenderer panel_renderer;
   ui::Settings settings;
   ui::EnabledPoller poller;
   ui::OverlayState overlay;
@@ -248,7 +250,7 @@ void OnFinishEffects(api::effect_runtime* runtime, api::command_list* cmd_list, 
     const std::unique_lock lock(g_state->mutex);
     DeviceEntry32* const entry = FindFrameEntry(g_state, runtime, cmd_list);
     if (entry == nullptr) return;
-    g_state->front->FinishEffects(entry->helper, runtime, g_state->settings);
+    g_state->front->FinishEffects(entry->helper, runtime);
   }
   UPLIFT_CATCH("finish_effects", )
 }
@@ -305,16 +307,13 @@ void OnReshadePresent(api::effect_runtime* runtime) {
   UPLIFT_CATCH("reshade_present", )
 }
 
-// Builds the view the panel draws and draws the panel's own window. Leaves before building anything while the panel is
-// closed: a closed panel costs one bool test per ReShade frame.
+// Build the view and submit the panel only while it is open.
 void OnReshadeOverlay(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState32& state = *g_state;
-    // This event runs with ReShade's ImGui context active. Restore the cursor here after a hotkey close;
-    // ClosePanel also runs from reshade_present, where touching ImGui state is unsafe.
     if (!state.overlay.panel_open || state.overlay.reshade_overlay_open) {
-      ImGui::GetIO().MouseDrawCursor = false;
+      state.panel_renderer.Suspend(runtime);
       return;
     }
     const auto now = std::chrono::steady_clock::now();
@@ -342,11 +341,9 @@ void OnReshadeOverlay(api::effect_runtime* runtime) {
     }
     view.before_fg_unavailable = "Before FG needs a game-facing 64-bit Streamline integration";
     view.AddStartupLocks(state.settings, overlay_api == api::device_api::vulkan, overlay_api == api::device_api::d3d9);
-    const bool edited = ui::DrawOverlayWindow(view, &state.settings, &state.overlay);
+    const bool edited = state.panel_renderer.Draw(runtime, view, &state.settings, &state.overlay);
     if (edited) {
       SaveAndApply(&state);
-    } else if (state.overlay.language_changed) {
-      ui::SaveSettings(state.settings, &state.config);
     }
     // Retry now, decided by the card's button: a stopped helper starts afresh; otherwise the next FRAME carries it.
     if (std::exchange(state.overlay.retry_now, false)) {

@@ -17,7 +17,7 @@ inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // 11: network diagnostics for all ten passes (+3840 bytes).
 // 12-13: game-facing Present and per-pass network/style records; 14: the early-marker motion extent; 15: Status::keep_faces_supported.
 // 16: RequestKind::FRAME_RUN (the steady FENCED path) and Reply::reserved -> run_skipped (same offset and size).
-// 17: Frame::defaults_view dropped (the Compare view is gone): Frame shrinks by 8 bytes with its padding.
+// 17: Frame::defaults_view removed (the Compare feature is gone); Frame shrinks by 8 bytes with its padding.
 inline constexpr uint32_t PROTOCOL_VERSION = 17u;
 inline constexpr size_t TEXT_BYTES = 256u;
 inline constexpr size_t NETWORK_DIAGNOSTIC_BYTES = 4096u;

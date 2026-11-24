@@ -54,6 +54,22 @@ add_compile_definitions(UPLIFT_NR_MIN_SHORT_SIDE=${UPLIFT_NR_MIN_SHORT_SIDE} UPL
 # The C++ warning and conformance set; MinHook's C sources below keep their own warning level.
 add_compile_options(/utf-8 "$<$<COMPILE_LANGUAGE:CXX>:/W4;/permissive-;/Zc:__cplusplus;/EHsc;/external:W0>")
 
+# The panel owns a private ImGui context. The add-on's ReShade-facing sources
+# still use its function table, so they must not see this target's ImGui config.
+if(NOT EXISTS "${UPLIFT_IMGUI_INCLUDE}/imgui.cpp")
+  message(FATAL_ERROR "Dear ImGui sources not found; run tools\\fetch_deps.cmd")
+endif()
+add_library(uplift_panel STATIC
+  "${UPLIFT_IMGUI_INCLUDE}/imgui.cpp"
+  "${UPLIFT_IMGUI_INCLUDE}/imgui_draw.cpp"
+  "${UPLIFT_IMGUI_INCLUDE}/imgui_tables.cpp"
+  "${UPLIFT_IMGUI_INCLUDE}/imgui_widgets.cpp"
+  src/ui/overlay.cpp src/ui/panel_context.cpp src/ui/panel_font.cpp)
+target_include_directories(uplift_panel PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_include_directories(uplift_panel SYSTEM PRIVATE "${UPLIFT_IMGUI_INCLUDE}")
+target_compile_definitions(uplift_panel PRIVATE ImTextureID=ImU64 IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+  IMGUI_USER_CONFIG="ui/private_imgui_config.hpp")
+
 # UPLIFT_BUILD_ID = "<version>+<git short hash>[-dirty]", written at every build (not at configure) by
 # cmake/build_id.cmake, so gitc-uplift.addon32 and gitc-uplift-helper64.exe built from one tree agree and halves from different
 # trees are refused. Targets that include "build_id.hpp" depend on uplift_build_id and add UPLIFT_GENERATED.
@@ -431,12 +447,12 @@ add_library(uplift_addon SHARED
   src/addon/live_facts.cpp
   src/addon/log_bridge.cpp
   src/addon/reshade_config_store.cpp
+  src/addon/panel_renderer.cpp
   src/addon/command_list_tracker.cpp
   src/addon/swapchain_usage.cpp
   src/addon/reshade_vk_host.cpp
   src/addon/reshade_gl_host.cpp
   src/addon/reshade_d3d12_host.cpp
-  src/ui/overlay.cpp
   # The XMX payload's RCDATA. A static library's resource members carry no symbol, so the linker
   # would drop them; they live on the add-on itself, which is also where they are read from.
   ${UPLIFT_XMX_GENERATED}/embedded_xess_programs.rc
@@ -447,7 +463,7 @@ target_include_directories(uplift_addon SYSTEM PRIVATE "${UPLIFT_RESHADE_INCLUDE
 target_include_directories(uplift_addon PRIVATE "${UPLIFT_GENERATED}")
 target_compile_definitions(uplift_addon PRIVATE ImTextureID=ImU64 IMGUI_DISABLE_OBSOLETE_FUNCTIONS UPLIFT_VERSION_TEXT="${PROJECT_VERSION}")
 # The XMX mode rides in the 64-bit add-on: its hook and generator are D3D12-only, like the NGX hooks.
-target_link_libraries(uplift_addon PRIVATE uplift_addon_core uplift_bridge uplift_client uplift_vk uplift_gl uplift_xmx d3d9)
+target_link_libraries(uplift_addon PRIVATE uplift_addon_core uplift_bridge uplift_client uplift_vk uplift_gl uplift_xmx uplift_panel d3d9)
 add_dependencies(uplift_addon uplift_build_id)
 
 else()
@@ -509,16 +525,16 @@ add_library(uplift_addon32 SHARED
   src/addon/live_facts.cpp
   src/addon/log_bridge.cpp
   src/addon/reshade_config_store.cpp
+  src/addon/panel_renderer.cpp
   src/addon/swapchain_usage.cpp
   src/addon/reshade_vk_host.cpp
   src/addon/reshade_gl_host.cpp
-  src/addon/reshade_d3d12_host.cpp
-  src/ui/overlay.cpp)
+  src/addon/reshade_d3d12_host.cpp)
 set_target_properties(uplift_addon32 PROPERTIES OUTPUT_NAME "gitc-uplift" SUFFIX ".addon32")
 target_include_directories(uplift_addon32 SYSTEM PRIVATE "${UPLIFT_RESHADE_INCLUDE}" "${UPLIFT_IMGUI_INCLUDE}")
 target_include_directories(uplift_addon32 PRIVATE "${UPLIFT_GENERATED}")
 target_compile_definitions(uplift_addon32 PRIVATE ImTextureID=ImU64 IMGUI_DISABLE_OBSOLETE_FUNCTIONS UPLIFT_VERSION_TEXT="${PROJECT_VERSION}")
-target_link_libraries(uplift_addon32 PRIVATE uplift_client uplift_vk uplift_gl delayimp)
+target_link_libraries(uplift_addon32 PRIVATE uplift_client uplift_vk uplift_gl uplift_panel delayimp)
 # D3D11CreateDevice, the only d3d11.dll import, runs for a Direct3D 10 game's relay alone. Delay-loaded, so a
 # Direct3D 9 game never maps d3d11.dll for Uplift's sake.
 target_link_options(uplift_addon32 PRIVATE /DELAYLOAD:d3d11.dll)

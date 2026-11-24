@@ -48,11 +48,15 @@ if not defined IMGUI_COMMIT (
   exit /b 1
 )
 git init --quiet "%DEPS%\imgui" || exit /b 1
-git -C "%DEPS%\imgui" sparse-checkout set --no-cone /imgui.h /imconfig.h /LICENSE.txt || exit /b 1
+git -C "%DEPS%\imgui" sparse-checkout set --no-cone /imgui.h /imconfig.h /LICENSE.txt /imgui.cpp /imgui_draw.cpp /imgui_tables.cpp /imgui_widgets.cpp /imgui_internal.h /imstb_rectpack.h /imstb_textedit.h /imstb_truetype.h || exit /b 1
 git -C "%DEPS%\imgui" fetch --quiet --depth 1 --filter=blob:none https://github.com/ocornut/imgui.git !IMGUI_COMMIT! || exit /b 1
 git -C "%DEPS%\imgui" checkout --quiet FETCH_HEAD || exit /b 1
 >"%DEPS%\reshade-tag.txt" echo %RESHADE_TAG%
 :reshade_done
+rem Older checkouts fetched only the headers used by the ReShade function table.
+if not exist "%DEPS%\imgui\imgui_internal.h" (
+  git -C "%DEPS%\imgui" sparse-checkout add /imgui.cpp /imgui_draw.cpp /imgui_tables.cpp /imgui_widgets.cpp /imgui_internal.h /imstb_rectpack.h /imstb_textedit.h /imstb_truetype.h || exit /b 1
+)
 
 rem MinHook (BSD-2-Clause) at the commit the pinned ReShade tag's deps/minhook submodule records.
 set "MINHOOK_COMMIT="

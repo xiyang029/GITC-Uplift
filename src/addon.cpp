@@ -55,6 +55,7 @@
 #include "addon/placement.hpp"
 #include "addon/removal_latch.hpp"
 #include "addon/reshade_api.hpp"
+#include "addon/panel_renderer.hpp"
 #include "addon/reshade_config_store.hpp"
 #include "addon/reshade_gl_host.hpp"
 #include "addon/reshade_version.hpp"
@@ -393,6 +394,7 @@ struct AddonState {
   struct QueueRecord { api::command_queue* queue; api::device* device; };
   std::unordered_map<uint64_t, QueueRecord> queues;
   addon::ReshadeConfigStore config;
+  addon::PanelRenderer panel_renderer;
   ui::Settings settings;
   ui::EnabledPoller poller;
   ui::ControlsCoalescer coalescer;
@@ -3570,16 +3572,13 @@ ui::StatusCard CardFor(const AddonState& state, const DeviceEntry& entry, const 
   });
 }
 
-// Builds the view the panel draws and draws the panel's own window. Leaves before building anything while the panel is
-// closed: a closed panel costs one bool test per ReShade frame.
+// Build the view and submit the panel only while it is open.
 void OnReshadeOverlay(api::effect_runtime* runtime) {
   try {
     const std::unique_lock lock(g_state->mutex);
     AddonState& state = *g_state;
-    // This event runs with ReShade's ImGui context active. Restore the cursor here after a hotkey close;
-    // ClosePanel also runs from reshade_present, where touching ImGui state is unsafe.
     if (!state.overlay.panel_open || state.overlay.reshade_overlay_open) {
-      ImGui::GetIO().MouseDrawCursor = false;
+      state.panel_renderer.Suspend(runtime);
       return;
     }
     const auto now = std::chrono::steady_clock::now();
@@ -3961,7 +3960,7 @@ void OnReshadeOverlay(api::effect_runtime* runtime) {
                                      nullptr, true, entry.strikes.RetryAllowed() && !HelperView(entry)});
       }
     }
-    const bool edited = ui::DrawOverlayWindow(view, &state.settings, &state.overlay);
+    const bool edited = state.panel_renderer.Draw(runtime, view, &state.settings, &state.overlay);
     if (edited) {
       if (overlay_device_api == api::device_api::vulkan && MoveStageForVkRoute(&state.settings, vulkan_nr_before)) {
         state.overlay.setup_settle.Clicked(ui::SetupRow::STAGE, static_cast<uint32_t>(ui::SourcePick::PRESENT));  // as a click on Present
@@ -3972,8 +3971,6 @@ void OnReshadeOverlay(api::effect_runtime* runtime) {
         addon::DeleteLatchMarker(state.latch_marker_path);
       }
       SaveAndApply(&state);
-    } else if (state.overlay.language_changed) {
-      ui::SaveSettings(state.settings, &state.config);
     }
     // Retry now, decided by the card's button; never after a removal or a teardown
     // (DeviceContext::RetryNow's own guard).
@@ -4048,7 +4045,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   }
   // Fails when ReShade lacks this API version or ImGui table.
   if (!reshade::register_addon(addon_module, reshade_module)) return false;
-  addon::ApplyPanelFonts();  // ReShade reads [STYLE] once it builds its fonts, right after the add-ons load
   g_state = new AddonState();
   g_state->self_module = addon_module;
   std::vector<std::string> warnings;

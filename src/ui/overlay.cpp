@@ -9,9 +9,9 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
-#include "addon/reshade_api.hpp"
 #include "memory_units.hpp"
 #include "ui/settings_schema.hpp"
 #include "nr/foveation.hpp"
@@ -99,28 +99,40 @@ DetailFrame& PendingDetail() {
   return frame;
 }
 
+void FocusDetailRow(const OverlayState& state, std::string_view key, const char* title,
+                    std::string_view body, ImVec2 top, bool activated) {
+  const bool hovered = gui::IsWindowHovered() && gui::IsMouseHoveringRect(
+      top, ImVec2(widgets::row_slot_x, gui::GetCursorScreenPos().y - gui::GetStyle().ItemSpacing.y));
+  auto& frame = PendingDetail();
+  const ImGuiID nav = gui::IsItemFocused() ? gui::GetItemID() : 0;
+  if (frame.Select(state, key, hovered, nav, activated)) {
+    frame.focus = {std::string(key), title, std::string(body), {}, {}, 0, {}};
+  }
+}
+
 // Both columns use the same setter. Choice details are rebuilt from this row's live value and
 // availability, including when the pointer has moved over to the right column.
 bool DrawChoice(OverlayState& state, std::string_view key, const char* title, const char* const* names,
                 int count, int value, const std::string_view* reasons, std::string_view body,
                 std::string_view disabled, std::function<bool(int)> apply) {
-  gui::BeginDisabled(!disabled.empty());
-  // ChoiceRow owns one invisible hit item. Give each setting its own hidden ID so rows in the same tab do not collide.
-  const std::string choice_id = std::string(key) + "##choice_row";
-  const auto hit = widgets::ChoiceRow(choice_id.c_str(), title, names, count, value, reasons);
+  const bool blocked = !disabled.empty();
+  gui::BeginDisabled(blocked);
+  const auto hit = widgets::ChoiceRow(key, title, names, count, value, reasons, blocked);
   gui::EndDisabled();
   auto& frame = PendingDetail();
-  if (frame.Select(state, key, hit.hovered, hit.nav_id, hit.activated)) {
+  const bool focused = frame.Select(state, key, hit.hovered, hit.nav_id, hit.activated);
+  if (focused) {
     auto& detail = frame.focus;
     detail = {std::string(key), gui::Visible(title), std::string(body), std::string(disabled), {}, value, {}};
     detail.options.reserve(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i) {
-      const auto reason = !disabled.empty() ? disabled : reasons != nullptr ? reasons[i] : std::string_view();
+      const auto reason = blocked ? disabled : reasons != nullptr ? reasons[i] : std::string_view();
       detail.options.push_back({names[i], std::string(reason)});
     }
-    if (disabled.empty()) detail.pick = apply;
   }
-  return disabled.empty() && hit.picked >= 0 && apply(hit.picked);
+  const bool changed = !blocked && hit.picked >= 0 && apply(hit.picked);
+  if (focused && !blocked) frame.focus.pick = std::move(apply);
+  return changed;
 }
 
 // Draw a settings-schema row with its normal availability, reset and commit rules.
@@ -202,19 +214,27 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   bool changed = false;
   if (descriptor.key == "SkinStructure") {
     bool follows = (settings->skin_structure < 0.f);
-    widgets::RowLabel("Skin follows Structure");
-    if (widgets::Switch("##SkinFollows", &follows)) {
+    constexpr const char* title = "Skin follows Structure";
+    const ImVec2 top = gui::GetCursorScreenPos();
+    widgets::RowLabel(title);
+    const bool edited = widgets::Switch("##SkinFollows", &follows);
+    if (edited) {
       settings->skin_structure = (follows ? SKIN_SAME_AS_STRUCTURE : settings->local_structure);
       changed = true;
     }
+    FocusDetailRow(*state, "SkinFollows", title, descriptor.tooltip, top, edited);
   }
   if (descriptor.key == "DiffuseWhiteNits") {
     bool automatic = (settings->diffuse_white_nits <= 0.f);
-    widgets::RowLabel("Automatic diffuse white");
-    if (widgets::Switch("##AutoDiffuseWhite", &automatic)) {
+    constexpr const char* title = "Automatic diffuse white";
+    const ImVec2 top = gui::GetCursorScreenPos();
+    widgets::RowLabel(title);
+    const bool edited = widgets::Switch("##AutoDiffuseWhite", &automatic);
+    if (edited) {
       settings->diffuse_white_nits = (automatic ? 0.f : std::clamp(view.effective_diffuse_white_nits, 48.f, 500.f));
       changed = true;
     }
+    FocusDetailRow(*state, "AutoDiffuseWhite", title, descriptor.tooltip, top, edited);
   }
   // A choice row draws its own caption inside ChoiceRow, so it needs no caption line of its own.
   const bool captioned = descriptor.kind != SettingKind::BOOL && descriptor.kind != SettingKind::CHOICE;
@@ -314,11 +334,9 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
         const float shown_scale = static_cast<float>(descriptor.display_scale);
         float value = static_cast<float>(descriptor.get(*settings));
         const float high = static_cast<float>(SliderMax(descriptor)) * shown_scale;  // Ctrl+click may type past it (DescriptorMax)
-        const char* const format = (descriptor.key == "GraceSeconds" ? "%.1f"
-                                    : FloatPercentSetting(descriptor.key)   ? "%.0f %%"
-                                    : descriptor.key == "AutoExposureBlend" ? "%.0f %%"
-                                    : descriptor.key == "StabilizeMs"       ? "%.0f ms"
-                                                                            : "%.2f");
+        const bool percent = FloatPercentSetting(descriptor.key) || descriptor.key == "AutoExposureBlend";
+        const char* const format = (percent ? "%.0f %%" : descriptor.key == "GraceSeconds" ? "%.1f"
+                                                      : descriptor.key == "StabilizeMs" ? "%.0f ms" : "%.2f");
         bool active = false;  // the slider's own held state, for the rows that gate work on the release
         const bool edited =
             widgets::Slider(label.c_str(), &value, static_cast<float>(descriptor.min) * shown_scale, high, format, &active, shown_scale);
@@ -357,7 +375,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           }
           // One reason per option; an option with one is stepped over, never landed on (the schema carries no
           // per-option text, so the column's radio list says what each choice is and this says which can run).
-          std::vector<std::string_view> why(static_cast<size_t>(count), disabled_reason);
+          std::vector<std::string_view> why(static_cast<size_t>(count));
           int shown = std::clamp(value, 0, count - 1);
           std::string note;
           if (descriptor.key == "ResolutionMode" || descriptor.key == "ResolutionAfterDlss" || descriptor.key == "ResolutionPresent") {
@@ -559,22 +577,15 @@ bool DrawStageRow(const OverlayView& view, Settings* settings, OverlayState* sta
     if (index == 2u && !view.before_fg_unavailable.empty()) reason = view.before_fg_unavailable;
     why[index] = reason;
   }
-  // Owned, because the stored-preference note is appended to the tip and a view into the array would dangle.
-  std::array<std::string, 4> tip_text = {};
-  std::array<std::string_view, 4> tips = {};
-  for (size_t index = 0u; index < tip_text.size(); ++index) {
-    tip_text[index] = (index == 0u && view.setup.before_upscaling_on_rr) ? "NR works on Ray Reconstruction's input." : TIPS[index];
-  }
+  std::string tip = shown == 0u && view.setup.before_upscaling_on_rr ? "NR works on Ray Reconstruction's input." : TIPS[shown];
   // What runs differs from what is stored (a temporary fallback): say what is stored, as the Motion row does.
   const OptionState& stored = view.setup.stage_options[static_cast<size_t>(preferred)];
   if (view.setup.stage != preferred && (stored.why.empty() || stored.temporary)) {
-    tip_text[shown] += std::format("\n{}", SavedNote(StageLabel(preferred, before_framegen)));
-  }
-  for (size_t index = 0u; index < tips.size(); ++index) {
-    tips[index] = tip_text[index];
+    tip += '\n';
+    tip += SavedNote(StageLabel(preferred, before_framegen));
   }
   changed |= DrawChoice(*state, "Source", "NR stage", NR_STAGE_NAMES.data(), static_cast<int>(NR_STAGE_NAMES.size()),
-                        static_cast<int>(shown), why.data(), tips[shown], view.setup.stopped ? "NR has stopped" : "",
+                        static_cast<int>(shown), why.data(), tip, view.setup.stopped ? "NR has stopped" : "",
       [&view, settings, state](int picked) {
         const auto source = static_cast<SourcePick>((std::min)(picked, 2));
         if (picked == 3 && view.frame_generation_active && settings->fg_present != Settings::FgPresent::AFTER) {
@@ -799,12 +810,21 @@ std::string KeyName(uint32_t key) {
 }
 
 // The key capture button and its label, shared by the two hotkeys. Returns true when the captured key changed.
-bool DrawHotkeyButton(const OverlayView& view, const char* label, const char* tooltip, uint32_t* key, bool* capturing, OverlayState* state) {
+bool DrawHotkeyButton(const OverlayView& view, const SettingDescriptor& descriptor,
+                      uint32_t* key, bool* capturing, OverlayState* state) {
+  const char* label = descriptor.label.data();
+  const ImVec2 top = gui::GetCursorScreenPos();
+  widgets::RowLabel(label, descriptor.tooltip.data());
+  std::string key_label;
+  if (!*capturing) {
+    const std::string name = KeyName(*key);
+    key_label = name.empty() ? "Hotkey: none" : "Hotkey: " + name;
+  }
+  const auto hit = widgets::KeyCaptureButton(label, key_label.c_str(), *capturing);
+  FocusDetailRow(*state, descriptor.key, label, descriptor.tooltip, top, hit.clicked || hit.right_clicked);
   bool changed = false;
-  widgets::RowLabel(label, tooltip);
   if (*capturing) {
     state->capture_seen = std::chrono::steady_clock::now();  // a capture the tab stops drawing ends on its own
-    const widgets::KeyCaptureHit hit = widgets::KeyCaptureButton(label, "", /*capturing=*/true);
     if (hit.right_clicked) {
       *key = 0u;
       *capturing = false;
@@ -819,9 +839,6 @@ bool DrawHotkeyButton(const OverlayView& view, const char* label, const char* to
     }
     return changed;
   }
-  const std::string name = KeyName(*key);
-  const std::string key_label = name.empty() ? std::string("Hotkey: none") : "Hotkey: " + name;
-  const widgets::KeyCaptureHit hit = widgets::KeyCaptureButton(label, key_label.c_str(), /*capturing=*/false);
   if (hit.clicked) {
     *capturing = true;
     state->capture_seen = std::chrono::steady_clock::now();
@@ -1022,17 +1039,17 @@ void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
         }
       }
       if (!view.setup.why.empty()) {
-        const std::string why = "Why: " + view.setup.why;
+        const std::string why = gui::Display("Why: ") + gui::Display(view.setup.why);
         widgets::SecondaryWrapped(why.c_str());
         widgets::ItemTooltip("%s", why.c_str());
       } else {
         if (!view.live.note.empty()) widgets::SecondaryText(view.live.note.c_str());
-        if (!card.before_fg_note.empty()) gui::TextDisabled("%s", card.before_fg_note.c_str());
+        if (!card.before_fg_note.empty()) widgets::SecondaryWrapped(card.before_fg_note.c_str());
       }
       if (!view.live.footer.empty()) widgets::SecondaryText(view.live.footer.c_str());
     } else {
       if (!card.reason.empty()) gui::TextWrapped("%s", card.reason.c_str());
-      if (!card.before_fg_note.empty()) gui::TextDisabled("%s", card.before_fg_note.c_str());
+      if (!card.before_fg_note.empty()) widgets::SecondaryWrapped(card.before_fg_note.c_str());
       for (const std::string& fix : card.fixes) gui::BulletText("%s", fix.c_str());
     }
     switch (card.button) {
@@ -1078,9 +1095,9 @@ bool DrawGeneralTab(const OverlayView& view, Settings* settings, OverlayState* s
   gui::PushID("##general_body");
   changed |= DrawRow(*FindSetting(ENABLED_KEY), view, settings, state);
   widgets::NextGap(style::BlockGap());
-  changed |= DrawHotkeyButton(view, "NR hotkey", "Switches NR on and off without opening this panel.", &settings->enable_key, &state->capturing_key, state);
+  changed |= DrawHotkeyButton(view, *FindSetting("EnableKey"), &settings->enable_key, &state->capturing_key, state);
   widgets::NextGap(style::BlockGap());
-  changed |= DrawHotkeyButton(view, "Panel hotkey", "Opens and closes this panel. ReShade's own panel keeps its own key.", &settings->panel_key, &state->capturing_panel_key, state);
+  changed |= DrawHotkeyButton(view, *FindSetting("PanelKey"), &settings->panel_key, &state->capturing_panel_key, state);
   if (settings->panel_key == 0x24u) {
     // ReShade consumes its own overlay key before an add-on sees the press, so Home can never reach this panel.
     style::StyleScope scope;
@@ -1088,12 +1105,13 @@ bool DrawGeneralTab(const OverlayView& view, Settings* settings, OverlayState* s
     gui::TextWrapped("Home is ReShade's own overlay key, so it cannot open this panel. Pick another key here.");
   }
   widgets::NextGap(style::BlockGap());
-  static constexpr const char* languages[] = {"English", "简体中文 / Chinese"};
-  changed |= DrawChoice(*state, "Language", "Language", languages, 2, static_cast<int>(settings->language),
-                        nullptr, FindSetting("Language")->tooltip, {},
-      [settings, state](int picked) {
-        FindSetting("Language")->set(*settings, static_cast<double>(picked));
-        state->language_changed = true;
+  const auto& language = *FindSetting("Language");
+  std::array<const char*, 2> names{};
+  std::ranges::transform(language.choices, names.begin(), [](std::string_view choice) { return choice.data(); });
+  changed |= DrawChoice(*state, language.key, language.label.data(), names.data(), static_cast<int>(names.size()),
+                        static_cast<int>(language.get(*settings)), nullptr, language.tooltip, {},
+      [settings, row = &language](int picked) {
+        row->set(*settings, static_cast<double>(picked));
         return true;
       });
   gui::PopID();
@@ -1271,7 +1289,6 @@ bool DrawDetailColumn(const OverlayView& view, const Settings& settings, const O
 
 bool DrawPanel(const OverlayView& view, Settings* settings, OverlayState* state) {
   state->drag.pass_slider = false;  // the rows OR into it
-  state->language_changed = false;
   const gui::LanguageScope language_scope(settings->language);
   bool changed = false;
   if (DrawPanelHeader(view, state)) ClosePanel(state);
@@ -1288,10 +1305,10 @@ bool DrawPanel(const OverlayView& view, Settings* settings, OverlayState* state)
   const float tab_progress = state->panel_tab_transition_started < 0.0
                                  ? 1.f
                                  : std::clamp(static_cast<float>((now - state->panel_tab_transition_started) / style::motion::kTabSlide), 0.f, 1.f);
-  const float tab_eased = 1.f - (1.f - tab_progress) * (1.f - tab_progress);
+  const float tab_eased = style::motion::EaseOut(tab_progress);
   {
     style::StyleScope transition;
-    transition.Var(ImGuiStyleVar_Alpha, tab_eased);
+    transition.Var(ImGuiStyleVar_Alpha, gui::GetStyle().Alpha * tab_eased);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + style::Units(1.5f) * (1.f - tab_eased));
     const float total = style::SnapDown(gui::GetContentRegionAvail().x);
     const float gutter = style::SnapDown((std::min)(style::Units(5.f), total * 0.04f));
@@ -1346,16 +1363,15 @@ bool DrawPanel(const OverlayView& view, Settings* settings, OverlayState* state)
   return changed;
 }
 
-bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState* state) {
-  // ReShade draws its own windows from the same global style, so the panel's look is lent for exactly this frame.
-  const style::PanelStyle panel_style;
-  // ReShade's in-game backend may hide the platform cursor while drawing its overlay. Draw ImGui's arrow in the
-  // same command list as the panel so the standalone window remains usable inside a game.
-  gui::GetIO().MouseDrawCursor = true;
-  // ImGui::GetMainViewport() and IO.DisplayPos are not available in this build (no viewport support), so the panel is
-  // clamped to the same rectangle the dialogs are centred in: the IO display, whose origin is (0, 0).
-  const ImVec2 origin(0.f, 0.f);
+bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState* state, void* window_handle) {
+  // Resolve at runtime so the panel can still load on Windows versions without GetDpiForWindow.
+  using GetWindowDpi = UINT(WINAPI*)(HWND);
+  static const auto get_window_dpi = reinterpret_cast<GetWindowDpi>(
+      GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+  const UINT dpi = get_window_dpi && window_handle ? get_window_dpi(static_cast<HWND>(window_handle)) : 0u;
+  // Panel coordinates are relative to the input display, whose origin is (0, 0).
   const ImVec2 room = gui::GetIO().DisplaySize;
+  const style::PanelStyle panel_style(style::PanelFontSize(room.y, dpi));
   const double now = ImGui::GetTime();
   if (state->panel_intro_started < 0.0) state->panel_intro_started = now;
   if (state->panel_animation_tab < 0) {
@@ -1365,16 +1381,16 @@ bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState
     state->panel_tab_transition_started = now;
   }
   const float intro_progress = std::clamp(static_cast<float>((now - state->panel_intro_started) / style::motion::kIntro), 0.f, 1.f);
-  const float intro_eased = 1.f - (1.f - intro_progress) * (1.f - intro_progress);
-  // Wide enough for both columns at ReShade's default font, and never wider than the screen minus a margin.
+  const float intro_eased = style::motion::EaseOut(intro_progress);
+  // Wide enough for both columns at the panel's font size, bounded by the available display area.
   const float width = std::clamp(room.x - style::Units(4.f), 1.f, style::Units(200.f));
   const float height = std::clamp(room.y - style::Units(4.f), 1.f, style::Units(120.f));
   if (state->panel_x < 0.f || state->panel_y < 0.f) {
-    state->panel_x = origin.x + style::Units(6.f);
-    state->panel_y = origin.y + style::Units(10.f);
+    state->panel_x = style::Units(6.f);
+    state->panel_y = style::Units(10.f);
   }
-  state->panel_x = std::clamp(state->panel_x, origin.x, (std::max)(origin.x, origin.x + room.x - width));
-  state->panel_y = std::clamp(state->panel_y, origin.y, (std::max)(origin.y, origin.y + room.y - height));
+  state->panel_x = std::clamp(state->panel_x, 0.f, (std::max)(0.f, room.x - width));
+  state->panel_y = std::clamp(state->panel_y, 0.f, (std::max)(0.f, room.y - height));
   gui::SetNextWindowPos(ImVec2(state->panel_x, state->panel_y + style::Units(2.f) * (1.f - intro_eased)), ImGuiCond_Always);
   gui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
   bool changed = false;

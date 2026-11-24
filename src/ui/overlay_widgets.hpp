@@ -7,8 +7,11 @@
 #include <cstdio>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
+
+#include <imgui_internal.h>
 
 #include "ui/overlay_style.hpp"
 
@@ -24,7 +27,7 @@ inline void SecondaryText(const char* text) {
   gui::TextUnformatted(text);
 }
 
-// Keep the host's real font face, including for Chinese. Headings only change size and color.
+// Keep the panel's font face; headings only change size and color.
 inline void Heading(const char* text, const ImVec4& color = tokens::kTextPrimary) {
   StyleScope scope;
   scope.Color(ImGuiCol_Text, color);
@@ -133,12 +136,9 @@ inline RowBounds MeasureRow() {
   return {right, (std::max)(left + 1.f, reset_left - RowGap()), reset_left};
 }
 
-// The reset slot of the row RowLabel started, as a screen x, and the x its control starts at.
+// Screen coordinates shared by the row label, its control and the reset button.
 inline float row_slot_x = 0.f;
-// A right-aligned switch can reuse the label line when it fits.
-inline bool row_stacked = false;
 inline float row_label_left = 0.f;
-inline float row_label_right = 0.f;
 // A settings row: a single-line, ellipsised label in the fixed-width left column, then the control, then
 // the reset slot one frame high at the end. The slot is reserved whether or not the row shows its reset
 // button. The full label remains available in the detail column.
@@ -157,9 +157,7 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
   // the same font it draws in, or a label that fits would still be clipped.
   ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * tokens::kRowLabelScale);
   const std::string shown = Ellipsize(text.c_str(), (std::max)(1.f, column - style.ItemSpacing.x));
-  row_stacked = false;
   row_label_left = at.x;
-  row_label_right = at.x;
   row_slot_x = bounds.reset_left;
   const float control_x = at.x + column;
   {
@@ -167,7 +165,6 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
     StyleScope label_color;
     label_color.Color(ImGuiCol_Text, tokens::kTextSecondary);
     ImGui::TextUnformatted(shown.c_str());
-    row_label_right = ImGui::GetItemRectMax().x;
     if (!tip.empty()) {
       ItemTooltip("%s", tip.c_str());
     }
@@ -178,14 +175,64 @@ inline void RowLabel(const char* label, const char* tooltip = nullptr) {
   gui::SetNextItemWidth((std::max)(1.f, bounds.control_right - control_x));
 }
 
-inline bool GlyphButton(const char* glyph, const char* id, const ImVec2& size, float scale,
-                        const ImVec4& ink = tokens::kTextSecondary) {
+// Align the drawn ink to the row midpoint, not the font's line box. A caption keeps its original left edge.
+inline void DrawAlignedText(ImDrawList* draw, ImVec2 anchor, ImU32 ink, const char* text, bool center_x = true) {
+  const float x = center_x ? anchor.x - ImGui::CalcTextSize(text).x * 0.5f : anchor.x;
+  const int first = draw->VtxBuffer.Size;
+  draw->AddText({x, anchor.y - ImGui::GetTextLineHeight() * 0.5f}, ink, text);
+  if (first == draw->VtxBuffer.Size) return;
+  ImVec2 lo = draw->VtxBuffer[first].pos;
+  ImVec2 hi = lo;
+  for (int i = first + 1; i < draw->VtxBuffer.Size; ++i) {
+    const ImVec2 pos = draw->VtxBuffer[i].pos;
+    lo = {(std::min)(lo.x, pos.x), (std::min)(lo.y, pos.y)};
+    hi = {(std::max)(hi.x, pos.x), (std::max)(hi.y, pos.y)};
+  }
+  const float dx = center_x ? std::round(anchor.x - (lo.x + hi.x) * 0.5f) : 0.f;
+  const float dy = std::round(anchor.y - (lo.y + hi.y) * 0.5f);
+  for (int i = first; i < draw->VtxBuffer.Size; ++i) {
+    draw->VtxBuffer[i].pos.x += dx;
+    draw->VtxBuffer[i].pos.y += dy;
+  }
+}
+
+inline void DrawActionIcon(ImDrawList* draw, icons::Action icon, ImVec2 center, ImU32 ink) {
+  // A 20 px optical box at the reference body size, with one stroke weight for every action.
+  const float scale = ImGui::GetFontSize() / tokens::kBodyFont;
+  const float stroke = 3.f * scale;
+  const auto point = [&](float x, float y) { return ImVec2(center.x + x * scale, center.y + y * scale); };
+  switch (icon) {
+    case icons::Action::Reset: {
+      constexpr float degree = 0.01745329252f;
+      draw->PathArcTo(center, 8.25f * scale, -150.f * degree, 139.f * degree);
+      draw->PathStroke(ink, ImDrawFlags_None, stroke);
+      const ImVec2 head[]{point(-7.15f, -9.25f), point(-7.15f, -4.125f), point(-1.5f, -4.125f)};
+      draw->AddPolyline(head, 3, ink, ImDrawFlags_None, stroke);
+      break;
+    }
+    case icons::Action::Previous:
+    case icons::Action::Next: {
+      const float dir = icon == icons::Action::Previous ? -1.f : 1.f;
+      const ImVec2 chevron[]{point(-4.25f * dir, -8.75f), point(4.25f * dir, 0.f), point(-4.25f * dir, 8.75f)};
+      draw->AddPolyline(chevron, 3, ink, ImDrawFlags_None, stroke);
+      break;
+    }
+    case icons::Action::Close:
+      draw->AddLine(point(-8.5f, -8.5f), point(8.5f, 8.5f), ink, stroke);
+      draw->AddLine(point(-8.5f, 8.5f), point(8.5f, -8.5f), ink, stroke);
+      break;
+  }
+}
+
+inline bool ActionButton(icons::Action icon, const char* id, const ImVec2& size,
+                         const ImVec4& ink = tokens::kTextSecondary) {
   StyleScope quiet;
-  quiet.FlatButton(ink).Var(ImGuiStyleVar_FramePadding, ImVec2(0.f, 0.f));
-  const std::string label = std::string(glyph) + id;
-  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * scale);
-  const bool clicked = ImGui::Button(label.c_str(), size);
-  ImGui::PopFont();
+  quiet.FlatButton().Var(ImGuiStyleVar_FramePadding, ImVec2(0.f, 0.f));
+  const bool clicked = ImGui::Button(id, size);
+  if (ImGui::IsItemVisible()) {
+    const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
+    DrawActionIcon(ImGui::GetWindowDrawList(), icon, {(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f}, ToU32(ink));
+  }
   return clicked;
 }
 
@@ -205,8 +252,8 @@ inline bool ResetButton(const char* id, const char* default_text) {
                     && ImGui::IsMouseHoveringRect(slot, ImVec2(slot.x + width, slot.y + height));
   ImGui::SetCursorScreenPos(slot);
   ImGui::PushID(id);
-  const bool clicked = GlyphButton(icons::Undo(), "###reset", {width, height}, 1.25f,
-                                   over ? tokens::kTextPrimary : tokens::kTextSecondary);
+  const bool clicked = ActionButton(icons::Action::Reset, "###reset", {width, height},
+                                    over ? tokens::kTextPrimary : tokens::kTextSecondary);
   ImGui::PopID();
   ItemTooltip(gui::Display("Reset to default (%s)").c_str(), gui::Display(default_text).c_str());
   ImGui::SetCursorScreenPos(layout_cursor);
@@ -239,105 +286,26 @@ inline void SliderRail(const ImVec2& lo, const ImVec2& hi, float t, bool hot, bo
   draw->AddCircleFilled(ImVec2(x, y), thumb, ToU32(hot ? tokens::kAccent : tokens::kTextPrimary));
 }
 
-// A slider drawn the modern way: a thin rail filled up to the value, a round knob, and the value in its
-// own column on the right, so the number never sits under the knob. ImGui's slider still runs underneath,
-// invisible, so dragging, keyboard and gamepad steps and Ctrl+click typing behave as before; while it is
-// being typed into, it is drawn as ImGui draws it. Call after RowLabel. `value` is the stored value and
-// `display_scale` what the row shows it as (a 0..1 blend shown as 0-100 %), so the caller keeps one
-// storage form. Returns true on the frames *value changed; *dragging, when asked for, is ImGui's own "the
-// control is held" state for this frame (Uplift's rows hold back work until the release).
-inline bool Slider(const char* id, float* value, float min, float max, const char* format, bool* dragging = nullptr,
-                   float display_scale = 1.f) {
-  static ImGuiID typing = 0;
-  const ImGuiID item = ImGui::GetID(id);
-  const bool was_typing = (typing == item);
+// Draw the same rail and value column for both numeric types over ImGui's input handling.
+template <typename Number>
+bool DrawSlider(const char* id, Number* value, Number min, Number max, const char* format,
+                const char* display_format, bool* dragging) {
+  static_assert(std::is_same_v<Number, float> || std::is_same_v<Number, int>);
+  constexpr auto type = std::is_same_v<Number, float> ? ImGuiDataType_Float : ImGuiDataType_S32;
   const float height = ImGui::GetFrameHeight();
-  const float knob = height * 0.30f;
-  float shown = *value * display_scale;
   char text[32];
-  const std::string number_format = gui::Display(format);
-  const auto measure = [&](float n) {
-    std::snprintf(text, sizeof(text), number_format.c_str(), n);
+  const auto measure = [&](Number n) {
+    std::snprintf(text, sizeof(text), display_format, n);
     return ImGui::CalcTextSize(text).x;
   };
   // Reserve the endpoint widths so the rail does not move when the displayed value gains a digit.
-  const float value_width = SnapUp((std::max)({measure(min), measure(max), measure(shown)})) + RowGap();
-  const float width = ImGui::CalcItemWidth();
-  const bool native = was_typing || width - value_width < height * 1.5f;
-  bool changed = false;
-  {
-    StyleScope hidden;
-    // ImGui centres a grab of GrabMinSize on the value: the knob's diameter, so the knob drawn below sits
-    // where the mouse drags it.
-    hidden.Var(ImGuiStyleVar_GrabMinSize, knob * 2.f);
-    if (!native) {
-      hidden.Color(ImGuiCol_FrameBg, tokens::kTransparent)
-          .Color(ImGuiCol_FrameBgHovered, tokens::kTransparent)
-          .Color(ImGuiCol_FrameBgActive, tokens::kTransparent)
-          .Color(ImGuiCol_SliderGrab, tokens::kTransparent)
-          .Color(ImGuiCol_SliderGrabActive, tokens::kTransparent)
-          .Color(ImGuiCol_Text, tokens::kTransparent);
-    }
-    ImGui::SetNextItemWidth(native ? width : width - value_width);
-    changed = ImGui::SliderFloat(id, &shown, min, max, format);
-  }
-  if (changed) {
-    *value = shown / display_scale;
-  }
-  const bool active = ImGui::IsItemActive();
-  if (dragging != nullptr) {
-    *dragging = active;
-  }
-  // A Ctrl+click turns ImGui's slider into a text field; the text field raises WantTextInput from the next
-  // frame on.
-  if (active && ImGui::GetIO().WantTextInput) {
-    typing = item;
-  } else if (was_typing && !active) {
-    typing = 0;
-  }
-  if (native) {
-    return changed;
-  }
-
-  const ImVec2 lo = ImGui::GetItemRectMin();
-  const ImVec2 hi = ImGui::GetItemRectMax();
-  const float target_t = (max > min) ? std::clamp((shown - min) / (max - min), 0.f, 1.f) : 0.f;
-  const bool hot = active || ImGui::IsItemHovered();
-  const float t = Animate(AnimationID(id), target_t, active ? motion::kSliderFollow : motion::kHover);
-  SliderRail(lo, hi, t, hot, active);
-
-  // The value is drawn on the rail's own line, not laid out as an item of the row: it is centred on the rail
-  // as the knob is (the rail's top edge is a knob-radius above the row's centre, so anchoring to it left the
-  // number sitting visibly high), the next row's gap stays the slider's own height, and the row's "last item"
-  // stays the slider instead of a shorter line of text.
-  const float text_width = measure(shown);
-  ImGui::GetWindowDrawList()->AddText(ImVec2(hi.x + value_width - text_width, (lo.y + hi.y - gui::GetTextLineHeight()) * 0.5f),
-                                      ImGui::GetColorU32(ImGuiCol_Text), text);
-  return changed;
-}
-
-// The integer slider, drawn as Slider: the same rail, knob and value column over ImGui's SliderInt, so a row
-// of whole numbers (a percentage, a mode, the pass count) sits in the same visual system as the rest. Call
-// after RowLabel. Ctrl+click typing works as on Slider: while the value is typed, ImGui's own slider draws.
-// *dragging is ImGui's held state. `format` also applies to the compact, native slider.
-inline bool SliderInt(const char* id, int* value, int min, int max, bool* dragging = nullptr, const char* format = "%d") {
-  static ImGuiID typing = 0;
-  const ImGuiID item = ImGui::GetID(id);
-  const bool was_typing = (typing == item);
-  const float height = ImGui::GetFrameHeight();
-  const float knob = height * 0.30f;
-  char text[32];
-  const auto measure = [&](int n) {
-    std::snprintf(text, sizeof(text), format, n);
-    return ImGui::CalcTextSize(text).x;
-  };
   const float value_width = SnapUp((std::max)({measure(min), measure(max), measure(*value)})) + RowGap();
   const float width = ImGui::CalcItemWidth();
-  const bool native = was_typing || width - value_width < height * 1.5f;
+  const bool native = ImGui::TempInputIsActive(ImGui::GetID(id)) || width - value_width < height * 1.5f;
   bool changed = false;
   {
     StyleScope hidden;
-    hidden.Var(ImGuiStyleVar_GrabMinSize, knob * 2.f);
+    hidden.Var(ImGuiStyleVar_GrabMinSize, height * 0.30f * 2.f);
     if (!native) {
       hidden.Color(ImGuiCol_FrameBg, tokens::kTransparent)
           .Color(ImGuiCol_FrameBgHovered, tokens::kTransparent)
@@ -347,20 +315,13 @@ inline bool SliderInt(const char* id, int* value, int min, int max, bool* draggi
           .Color(ImGuiCol_Text, tokens::kTransparent);
     }
     ImGui::SetNextItemWidth(native ? width : width - value_width);
-    changed = ImGui::SliderInt(id, value, min, max, format);
+    changed = ImGui::SliderScalar(id, type, value, &min, &max, format);
   }
   const bool active = ImGui::IsItemActive();
   if (dragging != nullptr) {
     *dragging = active;
   }
-  if (active && ImGui::GetIO().WantTextInput) {
-    typing = item;
-  } else if (was_typing && !active) {
-    typing = 0;
-  }
-  if (native) {
-    return changed;
-  }
+  if (native) return changed;
 
   const ImVec2 lo = ImGui::GetItemRectMin();
   const ImVec2 hi = ImGui::GetItemRectMax();
@@ -369,14 +330,25 @@ inline bool SliderInt(const char* id, int* value, int min, int max, bool* draggi
   const float t = Animate(AnimationID(id), target_t, active ? motion::kSliderFollow : motion::kHover);
   SliderRail(lo, hi, t, hot, active);
 
-  // The value is drawn on the rail's own line, not laid out as an item of the row: it is centred on the rail
-  // as the knob is (the rail's top edge is a knob-radius above the row's centre, so anchoring to it left the
-  // number sitting visibly high), the next row's gap stays the slider's own height, and the row's "last item"
-  // stays the slider instead of a shorter line of text.
+  // Draw the number without adding a layout item, so the slider still owns the row height and hit area.
   const float text_width = measure(*value);
   ImGui::GetWindowDrawList()->AddText(ImVec2(hi.x + value_width - text_width, (lo.y + hi.y - gui::GetTextLineHeight()) * 0.5f),
                                       ImGui::GetColorU32(ImGuiCol_Text), text);
   return changed;
+}
+
+// Keep scaled values (such as percentages) in their original storage units.
+inline bool Slider(const char* id, float* value, float min, float max, const char* format, bool* dragging = nullptr,
+                   float display_scale = 1.f) {
+  float shown = *value * display_scale;
+  const std::string number_format = gui::Display(format);
+  if (!DrawSlider(id, &shown, min, max, format, number_format.c_str(), dragging)) return false;
+  *value = shown / display_scale;
+  return true;
+}
+
+inline bool SliderInt(const char* id, int* value, int min, int max, bool* dragging = nullptr, const char* format = "%d") {
+  return DrawSlider(id, value, min, max, format, format, dragging);
 }
 
 // A typed whole number: the row's control, for a setting whose range is past a slider's (Pass count). ImGui
@@ -398,13 +370,8 @@ inline bool TextField(const char* id, std::string* text, size_t capacity = 1024)
   // One buffer for the frame's edit, not one per call: a text row redraws every frame, and this is its only use
   // of <vector>. Grown once, then reused; the copy below always writes the bytes ImGui reads.
   static std::vector<char> buffer;
-  if (buffer.size() < capacity) {
-    buffer.assign(capacity, '\0');
-  } else {
-    buffer[0] = '\0';
-  }
-  text->copy(buffer.data(), capacity - 1u);
-  buffer[std::min(text->size(), capacity - 1u)] = '\0';
+  if (buffer.size() < capacity) buffer.resize(capacity);
+  buffer[text->copy(buffer.data(), capacity - 1u)] = '\0';
   if (!gui::InputText(id, buffer.data(), capacity)) {
     return false;
   }
@@ -414,10 +381,7 @@ inline bool TextField(const char* id, std::string* text, size_t capacity = 1024)
 
 // ---- Layout ----
 
-// The preceding item has already advanced by ItemSpacing.y. Replace that gap instead of adding a second margin.
-// The total air between the previous item and the next one. ImGui has already advanced the cursor by one
-// ItemSpacing when it ended that item, so that much is subtracted back out: a call site asks for the distance it
-// wants to see, not for a number added to a gap it cannot measure.
+// Replace the spacing ImGui already added after the previous item.
 inline void NextGap(float gap) { gui::SetCursorPosY(gui::GetCursorPosY() + gap - gui::GetStyle().ItemSpacing.y); }
 
 inline bool PrimaryButton(const char* label, const ImVec2& size = {}) {
@@ -427,7 +391,7 @@ inline bool PrimaryButton(const char* label, const ImVec2& size = {}) {
 }
 
 inline bool CloseButton(const char* id, float size) {
-  return GlyphButton(icons::Close(), id, {size, size}, tokens::kHeadingScale);
+  return ActionButton(icons::Action::Close, id, {size, size});
 }
 
 inline bool QuietAction(const char* label) {
@@ -452,19 +416,6 @@ inline void GroupHeading(const char* title, const char* note = nullptr) {
   else gui::TextWrapped("%s", title);
 }
 
-// A table with the panel's cell padding for exactly as long as it is drawn, and the caller's setup and rows in
-// between: the two tables the panel builds (the runtime facts and the executed passes) each pushed and popped
-// that padding around their own BeginTable, and each had to check whether ImGui refused the table.
-template <typename Body>
-void Table(const char* id, int columns, ImGuiTableFlags flags, const ImVec2& padding, Body body) {
-  StyleScope cell;
-  cell.Var(ImGuiStyleVar_CellPadding, padding);
-  if (ImGui::BeginTable(id, columns, flags)) {
-    body();
-    ImGui::EndTable();
-  }
-}
-
 // A flat section shares the column's scroll, padding and row grid.
 template <typename Contents>
 void Section(const char* id, Contents contents) {
@@ -480,7 +431,6 @@ inline bool Switch(const char* id, bool* value) {
   const float width = SnapUp(height * 1.8f);
   const float center = height * 0.5f;
   const float x = row_slot_x - RowGap() - width;
-  if (row_stacked && row_label_right + RowGap() <= x) gui::SameLine();
   gui::SetCursorScreenPos(ImVec2((std::max)(x, row_label_left), ImGui::GetCursorScreenPos().y));
   const ImVec2 at = ImGui::GetCursorScreenPos();
   const bool pressed = ImGui::InvisibleButton(id, ImVec2(width, height), ImGuiButtonFlags_EnableNav);
@@ -521,7 +471,7 @@ inline KeyCaptureHit KeyCaptureButton(const char* id, const char* label, bool ca
   const float desired = SnapUp(gui::CalcTextSize(text).x + padding);
   const ImVec2 at = ImGui::GetCursorScreenPos();
   const float right = row_slot_x - RowGap();
-  if (desired > right - at.x && !row_stacked) ImGui::NewLine();
+  if (desired > right - at.x) ImGui::NewLine();
   const float width = (std::min)(desired, (std::max)(1.f, right - row_label_left));
   ImGui::SetCursorScreenPos({right - width, ImGui::GetCursorScreenPos().y});
   const std::string shown = Ellipsize(gui::Display(text).c_str(), (std::max)(1.f, width - padding)) + "###capture_key";
@@ -539,114 +489,121 @@ struct ChoiceHit {
   bool activated = false;
 };
 
-// Measure the glyph quads that ImGui actually drew. The line box and advance include font bearings,
-// which differ between the body font and its merged icons.
-inline ImVec2 InkCenter(const ImDrawList& draw, int first, ImVec2 fallback) {
-  if (first == draw.VtxBuffer.Size) return fallback;
-  ImVec2 lo = draw.VtxBuffer[first].pos;
-  ImVec2 hi = lo;
-  for (int i = first + 1; i < draw.VtxBuffer.Size; ++i) {
-    const ImVec2 pos = draw.VtxBuffer[i].pos;
-    lo = {(std::min)(lo.x, pos.x), (std::min)(lo.y, pos.y)};
-    hi = {(std::max)(hi.x, pos.x), (std::max)(hi.y, pos.y)};
+struct ChoiceSlide {
+  int outgoing;
+  float progress;
+};
+
+// Track the displayed value, not the click: resets and picks in the other column also animate.
+inline ChoiceSlide ChoiceTransition(int current, int count) {
+  ImGuiStorage& storage = *ImGui::GetStateStorage();
+  const ImGuiID value_id = ImGui::GetID("##choice_value");
+  const ImGuiID outgoing_id = ImGui::GetID("##choice_outgoing");
+  const ImGuiID time_id = ImGui::GetID("##choice_since");
+  const float now = static_cast<float>(ImGui::GetTime());
+  const int last = storage.GetInt(value_id, -1);
+  int outgoing = storage.GetInt(outgoing_id, current);
+  float progress = std::clamp((now - storage.GetFloat(time_id, now)) / motion::kChoiceSlide, 0.f, 1.f);
+  if (last != current) {
+    // On a quick second click, fade out whichever label is more visible.
+    if (motion::EaseOut(progress) >= 0.5f || outgoing == last) outgoing = last;
+    if (last < 0 || outgoing < 0 || outgoing >= count) outgoing = current;
+    storage.SetInt(value_id, current);
+    storage.SetInt(outgoing_id, outgoing);
+    storage.SetFloat(time_id, now);
+    progress = 0.f;
   }
-  return {(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f};
+  if (outgoing == current || outgoing < 0 || outgoing >= count) return {current, 1.f};
+  return {outgoing, motion::EaseOut(progress)};
 }
 
-inline void DrawCenteredGlyph(ImDrawList* draw, ImVec2 center, ImU32 color, const char* glyph) {
-  const ImVec2 size = ImGui::CalcTextSize(glyph);
-  const int first = draw->VtxBuffer.Size;
-  draw->AddText({center.x - size.x * 0.5f, center.y - size.y * 0.5f}, color, glyph);
-  const ImVec2 ink = InkCenter(*draw, first, center);
-  for (int i = first; i < draw->VtxBuffer.Size; ++i) {
-    draw->VtxBuffer[i].pos.x += std::round(center.x - ink.x);
-    draw->VtxBuffer[i].pos.y += std::round(center.y - ink.y);
-  }
-}
-
-inline ChoiceHit ChoiceRow(const char* id, const char* caption, const char* const* choices, int count, int value,
-                           const std::string_view* why) {
+inline ChoiceHit ChoiceRow(std::string_view id, const char* caption, const char* const* choices, int count, int value,
+                           const std::string_view* why, bool blocked) {
   ChoiceHit hit;
   if (count <= 0 || choices == nullptr) return hit;
   const float height = RowHeight();
   const float font = ImGui::GetFontSize();
+  const float gap = RowGap();
   const ImVec2 at = ImGui::GetCursorScreenPos();
   const RowBounds bounds = MeasureRow();
-  const float avail = bounds.right - at.x;
-  const float row_width = (std::max)(1.f, bounds.reset_left - RowGap() * 0.5f - at.x);
+  const float row_width = (std::max)(1.f, bounds.reset_left - gap * 0.5f - at.x);
   const int current = std::clamp(value, 0, count - 1);
   row_slot_x = bounds.reset_left;
-  row_stacked = false;
-  row_label_left = at.x;
-  ImGui::PushID(id);
+  ImGui::PushID(id.data(), id.data() + id.size());
   const bool clicked = ImGui::InvisibleButton("##choice", ImVec2(row_width, height), ImGuiButtonFlags_EnableNav);
   const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_NoNavOverride);
   const bool held = ImGui::IsItemActive();
+  hit.activated = clicked;
   if (ImGui::IsItemFocused()) hit.nav_id = ImGui::GetItemID();
   const ImVec2 lo = ImGui::GetItemRectMin();
-  const ImVec2 plate_lo(lo.x - RowGap(), lo.y);
+  const ImVec2 plate_lo(lo.x - gap, lo.y);
   const ImVec2 plate_hi(bounds.right, lo.y + height);
   const auto hover_flags = held ? ImGuiHoveredFlags_AllowWhenBlockedByActiveItem : ImGuiHoveredFlags_None;
-  const bool row_hovered = ImGui::IsWindowHovered(hover_flags) && ImGui::IsMouseHoveringRect(plate_lo, plate_hi);
-  hit.hovered = row_hovered;
-  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * tokens::kRowLabelScale);
-  const float icon_base_size = ImGui::GetStyle().FontSizeBase;
-  const float gap = RowGap();
+  hit.hovered = ImGui::IsWindowHovered(hover_flags) && ImGui::IsMouseHoveringRect(plate_lo, plate_hi);
+  const float avail = (std::max)(0.f, bounds.control_right - lo.x);
   const float column = SnapDown((std::min)(font * tokens::kLabelEm, avail * tokens::kLabelShare));
   const float zone_lo = lo.x + column;
   const float zone_hi = bounds.control_right;
-  const float icon_half = std::ceil(font * 0.4f);
-  const float hit_half = font * 0.65f;
-  // Each icon has the same distance to the text. Only the hit areas extend beyond that spacing.
-  const float next_x = zone_hi - icon_half;
-  const float value_right = next_x - icon_half - gap;
-  const float value_room = value_right - zone_lo - 2.f * icon_half - gap;
-  const std::string text = Ellipsize(gui::Display(choices[current]).c_str(), (std::max)(0.f, value_room));
-  const float value_x = value_right - ImGui::CalcTextSize(text.c_str()).x;
-  const float previous_x = value_x - gap - icon_half;
-  const bool show_arrows = previous_x - icon_half >= zone_lo;
-  const std::string caption_text = Ellipsize(gui::Display(caption).c_str(), (std::max)(0.f, zone_lo - lo.x - gap));
+  const float arrow_width = SnapUp(font * 1.25f);
+  const bool show_arrows = zone_hi - zone_lo >= 2.f * arrow_width + 2.f * font;
+  const float value_left = zone_lo + (show_arrows ? arrow_width : 0.f);
+  const float value_right = zone_hi - (show_arrows ? arrow_width : 0.f);
   const auto usable = [why](int option) { return why == nullptr || why[option].empty(); };
-  const auto step = [&](int from, int dir) {
-    for (int option = from + dir; option >= 0 && option < count; option += dir) {
+  const auto step = [&](int dir) {
+    for (int option = current + dir; option >= 0 && option < count; option += dir) {
       if (usable(option)) return option;
     }
     return -1;
   };
-  const int previous = step(current, -1);
-  const int next = step(current, +1);
-  bool inert = true;  // no option can run: the row greys out the way a disabled control does
-  for (int option = 0; option < count && inert; ++option) inert = !usable(option);
-  if (clicked) {
-    hit.activated = true;
-    if (hovered && show_arrows && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-      const float x = ImGui::GetIO().MousePos.x;
-      if (std::abs(x - previous_x) <= hit_half && x <= value_x) hit.picked = previous;
-      if (std::abs(x - next_x) <= hit_half && x >= value_right) hit.picked = next;
+  const int previous = step(-1);
+  const int next = step(+1);
+  const bool inert = blocked || (previous < 0 && next < 0 && !usable(current));
+  const float mouse_x = ImGui::GetIO().MousePos.x;
+  const bool over_previous = show_arrows && hovered && previous >= 0 && mouse_x >= zone_lo && mouse_x < value_left;
+  const bool over_next = show_arrows && hovered && next >= 0 && mouse_x >= value_right && mouse_x < zone_hi;
+  if (clicked && !inert && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+    hit.picked = over_previous ? previous : over_next ? next : -1;
+  }
+
+  ImDrawList* draw = ImGui::GetWindowDrawList();
+  const float wash = Animate(ImGui::GetID("##choice_hover"), hit.hovered ? (held ? tokens::kSurfaceActive.w : tokens::kSurfaceHover.w) : 0.f,
+                             motion::kChoiceFeedback);
+  draw->AddRectFilled(plate_lo, plate_hi, ToU32(tokens::Fade(tokens::kTextPrimary, wash)), ControlRadius());
+  const ChoiceSlide slide = ChoiceTransition(current, count);
+  const float center_y = lo.y + height * 0.5f;
+  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * tokens::kRowLabelScale);
+  const ImVec4 value_ink = inert ? tokens::kTextFaint : tokens::kTextPrimary;
+  const std::string caption_text = Ellipsize(gui::Display(caption).c_str(), column - gap);
+  DrawAlignedText(draw, {lo.x, center_y}, ToU32(inert ? tokens::kTextFaint : tokens::kTextSecondary), caption_text.c_str(), false);
+  if (value_right > value_left) {
+    const float value_width = value_right - value_left;
+    const float center_x = (value_left + value_right) * 0.5f;
+    const auto draw_value = [&](int option, float offset, float opacity) {
+      const std::string text = Ellipsize(gui::Display(choices[option]).c_str(), value_width);
+      DrawAlignedText(draw, {center_x, center_y + offset}, ToU32(tokens::Fade(value_ink, opacity)), text.c_str());
+    };
+    if (slide.progress < 1.f) {
+      const float shift = (current > slide.outgoing ? 0.8f : -0.8f) * font;
+      draw->PushClipRect({value_left, lo.y}, {value_right, plate_hi.y}, true);
+      draw_value(slide.outgoing, -shift * slide.progress, 1.f - slide.progress);
+      draw_value(current, shift * (1.f - slide.progress), slide.progress);
+      draw->PopClipRect();
+    } else {
+      draw_value(current, 0.f, 1.f);
     }
   }
-  ImDrawList* draw = ImGui::GetWindowDrawList();
-  // Hover spans the reset cell. Keyboard focus uses the InvisibleButton's own navigation cursor.
-  if (row_hovered) {
-    draw->AddRectFilled(plate_lo, plate_hi, ToU32(held ? tokens::kSurfaceActive : tokens::kSurfaceHover), ControlRadius());
-  }
-  const ImVec4 caption_ink = inert ? tokens::kTextFaint : tokens::kTextSecondary;
-  const ImVec4 value_ink = inert ? tokens::kTextFaint : tokens::kTextPrimary;
-  const float text_y = lo.y + (height - ImGui::GetTextLineHeight()) * 0.5f;
-  draw->AddText({lo.x, text_y}, ToU32(caption_ink), caption_text.c_str());
-  if (show_arrows) {
-    // The value is drawn where it lands: no transition, so a change is visible on the very next frame.
-    const int value_first = draw->VtxBuffer.Size;
-    draw->AddText({value_x, text_y}, ToU32(value_ink), text.c_str());
-    const float center_y = InkCenter(*draw, value_first, {0.f, lo.y + height * 0.5f}).y;
-    ImGui::PushFont(nullptr, icon_base_size * 1.1f);
-    const ImVec4 arrow_ink = row_hovered ? tokens::kTextPrimary : tokens::kTextSecondary;
-    const ImVec4 unavailable_ink = tokens::Fade(tokens::kTextTertiary, 0.32f);
-    DrawCenteredGlyph(draw, {previous_x, center_y}, ToU32(previous >= 0 ? arrow_ink : unavailable_ink), icons::Previous());
-    DrawCenteredGlyph(draw, {next_x, center_y}, ToU32(next >= 0 ? arrow_ink : unavailable_ink), icons::Next());
-    ImGui::PopFont();
-  }
   ImGui::PopFont();
+
+  if (show_arrows) {
+    const auto draw_arrow = [&](const char* key, float x, icons::Action icon, bool enabled, bool hot) {
+      const float feedback = Animate(ImGui::GetID(key), enabled && hot ? (held ? 1.f : 0.7f) : 0.f, motion::kChoiceFeedback);
+      const ImVec4 ink = enabled ? tokens::Mix(tokens::kTextSecondary, tokens::kAccent, feedback)
+                                 : tokens::Fade(tokens::kTextTertiary, 0.32f);
+      DrawActionIcon(draw, icon, {x, center_y}, ToU32(ink));
+    };
+    draw_arrow("##choice_previous", zone_lo + arrow_width * 0.5f, icons::Action::Previous, !blocked && previous >= 0, over_previous);
+    draw_arrow("##choice_next", zone_hi - arrow_width * 0.5f, icons::Action::Next, !blocked && next >= 0, over_next);
+  }
   ImGui::PopID();
   return hit;
 }
@@ -765,10 +722,9 @@ inline bool ConfirmDialog(const char* id, std::string_view body, const char* can
   gui::SetNextWindowSizeConstraints({width, 0.f}, {width, max_height});
   gui::SetNextWindowPos({display.x * 0.5f, display.y * 0.5f}, ImGuiCond_Always, {0.5f, 0.5f});
   const float inset = CardInset();
-  const ImVec4 rule = tokens::Fade(tokens::kTextPrimary, 0.10f);
   StyleScope popup;
-  popup.Color(ImGuiCol_Border, rule).Color(ImGuiCol_Separator, rule)
-      .Var(ImGuiStyleVar_PopupBorderSize, 1.f).Var(ImGuiStyleVar_WindowPadding, {inset, inset});
+  popup.Color(ImGuiCol_Border, tokens::Fade(tokens::kTextPrimary, 0.10f))
+      .Var(ImGuiStyleVar_WindowBorderSize, 1.f).Var(ImGuiStyleVar_WindowPadding, {inset, inset});
   constexpr auto flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize
                        | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
   if (!ImGui::BeginPopupModal(name.c_str(), nullptr, flags)) {
@@ -800,8 +756,6 @@ inline bool ConfirmDialog(const char* id, std::string_view body, const char* can
     start = next + 2;
   }
 
-  NextGap(BlockGap());
-  gui::Separator();
   NextGap(BlockGap());
   const float height = SnapUp(gui::GetFrameHeight());
   const float gap = RowGap();
@@ -854,29 +808,31 @@ inline bool DetailOption(const char* label, std::string_view why, int index, boo
   gui::BeginDisabled(disabled);
   const bool clicked = gui::InvisibleButton("##option", {width, height}, ImGuiButtonFlags_EnableNav);
   const bool hot = gui::IsItemHovered(ImGuiHoveredFlags_NoNavOverride);
+  const bool held = gui::IsItemActive();
   gui::EndDisabled();
 
+  const float hover = Animate(ImGui::GetID("##radio_hover"), hot || held ? (held ? 1.f : 0.65f) : 0.f, motion::kChoiceFeedback);
+  const float selection = Animate(ImGui::GetID("##radio_selection"), selected ? 1.f : 0.f, motion::kChoiceFeedback);
   const ImVec2 lo = gui::GetItemRectMin(), hi = gui::GetItemRectMax();
   ImDrawList* draw = gui::GetWindowDrawList();
-  // The selected row is filled on the frame the choice changes: the highlight is state, not a transition.
-  if (selected || hot) {
-    const ImVec4 fill = selected ? (hot ? tokens::kSelectedHover : tokens::kSelected) : tokens::kSurfaceHover;
-    draw->AddRectFilled(lo, hi, ToU32(fill), ControlRadius());
-  }
+  const ImVec4 wash = tokens::Fade(tokens::kSurfaceActive, tokens::kSurfaceActive.w * hover);
+  const ImVec4 selected_fill = tokens::Mix(tokens::kSelected, tokens::kSelectedActive, hover);
+  draw->AddRectFilled(lo, hi, ToU32(tokens::Mix(wash, selected_fill, selection)), ControlRadius());
+
   const float label_y = lo.y + (label_band - label_height) * 0.5f;
   const float text_x = lo.x + text_inset;
-  const int label_first = draw->VtxBuffer.Size;
-  draw->AddText(gui::GetFont(), font, {text_x, label_y},
-                ToU32(disabled ? tokens::kTextTertiary : selected ? tokens::kTextPrimary : tokens::kTextSecondary),
+  const ImVec4 label_ink = disabled ? tokens::kTextTertiary
+                                   : tokens::Mix(tokens::kTextSecondary, tokens::kTextPrimary, selection);
+  draw->AddText(gui::GetFont(), font, {text_x, label_y}, ToU32(label_ink),
                 text.text.c_str(), nullptr, text.native_width);
-  const float line_height = gui::GetTextLineHeight();
-  ImVec2 icon_center{lo.x + padding_x + icon_width * 0.5f, label_y + line_height * 0.5f};
-  if (label_height <= line_height) icon_center.y = InkCenter(*draw, label_first, icon_center).y;
-  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.15f);
-  DrawCenteredGlyph(draw, icon_center,
-                    ToU32(disabled ? tokens::kTextFaint : selected ? tokens::kAccent : tokens::kTextSecondary),
-                    selected ? icons::RadioOn() : icons::RadioOff());
-  ImGui::PopFont();
+  const ImVec2 center{lo.x + padding_x + icon_width * 0.5f, label_y + gui::GetTextLineHeight() * 0.5f};
+  const float radius = font * 0.34f;
+  const ImVec4 accent = disabled ? tokens::kTextTertiary : tokens::kAccent;
+  const ImVec4 ring = tokens::Mix(disabled ? tokens::kTextFaint : tokens::kTextSecondary, accent, (std::max)(selection, hover));
+  draw->AddCircle(center, radius, ToU32(ring), 0, (std::max)(1.f, Px(1.f)));
+  if (selection > 0.f) {
+    draw->AddCircleFilled(center, radius * 0.55f * selection, ToU32(tokens::Fade(accent, selection)));
+  }
   if (!reason.text.empty()) {
     draw->AddText(gui::GetFont(), font, {text_x, lo.y + label_band - padding_y * 0.5f},
                   ToU32(tokens::kTextTertiary), reason.text.c_str(), nullptr, reason.native_width);
@@ -884,23 +840,6 @@ inline bool DetailOption(const char* label, std::string_view why, int index, boo
   gui::PopID();
   return clicked && !selected;
 }
-
-// A choice in the detail column: a hollow dot, filled with the accent when it is the live one.
-inline void DetailLine(const char* text, bool selected) {
-  const float font = gui::GetFontSize();
-  const ImVec2 at = gui::GetCursorScreenPos();
-  const float line = gui::GetTextLineHeight();
-  ImDrawList* draw = gui::GetWindowDrawList();
-  const ImVec2 center(at.x + font * 0.4f, at.y + line * 0.5f);
-  const float radius = std::max(2.f, font * 0.16f);
-  const ImU32 ring = ToU32(selected ? tokens::kAccent : tokens::kTextFaint);
-  draw->AddCircle(center, radius, ring, 0, std::max(1.f, Px(1.f)));
-  if (selected) draw->AddCircleFilled(center, radius * 0.55f, ToU32(tokens::kAccent));
-  gui::SetCursorScreenPos(ImVec2(at.x + font * 1.1f, at.y));
-  DetailText(text, selected ? tokens::kTextPrimary : tokens::kTextSecondary);
-}
-
-// ---- The panel's own controls (2026-11-23) ----
 
 // A tab strip with a white pill for the active tab. It wraps on narrow windows.
 inline bool CapsuleTabBar(const char* id, const char* const* english, int count, int* current,
@@ -917,8 +856,6 @@ inline bool CapsuleTabBar(const char* id, const char* const* english, int count,
   ImVec2 hi[kMaxTabs] = {};
   bool hot[kMaxTabs] = {};
   bool held[kMaxTabs] = {};
-  float hover_amount[kMaxTabs] = {};
-  float active_amount[kMaxTabs] = {};
   float widths[kMaxTabs] = {};
   float largest = 0.f;
   for (int i = 0; i < count; ++i) {
@@ -948,7 +885,7 @@ inline bool CapsuleTabBar(const char* id, const char* const* english, int count,
   ImGui::SetCursorScreenPos({right_edge - action_slot, ImGui::GetCursorScreenPos().y});
   {
     StyleScope quiet;
-    quiet.FlatButton().Var(ImGuiStyleVar_FrameRounding, ControlRadius());
+    quiet.FlatButton();
     const std::string shown_action = Ellipsize(gui::Display(action).c_str(), action_slot - 2.f * gap) + "###panel_reset";
     ImGui::BeginDisabled(!action_enabled);
     *action_pressed = ImGui::Button(shown_action.c_str(), {action_slot, height});
@@ -961,17 +898,17 @@ inline bool CapsuleTabBar(const char* id, const char* const* english, int count,
   draw->AddLine(left, right, ToU32(tokens::Fade(tokens::kTextPrimary, 0.06f)), std::max(1.f, Px(1.f)));
   for (int i = 0; i < count; ++i) {
     const bool live = i == (clicked >= 0 ? clicked : *current);
-    gui::PushID(i);  // the per-tab animation ids, without a string per tab per frame
-    active_amount[i] = Animate(AnimationID("##tab_active"), live ? 1.f : 0.f, motion::kTabSlide);
-    hover_amount[i] = Animate(AnimationID("##tab_hover"), hot[i] || held[i] ? 1.f : 0.f, motion::kHover);
+    gui::PushID(i);
+    const float selection = Animate(ImGui::GetID("##tab_active"), live ? 1.f : 0.f, motion::kTabSlide);
+    const float hover = Animate(ImGui::GetID("##tab_hover"), hot[i] || held[i] ? 1.f : 0.f, motion::kHover);
     gui::PopID();
     // One white surface: the hover wash carries on under the moving plate instead of the two being blended twice.
-    const float hover_alpha = (held[i] ? 0.08f : 0.05f) * hover_amount[i];
-    const float plate_alpha = hover_alpha + (1.f - hover_alpha) * active_amount[i];
+    const float hover_alpha = (held[i] ? 0.08f : 0.05f) * hover;
+    const float plate_alpha = hover_alpha + (1.f - hover_alpha) * selection;
     draw->AddRectFilled(lo[i], hi[i], ToU32(tokens::Fade(tokens::kTextPrimary, plate_alpha)), CapsuleRadius());
     const ImVec2 size = gui::CalcTextSize(shown[i].c_str());
-    const ImVec4 inactive_text = tokens::Mix(tokens::kTextSecondary, tokens::kTextPrimary, hover_amount[i]);
-    const ImVec4 color = tokens::Mix(inactive_text, tokens::kPlateInk, active_amount[i]);
+    const ImVec4 inactive_text = tokens::Mix(tokens::kTextSecondary, tokens::kTextPrimary, hover);
+    const ImVec4 color = tokens::Mix(inactive_text, tokens::kPlateInk, selection);
     draw->AddText(ImVec2((lo[i].x + hi[i].x - size.x) * 0.5f, (lo[i].y + hi[i].y - size.y) * 0.5f), ToU32(color), shown[i].c_str());
   }
   gui::PopID();
