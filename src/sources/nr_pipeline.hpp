@@ -303,7 +303,7 @@ class NrPipeline final : private nr::PassResolver {
   bool faces_ran_ = false;
   uint32_t faces_first_ = 0u;
   MaskCopy mask_;
-  uint32_t resolve_slot_ = 0u;  // the recording's descriptor slot, for ResolvePass
+  uint32_t resolve_slot_ = 0u;  // the recording's descriptor slot, for Keep faces
 
   // What one recording needs allocated. Each surface is reused while its own dimensions/format fit.
   struct SetPlan {

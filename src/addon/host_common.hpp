@@ -332,18 +332,15 @@ bool OnOpenOverlay(api::effect_runtime* /*runtime*/, bool open, api::input_sourc
         nr::Logf(nr::LogLevel::INFO, "ReShade overlay opened: the Uplift panel yields");
       }
     } else {
-      // defaults_view is session-only and survives closing the overlay; a slider held as
-      // it closes must not stay coalesced, so everything else about the panel still resets --
+      // A slider held as the overlay closes must not stay coalesced, so the panel's state resets --
       // except where the panel sits and which tab it is on, which are the user's, not the session's.
       // This also runs when the add-on closes ReShade's overlay to make room for its own panel; the caller opens the
       // panel after the reset, so nothing of value is lost.
-      const bool defaults_view = STATE->overlay.defaults_view;
       const int panel_tab = STATE->overlay.panel_tab;
       const float panel_x = STATE->overlay.panel_x;
       const float panel_y = STATE->overlay.panel_y;
       const std::string panel_focus = STATE->overlay.panel_focus;
       STATE->overlay = {};
-      STATE->overlay.defaults_view = defaults_view;
       STATE->overlay.panel_tab = panel_tab;
       STATE->overlay.panel_x = panel_x;
       STATE->overlay.panel_y = panel_y;

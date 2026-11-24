@@ -276,7 +276,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::LOOK,
         .label = "Style",
-        .tooltip = "Processing style A/B/C (0/1/2), separate from the network preset in Setup. A change restarts NR's temporal history.",
+        .tooltip = "Processing style A/B/C (0/1/2), separate from pass 1's network preset. A change restarts NR's temporal history.",
         .choices = MODELS,
         .flags = RESTARTS_HISTORY,
         .get = [](const Settings& s) { return static_cast<double>(s.style); },
@@ -723,8 +723,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::PLACEMENT,
         .label = "Resolution at After DLSS",
-        .tooltip = "The size NR works at for the passes at After DLSS. Setup's Resolution sets pass 1's stage. Lower it if these passes cost "
-                   "too much. A change restarts NR.",
+        .tooltip = "The size NR works at for the passes at After DLSS. Pass 1's Resolution, above, sets pass 1's stage. Lower it if these "
+                   "passes cost too much. A change restarts NR.",
         .choices = RESOLUTION_MODES,
         .flags = RESTARTS_HISTORY,
         .get = [](const Settings& s) { return Index(s.resolution_mode_after_dlss); },
@@ -749,8 +749,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::PLACEMENT,
         .label = "Resolution at Present",
-        .tooltip = "The size NR works at for the passes at Present. Setup's Resolution sets pass 1's stage. Lower it if these passes cost "
-                   "too much. A change restarts NR.",
+        .tooltip = "The size NR works at for the passes at Present. Pass 1's Resolution, above, sets pass 1's stage. Lower it if these "
+                   "passes cost too much. A change restarts NR.",
         .choices = RESOLUTION_MODES,
         .flags = RESTARTS_HISTORY,
         .get = [](const Settings& s) { return Index(s.resolution_mode_present); },
@@ -1871,16 +1871,15 @@ void PassPresetSet(Settings& s, double v) {
   s.passes[Index].preset = NetworkPresetValue(v);
 }
 
-constexpr size_t PASS_ROW_COUNT = 11u;
+constexpr size_t PASS_ROW_COUNT = 9u;
 constexpr size_t LATER_PASS_COUNT = MAX_PASSES - 1u;
 
-// The 99 per-pass keys ("Pass2FollowPass1".."Pass10Preset"), built once: every per-pass
+// The 81 per-pass keys ("Pass2FollowPass1".."Pass10Preset"), built once: every per-pass
 // SettingDescriptor::key points into this array, which must outlive them (function-local static).
 const std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT>& PassKeyStrings() {
   static const std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT> keys = [] {
     constexpr std::array<std::string_view, PASS_ROW_COUNT> SUFFIXES = {
-        "FollowPass1", "Intensity", "Style", "LocalTone", "LocalStructure", "SkinStructure", "AutoMask",
-        "TransferStrength", "ColorStrength", "Stage", "Preset",
+        "FollowPass1", "Intensity", "Style", "LocalTone", "LocalStructure", "SkinStructure", "AutoMask", "Stage", "Preset",
     };
     std::array<std::string, LATER_PASS_COUNT * PASS_ROW_COUNT> result;
     for (size_t index = 0u; index < LATER_PASS_COUNT; ++index) {
@@ -2009,32 +2008,8 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .pass = PASS,
       },
       {
+          // Split chain: written and shown whether or not the pass follows pass 1.
           .key = key(7),
-          .kind = SettingKind::FLOAT,
-          .section = SettingSection::PASSES,
-          .label = "Transfer strength",
-          .tooltip = "How much of this pass's brightness change it passes on.",
-          .min = 0.0,
-          .max = 1.0,
-          .get = &PassGet<Index, &PassSettings::transfer_strength>,
-          .set = &PassSet<Index, &PassSettings::transfer_strength>,
-          .pass = PASS,
-      },
-      {
-          .key = key(8),
-          .kind = SettingKind::FLOAT,
-          .section = SettingSection::PASSES,
-          .label = "Colour strength",
-          .tooltip = "How much of this pass's colour change it passes on.",
-          .min = 0.0,
-          .max = 1.0,
-          .get = &PassGet<Index, &PassSettings::color_strength>,
-          .set = &PassSet<Index, &PassSettings::color_strength>,
-          .pass = PASS,
-      },
-      {
-          // Split chain: written and shown whether or not the pass follows pass 1, and kept by the Defaults view.
-          .key = key(9),
           .kind = SettingKind::CHOICE,
           .section = SettingSection::PASSES,
           .label = "Runs at",
@@ -2046,11 +2021,11 @@ std::array<SettingDescriptor, PASS_ROW_COUNT> PassRows() {
           .pass = PASS,
       },
       {
-          .key = key(10),
+          .key = key(8),
           .kind = SettingKind::CHOICE,
           .section = SettingSection::PASSES,
           .label = "Network preset",
-          .tooltip = "Which NR network this pass runs. Same as pass 1 uses the Setup network. The FP8 models use NVIDIA's own FP8 kernels with our weights (RTX 40/50).",
+          .tooltip = "Which NR network this pass runs. \"Same as pass 1\" uses pass 1's network. The FP8 models use NVIDIA's own FP8 kernels with our weights (RTX 40/50).",
           .choices = PASS_NETWORKS,
           .flags = PASS_SWITCH | NETWORK_PRESET | RESTARTS_HISTORY,
           .get = &PassPresetGet<Index>,
@@ -2121,27 +2096,6 @@ void ResetSection(Settings* settings, SettingSection section) {
       ResetSetting(settings, descriptor);
     }
   }
-}
-
-bool InDefaultsView(const SettingDescriptor& descriptor) {
-  if (descriptor.key == "PassCount") return true;  // The built-in look still previews its single pass.
-  if ((descriptor.flags & (setting_flags::PASS_STAGE | setting_flags::NETWORK_PRESET)) != 0u) return false;
-  switch (descriptor.section) {
-    case SettingSection::LOOK:
-    case SettingSection::RESULT:
-    case SettingSection::LIMITS:
-    case SettingSection::PASSES: return true;
-    default:                     return false;
-  }
-}
-
-Settings DefaultsView(Settings mine) {
-  for (const SettingDescriptor& descriptor : SettingsSchema()) {
-    if (InDefaultsView(descriptor)) {
-      ResetSetting(&mine, descriptor);
-    }
-  }
-  return mine;
 }
 
 void RestoreAllDefaults(Settings* settings) {

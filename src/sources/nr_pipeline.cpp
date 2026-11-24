@@ -618,14 +618,6 @@ ID3D12Resource* NrPipeline::PrepareMaskCopy(const D3D12_RESOURCE_DESC* mask) {
 void NrPipeline::ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID3D12Resource* given, ID3D12Resource* returned) {
   if (index == 0u || index > LATER_PASSES || !color_.SupportsUavLoads()) return;
   const bool swapped = (given != set_->intermediates.model_a.Get());
-  if (const PassStrengths& strengths = config_.later_strengths[index - 1u]; strengths != PassStrengths{}) {
-    Transition(list, returned, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    color_.RecordResolve(list, resolve_slot_,
-                         {.given = given, .returned = returned, .size = set_->intermediates.plan.sizes.canvas,
-                          .transfer_strength = strengths.transfer, .color_strength = strengths.color,
-                          .swapped = swapped});
-    Transition(list, returned, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-  }
   if (faces_ran_ && index != faces_first_) {
     // Keep faces: inside pass 1's face mask only this pass's broad change is kept. Split chain: a later group's own mask,
     // from its first pass's twin, whose recombination already made that pass's result.
@@ -745,7 +737,7 @@ nr::EvaluateResult NrPipeline::Evaluate(ID3D12GraphicsCommandList* list, uint32_
     inputs.motion_scale_y = 1.f;
   }
   inputs.reset_hint = (inputs.reset_hint || set_->intermediates.reset_pending);
-  // Passes 2..10's own controls, and their own strengths between passes.
+  // Passes 2..10's own controls.
   inputs.later_passes = config_.later_controls;
   inputs.resolver = this;
   resolve_slot_ = slot;

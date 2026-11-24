@@ -139,7 +139,6 @@ struct OverlayState {
   bool key_captured_this_frame = false;
   // 1.1.0: when the panel last showed the capture; a capture not shown for a moment (the panel closed, another tab) ends (ExpireKeyCapture).
   std::chrono::steady_clock::time_point capture_seen;
-  bool defaults_view = false;   // session only; the add-on keeps it when the overlay closes
   std::string_view enable_warning_key;  // requested checkbox confirmation; ImGui owns the open modal
   bool confirm_present_stage = false;  // The diagram changes both Source and FG placement when the warning is accepted.
   bool confirm_restore = false;  // requested Restore all defaults modal, cleared on dismissal
@@ -152,7 +151,7 @@ struct OverlayState {
   const void* setup_device = nullptr;
 
   // The panel's own state (2026-11-23). Session-only: nothing here is persisted, and ReShade's own close resets it.
-  int panel_tab = 1;         // 0 General, 1 Setup, 2 Look, 3 Layers, 4 Fixes, 5 DLSS / Reflex, 6 Advanced
+  int panel_tab = 1;         // 0 General, 1 Look, 2 Layers, 3 Fixes, 4 DLSS / Reflex, 5 Advanced
   bool panel_open = false;   // set by the panel hotkey, cleared by the cross, Escape or ReShade's own panel opening
   // True while ReShade's own settings window is up (reshade_open_overlay). The two windows exclude each other: this
   // panel is not drawn while it is true, and neither opening nor closing ReShade's window ever opens this one -- only
@@ -170,7 +169,7 @@ struct OverlayState {
   std::string panel_focus = "Source";
   std::string panel_hovered_row;
   uint32_t panel_nav_choice = 0;
-  uint32_t edited_pass = 2u;  // selected later pass in Look
+  uint32_t edited_pass = 2u;  // selected additional pass in Look
 };
 
 // Resolves Setup from `facts` (the shown device's), settles its highlights in `state` and, for a working card, builds the card's rows. Sets
@@ -180,6 +179,15 @@ void FinishSetup(OverlayView* view, OverlayState* state, const void* device, con
 // Draws the standalone panel while OverlayState::panel_open is set. Returns true when `settings`
 // changed, so the caller can sanitise, save and apply.
 bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState* state);
+
+// Closes the standalone panel. Every path (the header's cross, Escape, the panel hotkey) goes through this, so a closed
+// panel keeps nothing of its session: the cursor, the intro and the tab transition start over with the next open.
+void ClosePanel(OverlayState* state);
+
+// Opens the standalone panel from the state ClosePanel leaves, so the opening slide and fade replay and the tab it opens
+// on arrives without a tab transition, whichever path closed it last. The add-on's hotkey uses this; ReShade's own
+// reshade_open_overlay handler resets the panel too, so an open never depends on how the previous one ended.
+void OpenPanel(OverlayState* state);
 
 // 1.1.0: a hotkey capture the overlay has not shown for a moment (Esc closed ReShade's overlay, or another tab is open) ends, keeping the old hotkey, so
 // the hotkey (which a capture holds off) works again. Called at each present.

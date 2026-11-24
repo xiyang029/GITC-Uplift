@@ -32,23 +32,14 @@ sources::LookConfig LookConfigFrom(const ui::Settings& settings,
       .keep_faces = {.enabled = settings.keep_faces, .protection = settings.face_protection, .lighting_scale = settings.lighting_scale,
                      .show_mask = settings.show_face_mask, .tuning = settings.face_tuning},
   };
-  for (size_t index = 0u; index < settings.passes.size(); ++index) {
-    const ui::PassSettings& pass = settings.passes[index];
-    if (!pass.follow_pass1) {
-      config.later_strengths[index] = {.transfer = pass.transfer_strength, .color = pass.color_strength};
-    }
-  }
   return config;
 }
 
 FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::ControlsCoalescer* coalescer, std::chrono::steady_clock::time_point now) {
   const ui::Settings& settings = *inputs.settings;
-  // With Defaults on, the look group runs at its built-in values. The Session keeps the
-  // user's pass count and evaluates fewer live passes (no rebuild). Never saved.
-  const ui::Settings look_settings = (inputs.defaults_view ? ui::DefaultsView(settings) : settings);
   FrameSettings frame = {
       .session = ui::ToSessionOptions(settings),
-      .controls = coalescer->Update(look_settings, inputs.drag, now),
+      .controls = coalescer->Update(settings, inputs.drag, now),
       .encoding = settings.encoding,
       .diffuse_white_nits = settings.diffuse_white_nits,
       .transfer_strength = settings.transfer_strength,
@@ -86,10 +77,9 @@ FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::Controls
       .foveation_edge_x = settings.foveation_edge_x,
       .foveation_edge_y = settings.foveation_edge_y,
       .pre_upscale = settings.pre_upscale,
-      .look = LookConfigFrom(look_settings, coalescer->LaterPasses(look_settings, inputs.drag.pass_slider, now)),
+      .look = LookConfigFrom(settings, coalescer->LaterPasses(settings, inputs.drag.pass_slider, now)),
       .launchpad_motion = (settings.motion_vectors == ui::MotionVectorSource::AUTO || settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD
                            || settings.motion_vectors == ui::MotionVectorSource::LUMENITE),
-      .pass_view_limit = (inputs.defaults_view ? ui::DefaultSettings().pass_count : 0u),
       .settings_generation = inputs.settings_generation,
       // The later stage groups' own Resolution and "Keep faces here" (After DLSS, Present). `split_capable` is the add-on's.
       .stage_resolution = {{{.mode = settings.resolution_mode_after_dlss, .scale = settings.resolution_scale_after_dlss,
@@ -98,12 +88,12 @@ FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::Controls
                               .slider_held = inputs.drag.resolution_scale_present}}},
       .stage_keep_faces = {settings.keep_faces_after_dlss, settings.keep_faces_present},
   };
-  // Split chain: passes 2..10's "Runs at", which the Defaults view keeps (PASS_STAGE).
+  // Split chain: passes 2..10's "Runs at" (PASS_STAGE).
   for (size_t index = 0u; index < settings.passes.size(); ++index) {
     frame.pass_stages[index] = settings.passes[index].stage;
   }
   // Keep faces: Face protection restarts the extra run's history, so a drag applies it at most every DRAG_PERIOD, as Skin structure's does.
-  frame.look.keep_faces.protection = coalescer->FaceProtection(look_settings, inputs.drag.face_protection, now);
+  frame.look.keep_faces.protection = coalescer->FaceProtection(settings, inputs.drag.face_protection, now);
   return frame;
 }
 

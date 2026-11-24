@@ -23,9 +23,6 @@ static const float PQ_M2 = 78.84375f;
 static const float PQ_C1 = 0.8359375f;
 static const float PQ_C2 = 18.8515625f;
 static const float PQ_C3 = 18.6875f;
-static const float BLACK = 1e-6f;
-static const float RATIO_MIN = 0.125f;
-static const float RATIO_MAX = 8.f;
 
 // ITU-R BT.2087, row by row, used as mul(matrix, column).
 static const float3x3 BT709_TO_BT2020 = float3x3(

@@ -131,13 +131,6 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   std::string label(label_override ? std::string_view(label_override) : descriptor.label);
   if (descriptor.key == "ResolutionPresent") label = std::format("Resolution at {}", view.SharedPresentName(*settings));
   if (descriptor.key == "ResolutionScalePresent") label = std::format("Custom scale at {}", view.SharedPresentName(*settings));
-  // Plan 6 (D6): with Compare = Built-in, a look-group row shows its built-in value, read-only: edits never reach `settings`.
-  const bool read_only = (state->defaults_view && InDefaultsView(descriptor));
-  Settings built_in;
-  if (read_only) {
-    built_in = DefaultsView(*settings);
-    settings = &built_in;
-  }
   // Not `follows`: the SkinStructure branch below declares one (C4456).
   const bool pass_follows = (descriptor.pass != 0u && (descriptor.flags & setting_flags::PASS_SWITCH) == 0u
                              && settings->passes[descriptor.pass - 2u].follow_pass1);
@@ -202,7 +195,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
       : (keep_faces_row && !view.keep_faces_unavailable.empty())               ? std::string_view(view.keep_faces_unavailable)
       : (descriptor.key == "ShowFaceMask" && !settings->keep_faces)            ? std::string_view("Turn on Keep faces (Look) first")
                                                                                : std::string_view();
-  gui::BeginDisabled(!disabled_reason.empty() || read_only);
+  gui::BeginDisabled(!disabled_reason.empty());
   bool changed = false;
   if (descriptor.key == "SkinStructure") {
     bool follows = (settings->skin_structure < 0.f);
@@ -399,8 +392,8 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
           }
           const std::string body = note.empty() ? std::string(descriptor.tooltip)
                                                  : std::format("{}\n{}", descriptor.tooltip, note);
-          const auto blocked = read_only ? std::string_view("Built-in settings are read-only.") : disabled_reason;
-          changed |= DrawChoice(*state, descriptor.key, caption.c_str(), choices.data(), count, shown, why.data(), body, blocked,
+          changed |= DrawChoice(*state, descriptor.key, caption.c_str(), choices.data(), count, shown, why.data(), body,
+              disabled_reason,
               [settings, state, row = &descriptor](int picked) {
                 if (row->key == "PresentWithFrameGen" && picked == static_cast<int>(Settings::FgPresent::AFTER)) {
                   state->confirm_present_stage = false;
@@ -463,7 +456,7 @@ bool DrawRow(const SettingDescriptor& descriptor, const OverlayView& view, Setti
   }
   gui::EndDisabled();
   gui::PopID();
-  return changed && !read_only;
+  return changed;
 }
 
 bool DrawEnableWarning(Settings* settings, OverlayState* state, bool explicit_dlss) {
@@ -743,14 +736,7 @@ bool DrawSetupGroups(const OverlayView& view, Settings* settings, OverlayState* 
 }
 
 bool DrawLookGroups(const OverlayView& view, Settings* settings, OverlayState* state) {
-  static constexpr const char* options[] = {"Mine", "Built-in"};
   bool changed = false;
-  DrawChoice(*state, "Compare", "Compare", options, 2, state->defaults_view ? 1 : 0, nullptr,
-             "Show your own settings, or the built-in look read-only.", {},
-      [state](int picked) {
-        state->defaults_view = picked == 1;
-        return false;
-      });
   widgets::NextGap(style::BlockGap());
   widgets::GroupHeading("Image", "Pass 1");
   for (const char* key : {"Style", "Intensity", "LocalStructure", "LocalTone"}) {
@@ -800,13 +786,12 @@ void OverlayView::AddStartupLocks(const Settings& settings, bool vulkan, bool d3
 // row on this tab and a row on that one cannot drift apart, and no setting exists here that is not in ReShade.ini.
 // ---------------------------------------------------------------------------------------------------------
 namespace panel {
-enum Tab : int { GENERAL, SETUP, LOOK, LAYERS, FIXES, DLSS_REFLEX, ADVANCED, COUNT };
-inline constexpr std::array<const char*, COUNT> kNames{"General", "Setup", "Look", "Layers", "Fixes", "DLSS / Reflex", "Advanced"};
+enum Tab : int { GENERAL, LOOK, LAYERS, FIXES, DLSS_REFLEX, ADVANCED, COUNT };
+inline constexpr std::array<const char*, COUNT> kNames{"General", "Look", "Layers", "Fixes", "DLSS / Reflex", "Advanced"};
 // What the detail column says before the pointer rests on a row.
 inline constexpr std::array<const char*, COUNT> kBlurb{
     "Turns NR on, sets the two hotkeys and the language, and says what the panel is doing right now.",
-    "Where the passes run and what size they work at, with the DLSS stage choices underneath.",
-    "Style, intensity, local structure, tone and settings for additional passes.",
+    "Where the passes run, the size they work at, and the look of pass 1 and of every additional pass.",
     "Result shaping, NR change stabilisation, and mask and HUD settings.",
     "Colour, exposure and motion repair.",
     "DLSS and Reflex overrides, frame generation, and their current runtime status.",
@@ -921,14 +906,12 @@ void ScrollColumnWithWheel() {
 
 // The tab bar owns reset commands so the content can start directly with its first control or group.
 std::span<const SettingSection> PanelSections(int tab) {
-  static constexpr SettingSection setup[] = {SettingSection::PLACEMENT};
-  static constexpr SettingSection look[] = {SettingSection::LOOK};
+  static constexpr SettingSection look[] = {SettingSection::PLACEMENT, SettingSection::LOOK, SettingSection::PASSES};
   static constexpr SettingSection layers[] = {SettingSection::RESULT, SettingSection::LIMITS, SettingSection::MASK};
   static constexpr SettingSection fixes[] = {SettingSection::FIXES_COLOR, SettingSection::FIXES_GUIDES};
   static constexpr SettingSection dlss[] = {SettingSection::DLSS_REFLEX};
   static constexpr SettingSection advanced[] = {SettingSection::ADVANCED};
   switch (tab) {
-    case panel::SETUP: return setup;
     case panel::LOOK: return look;
     case panel::LAYERS: return layers;
     case panel::FIXES: return fixes;
@@ -941,13 +924,12 @@ std::span<const SettingSection> PanelSections(int tab) {
 bool DrawPanelTabs(const OverlayView& view, Settings* settings, OverlayState* state) {
   int tab = state->panel_tab;
   const auto sections = PanelSections(tab);
-  const bool editable = !state->defaults_view || tab == panel::ADVANCED || tab == panel::DLSS_REFLEX;
   const char* label = "Reset";
   bool enabled = false;
   if (tab == panel::GENERAL) {
     label = "Restore all defaults";
     enabled = true;
-  } else if (editable) {
+  } else {
     enabled = std::ranges::any_of(sections, [settings](SettingSection section) { return SectionChanged(*settings, section); });
   }
 
@@ -955,7 +937,7 @@ bool DrawPanelTabs(const OverlayView& view, Settings* settings, OverlayState* st
   if (widgets::CapsuleTabBar("##panel_tabs", panel::kNames.data(), panel::COUNT, &tab, label, enabled, &reset)) {
     state->panel_tab = tab;
     state->panel_focus.clear();
-    if (tab == panel::SETUP) state->panel_focus = "Source";
+    if (tab == panel::LOOK) state->panel_focus = "Source";
   }
   widgets::NextGap(style::BlockGap());
   if (!reset) return false;
@@ -964,7 +946,7 @@ bool DrawPanelTabs(const OverlayView& view, Settings* settings, OverlayState* st
     return false;
   }
   for (SettingSection section : sections) ResetSection(settings, section);
-  if (tab == panel::SETUP) {
+  if (tab == panel::LOOK) {
     const Settings& defaults = DefaultSettings();
     state->setup_settle.ClickedBest(SetupRow::STAGE, static_cast<uint32_t>(SourcePickOf(defaults, view.dlss_explicit)), view.setup);
     state->setup_settle.ClickedBest(SetupRow::MOTION, static_cast<uint32_t>(MotionPickOf(defaults)), view.setup, true);
@@ -1147,19 +1129,11 @@ bool DrawGeneralTab(const OverlayView& view, Settings* settings, OverlayState* s
   return changed;
 }
 
-bool DrawSetupTab(const OverlayView& view, Settings* settings, OverlayState* state) {
-  bool changed = false;
-  changed |= DrawStageRow(view, settings, state);
-  changed |= DrawSetupGroups(view, settings, state);
-  return changed;
-}
-
 bool DrawLayersTab(const OverlayView& view, Settings* settings, OverlayState* state) {
   widgets::GroupHeading("Result");
   bool changed = false;
   changed |= DrawRows(view, settings, state, {"ShapeResult"});
-  const bool shaping_enabled = state->defaults_view ? DefaultSettings().look.enabled : settings->look.enabled;
-  if (shaping_enabled) {
+  if (settings->look.enabled) {
     widgets::NextGap(style::BlockGap());
     widgets::GroupHeading("Strength and colour");
     changed |= DrawRows(view, settings, state, {"EditStrength", "Brighten", "Darken", "ResultColor", "HueShift"});
@@ -1182,15 +1156,14 @@ bool DrawLayersTab(const OverlayView& view, Settings* settings, OverlayState* st
   return changed;
 }
 
+// Setup and Look are one tab: where the passes run, at what size, and how pass 1 and every
+// additional pass look. The reset button in the tab bar restores all three sections at once.
 bool DrawLookTab(const OverlayView& view, Settings* settings, OverlayState* state) {
-  bool changed = DrawLookGroups(view, settings, state);
-  widgets::NextGap(style::BlockGap());
-  widgets::GroupHeading("Passes");
-  changed |= DrawRows(view, settings, state, {"PassCount"});
-  if (state->defaults_view) return changed;
+  bool changed = DrawStageRow(view, settings, state);
+  changed |= DrawSetupGroups(view, settings, state);
+  changed |= DrawLookGroups(view, settings, state);
   if (settings->pass_count < 2u) {
     state->edited_pass = 2u;
-    widgets::SecondaryWrapped("Increase Pass count to configure additional passes.");
     return changed;
   }
 
@@ -1203,8 +1176,10 @@ bool DrawLookTab(const OverlayView& view, Settings* settings, OverlayState* stat
     pass_labels[pass - 2u] = std::format("Pass {}", pass);
     names[pass - 2u] = pass_labels[pass - 2u].c_str();
   }
+  widgets::NextGap(style::BlockGap());
+  widgets::GroupHeading("Additional passes");
   DrawChoice(*state, "EditedPass", "Edit pass", names.data(), static_cast<int>(count - 1u), static_cast<int>(previous - 2u),
-             nullptr, "Select which additional pass to edit. Pass 1 uses Setup and Look.", {},
+             nullptr, "Select which additional pass to edit. Pass 1 is edited above.", {},
       [state](int picked) {
         state->edited_pass = static_cast<uint32_t>(picked) + 2u;
         return false;
@@ -1232,19 +1207,6 @@ bool DrawLookTab(const OverlayView& view, Settings* settings, OverlayState* stat
   for (const SettingDescriptor& descriptor : SettingsSchema()) {
     if (descriptor.pass == pass && (descriptor.flags & (setting_flags::PASS_STAGE | setting_flags::NETWORK_PRESET)) == 0u) {
       changed |= DrawRow(descriptor, view, settings, state);
-    }
-  }
-  const auto pass_settings = SettingsSchema();
-  if (std::ranges::any_of(pass_settings, [settings, pass](const SettingDescriptor& descriptor) {
-        return descriptor.pass == pass && !IsDefault(*settings, descriptor);
-      })) {
-    style::StyleScope quiet;
-    quiet.FlatButton();
-    if (gui::Button("Reset pass")) {
-      for (const SettingDescriptor& descriptor : pass_settings) {
-        if (descriptor.pass == pass) ResetSetting(settings, descriptor);
-      }
-      changed = true;
     }
   }
   gui::PopID();
@@ -1333,12 +1295,12 @@ bool DrawPanel(const OverlayView& view, Settings* settings, OverlayState* state)
   state->language_changed = false;
   const gui::LanguageScope language_scope(settings->language);
   bool changed = false;
-  if (DrawPanelHeader(view, state)) state->panel_open = false;
+  if (DrawPanelHeader(view, state)) ClosePanel(state);
   // The focused modal handles its own Escape; do not close the panel behind it.
   constexpr auto panel_focus_flags = ImGuiFocusedFlags_RootAndChildWindows | ImGuiFocusedFlags_NoPopupHierarchy;
   if (gui::IsWindowFocused(panel_focus_flags) && gui::IsKeyPressed(ImGuiKey_Escape) && !state->capturing_key
       && !state->capturing_panel_key) {
-    state->panel_open = false;
+    ClosePanel(state);
   }
   auto& detail = PendingDetail();
   detail = {};
@@ -1371,7 +1333,6 @@ bool DrawPanel(const OverlayView& view, Settings* settings, OverlayState* state)
         ScrollColumnWithWheel();
         switch (state->panel_tab) {
           case panel::GENERAL: changed |= DrawGeneralTab(view, settings, state); break;
-          case panel::SETUP: changed |= DrawSetupTab(view, settings, state); break;
           case panel::LOOK: changed |= DrawLookTab(view, settings, state); break;
           case panel::LAYERS: changed |= DrawLayersTab(view, settings, state); break;
           case panel::FIXES: changed |= DrawFixesTab(view, settings, state); break;
@@ -1454,14 +1415,25 @@ bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState
     }
     gui::End();
   }
-  if (!state->panel_open) {
-    gui::GetIO().MouseDrawCursor = false;
-    // The next open starts over: the intro replays and its first tab arrives without a tab transition.
-    state->panel_intro_started = -1.0;
-    state->panel_tab_transition_started = -1.0;
-    state->panel_animation_tab = -1;
-  }
   return changed;
+}
+
+void ClosePanel(OverlayState* state) {
+  state->panel_open = false;
+  state->panel_drew = false;  // nothing is on screen from this frame on: the present handler must not block the game's input
+  state->capturing_panel_key = false;
+  gui::GetIO().MouseDrawCursor = false;  // ImGui's context exists: ReShade creates it before its first present
+  // The next open starts over: the intro replays and its first tab arrives without a tab transition.
+  state->panel_intro_started = -1.0;
+  state->panel_tab_transition_started = -1.0;
+  state->panel_animation_tab = -1;
+}
+
+void OpenPanel(OverlayState* state) {
+  // The same clean slate a close leaves: an open never inherits a half-finished animation from the last one.
+  ClosePanel(state);
+  state->reshade_overlay_open = false;
+  state->panel_open = true;
 }
 
 }  // namespace uplift::ui

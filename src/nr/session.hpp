@@ -45,7 +45,7 @@ struct PassChain {
   uint64_t held_intermediate_bytes = 0u;  // bytes the caller holds for this chain now
 };
 
-// Records pass `index`'s (0-based, at least 1) own Transfer/Colour strength between NR
+// Records the Keep-faces work that follows pass `index`'s (0-based, at least 1) result, between NR
 // passes. `given` is the pass's input and `returned` its raw output, rewritten in place; both are RGBA16F in
 // NON_PIXEL_SHADER_RESOURCE on entry and on return.
 class PassResolver {
@@ -53,7 +53,7 @@ class PassResolver {
   virtual ~PassResolver() = default;
   virtual void ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID3D12Resource* given, ID3D12Resource* returned) = 0;
   // Keep faces: after pass 1 and its twin, records their recombination: `lighting` (pass 1's raw output, the user's settings) is rewritten
-  // with pass 1's result, and `faces` (the twin's output) with the face mask the later passes' ResolvePass reads. Both RGBA16F in NON_PIXEL_SHADER_RESOURCE
+  // with pass 1's result, and `faces` (the twin's output) with the face mask the later passes' Keep-faces passes read. Both RGBA16F in NON_PIXEL_SHADER_RESOURCE
   // on entry and on return.
   virtual void CombineFaces(ID3D12GraphicsCommandList* list, ID3D12Resource* lighting, ID3D12Resource* faces) = 0;
 };
@@ -86,7 +86,7 @@ struct FrameInputs {
   bool chained_history = true;  // off: every pass after the first resets its history each frame
   // Pass n ≥ 2's own controls at [n - 2]; nullopt, or a pass past the end, follows `controls`.
   std::span<const std::optional<Controls>> later_passes;
-  PassResolver* resolver = nullptr;  // records each later pass's own strengths; null: none
+  PassResolver* resolver = nullptr;  // Keep faces after each later pass; null: none
   FaceTwin faces;                    // Keep faces; needs `resolver`, which recombines the twin's output with pass 1's
 };
 
@@ -117,9 +117,6 @@ class Session {
   void RetryNow();
   // A settings change: the automatic backoff starts over.
   void ResetRetries() { retry_attempts_ = 0u; }
-  // The Defaults view evaluates only the first `limit` live passes, without a rebuild; 0 = all.
-  // A pass that did not run the previous frame restarts its history.
-  void SetPassViewLimit(uint32_t limit) { pass_view_limit_ = limit; }
   // Records the current frame's size outside of Evaluate too: keeps resume_size_ current for
   // TryResume's budget check while NR sits off or suspended, and retries a FAILED session to
   // LOADING when the size changes. Evaluate calls this itself, first; a caller
@@ -134,7 +131,7 @@ class Session {
   // retires its Keep faces twin. The budget reads it: a pass drop removes the last group's passes first, a restored pass and a resume cost each pass at its
   // stage's size, and a fit reserves the earlier groups' missing passes. Without a call, every pass is at stage 0.
   void SetChain(std::span<const StageSlice> groups);
-  // Whether any pass of `slice` runs: false when the budget cut its group to 0 (or the Defaults view shows fewer passes), so its stage is skipped.
+  // Whether any pass of `slice` runs: false when the budget cut its group to 0, so its stage is skipped.
   [[nodiscard]] bool SliceRuns(const StageSlice& slice) const;
   [[nodiscard]] bool SliceHasIntensity(const StageSlice& slice, const Controls& controls,
                                        std::span<const std::optional<Controls>> later) const;
@@ -246,7 +243,6 @@ class Session {
   uint32_t consecutive_failures_ = 0u;
   uint32_t retry_attempts_ = 0u;  // automatic retries since the last recovery, settings change or Retry now
   bool retry_requested_ = false;  // RetryNow: reload at the next Tick that may
-  uint32_t pass_view_limit_ = 0u;
   std::optional<std::chrono::steady_clock::time_point> failed_at_;
   std::optional<std::chrono::steady_clock::time_point> active_since_;
   Mark last_use_mark_;

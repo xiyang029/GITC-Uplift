@@ -273,7 +273,7 @@ void VkNrPipeline::RecordFaces(VkCommandBuffer buffer, color::VkFacesPass pass) 
   pass.layout = set_->faces.layout;
   pass.parameters = look::MakeFacesParameters(config_.keep_faces.lighting_scale, config_.keep_faces.tuning, set_->intermediates.sizes.image.height, set_->faces.layout.levels);
   set_->faces.last_use = slot_marks_[resolve_slot_];
-  Barrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);  // what wrote the pass's images (NGX, or the pass's own strengths) is visible to the pyramid
+  Barrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);  // what wrote the pass's images (NGX) is visible to the pyramid
   color_.RecordFacesPyramid(buffer, resolve_slot_, pass);
   if (pass.parameters.speck_radius != 0u) {
     color_.RecordFacesDespike(buffer, resolve_slot_, pass);  // before the combine rewrites `changed` (and pass 1's twin) in place
@@ -740,16 +740,6 @@ void VkNrPipeline::ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, 
   if (index == 0u || index > LATER_PASSES || !look_storage_) return;
   const VkImageView given_view = nr::VkResourceOf(given)->Resource.ImageViewInfo.ImageView;
   const VkImageView returned_view = nr::VkResourceOf(returned)->Resource.ImageViewInfo.ImageView;
-  if (const PassStrengths& strengths = config_.later_strengths[index - 1u]; strengths != PassStrengths{}) {
-    // The Session's transition after NR's pass made its writes visible to this dispatch (VkHost::Transition is a global barrier), and the one before the next
-    // pass, or RecordAfterNr's barrier, makes this one's visible to what reads it.
-    color_.RecordResolve(nr::VkListOf(list), resolve_slot_, index,
-                         {.given = given_view,
-                          .returned = returned_view,
-                          .size = set_->intermediates.sizes.canvas,
-                          .transfer_strength = strengths.transfer,
-                          .color_strength = strengths.color});
-  }
   if (faces_ran_ && index != faces_first_) {
     // Keep faces: inside pass 1's face mask only this pass's broad change is kept. Split chain: a later group's own mask,
     // from its first pass's twin, whose recombination already made that pass's result.
@@ -1265,7 +1255,7 @@ PipelineResult VkNrPipeline::RecordPreSr(VkCommandBuffer buffer, const VkDlssTar
   frame_inputs.later_passes = config_.later_controls;
   frame_inputs.resolver = this;
   resolve_slot_ = slot;
-  // 4. NR at the work size, with each later pass's own strengths (the resolver).
+  // 4. NR at the work size, with Keep faces recorded after each later pass (the resolver).
   const uint64_t held = HeldBytes();
   const nr::EvaluateResult evaluated = session_.Evaluate(
       nr::AsList(buffer),

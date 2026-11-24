@@ -178,17 +178,13 @@ void Session::SetChain(std::span<const StageSlice> groups) {
 }
 
 bool Session::SliceRuns(const StageSlice& slice) const {
-  uint32_t end = std::min(pass_count_, passes_limit_);
-  if (pass_view_limit_ != 0u) {
-    end = std::min(end, pass_view_limit_);
-  }
+  const uint32_t end = std::min(pass_count_, passes_limit_);
   return slice.count > 0u && slice.first < end;
 }
 
 bool Session::SliceHasIntensity(const StageSlice& slice, const Controls& controls,
                                 std::span<const std::optional<Controls>> later) const {
-  uint32_t end = std::min({pass_count_, passes_limit_, slice.first + slice.count});
-  if (pass_view_limit_ != 0u) end = std::min(end, pass_view_limit_);
+  const uint32_t end = std::min({pass_count_, passes_limit_, slice.first + slice.count});
   for (uint32_t pass = slice.first; pass < end; ++pass) {
     const Controls& effective = pass > 0u && pass - 1u < later.size() && later[pass - 1u] ? *later[pass - 1u] : controls;
     if (!(effective.intensity <= 0.f)) return true;
@@ -535,7 +531,7 @@ bool Session::EnsureFeatures(ID3D12GraphicsCommandList* list, const PassChain& c
     }
     return live;
   };
-  // A pass-count decrease keeps its surplus features live and idle, as the Defaults view does: Evaluate runs the
+  // A pass-count decrease keeps its surplus features live and idle: Evaluate runs the
   // first `desired`. Under the pool rule, releasing them frees nothing while pass 1 lives (tools/nrspike's e10). They go with the
   // next rebuild, yield or disable, all of which empty the pool.
   bool rebuild = false;
@@ -716,7 +712,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   }
   stage.last_size = chain.size;
   if (!SliceRuns(slice)) {
-    // Split chain: none of this slice's passes runs (the budget cut its group to 0, or the Defaults view shows fewer passes), so its stage skips. Its
+    // Split chain: none of this slice's passes runs (the budget cut its group to 0), so its stage skips. Its
     // passes did not run this frame: when they do again, each restarts its history.
     stage.evaluated_end = slice.first;
     const bool budget_cut = (slice.first < pass_count_ && slice.first >= passes_limit_);
@@ -739,18 +735,14 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   ID3D12Resource* color = chain.a;
   ID3D12Resource* output = chain.b;
   const bool reset = stage.reset_pending || inputs.reset_hint;
-  // A pass-count decrease keeps its surplus features idle; Evaluate runs only the first `desired`, exactly
-  // as the Defaults view's pass_view_limit_ already narrows it, without a rebuild either. A pass that did not run
-  // the previous frame starts its history afresh (index >= evaluated_end, below). Split chain: the slice's live passes,
-  // in order, by their global index.
+  // A pass-count decrease keeps its surplus features idle; Evaluate runs only the first `desired`, without a
+  // rebuild either. A pass that did not run the previous frame starts its history afresh (index >= evaluated_end,
+  // below). Split chain: the slice's live passes, in order, by their global index.
   const uint32_t desired = std::min(pass_count_, passes_limit_);
   const uint32_t slice_end = slice.first + slice.count;
   uint32_t run_end = slice.first;
   while (run_end < std::min(slice_end, desired) && features_[run_end]) {
     ++run_end;
-  }
-  if (pass_view_limit_ != 0u) {
-    run_end = std::max(slice.first, std::min(run_end, pass_view_limit_));
   }
   // A slice whose first pass the budget left unmade (a later pass of it is live from an earlier chain) runs nothing.
   if (run_end == slice.first) {
@@ -836,10 +828,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   } else if (inputs.depth.resource != nullptr) {
     depth_without_logged_ = false;  // back, silently; the next loss reports again
   }
-  uint32_t wanted_end = std::min(slice_end, pass_count_);
-  if (pass_view_limit_ != 0u) {
-    wanted_end = std::min(wanted_end, pass_view_limit_);
-  }
+  const uint32_t wanted_end = std::min(slice_end, pass_count_);
   const uint32_t wanted = wanted_end - slice.first;
   return {color, run, (run < wanted ? SkipReason::BUDGET : SkipReason::NONE)};
 }

@@ -120,28 +120,4 @@ float3 Compose(uint encoding, uint primaries, float3 value, float3 original, flo
   return (all(isfinite(stored)) ? stored : value);
 }
 
-// Each pass's own Transfer and Colour strength, from what it was given to what it returned, both in
-// the model domain; the result is pass n's output. An unchanged or non-finite output returns `given` exactly: the
-// rebuild's round trip is off by up to ~1e-4 relative, and the FP16 UAV store rounds toward zero, so recomputing an
-// unchanged pixel would drop it a whole FP16 step and invent a change the change field then applies.
-float3 ResolveStrengths(float3 given, float3 returned, float transfer_strength, float color_strength) {
-  if (!all(isfinite(returned)) || all(returned == given)) return given;
-  const float3 linear_given = SrgbDecode(given);
-  const float3 linear_returned = SrgbDecode(returned);
-  const float luminance_given = max(Luminance(linear_given), 0.f);
-  const float ratio =
-      (luminance_given > BLACK ? clamp(max(Luminance(linear_returned), 0.f) / luminance_given, RATIO_MIN, RATIO_MAX) : 1.f);
-  const float target = luminance_given * (1.f + (ratio - 1.f) * transfer_strength);
-  const float3 lab_given = LinearToOkLab(linear_given);
-  const float lightness =
-      (luminance_given > 0.f ? lab_given.x * pow(target / luminance_given, 1.f / 3.f) : pow(target, 1.f / 3.f));
-  const float2 chroma = Chroma(lab_given) + color_strength * (Chroma(LinearToOkLab(linear_returned)) - Chroma(lab_given));
-  float3 rebuilt = OkLabToLinear(float3(lightness, chroma * max(lightness, LIGHTNESS_FLOOR)));
-  const float rebuilt_luminance = Luminance(rebuilt);
-  if (rebuilt_luminance > 0.f) {
-    rebuilt *= target / rebuilt_luminance;
-  }
-  return SrgbEncode(GamutClip(rebuilt));
-}
-
 #endif  // UPLIFT_CHANGE_COMMON_HLSLI

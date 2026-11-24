@@ -306,7 +306,7 @@ void Helper::Frame(const ipc::Request& request, ipc::Reply* reply, bool defer_st
   }
   const addon::TargetInfo target = transport_->Describe(frame.target, settings_.enabled, running, &reply->handles);
   addon::FrameSettings frame_settings = addon::BuildFrameSettings(
-      {.settings = &settings_, .drag = ipc::DragFrom(frame.drag_bits), .defaults_view = (frame.defaults_view != 0u), .settings_generation = settings_generation_},
+      {.settings = &settings_, .drag = ipc::DragFrom(frame.drag_bits), .settings_generation = settings_generation_},
       &coalescer_, now);
   addon::FrameFacts frame_facts = addon::BuildFrameFacts(
       settings_, {.nr_allowed = (frame.nr_allowed != 0u), .uplift_mv_lumenite = (frame.uplift_mv_lumenite != 0u)});  // the readouts name UPLIFT_MV's source

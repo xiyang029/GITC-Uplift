@@ -505,12 +505,12 @@ sources::PipelineResult VkDlssContext::RunPresent(TriggerPoint point, vk::Usage 
     present_reset_owed_ = true;
     return SkipPresent(nr::SkipReason::FRAME_TOO_SMALL, group);
   }
-  // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before anything is recorded. No GPU waits:
+  // Split chain: a later group the budget cut to no pass skips before anything is recorded. No GPU waits:
   // DLSS-stage NR on another queue keeps Present off for later groups (UpdateChain); until that shows, a later Present group runs only once every earlier
   // DLSS-stage recording off the effect queue has completed, else it skips this frame. On the effect queue itself the queue's order keeps them apart.
   if (!session_->SliceRuns(slices_[group])) {
     present_reset_owed_ = true;
-    return SkipPresent(SliceSkipReason(settings_, slices_[group]), group);
+    return SkipPresent(nr::SkipReason::BUDGET, group);
   }
   if (!settings_.look.keep_faces.show_mask && !session_->SliceHasIntensity(slices_[group], controls_, settings_.look.later_controls)) {
     present_reset_owed_ = true;
@@ -1119,8 +1119,8 @@ sources::PipelineResult VkDlssContext::OnDlssEvaluate(VkCommandBuffer buffer, co
     }
     return {.reason = nr::SkipReason::NR_OFF};
   }
-  // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before anything is recorded; its next recording starts afresh.
-  if (group > 0u && !session_->SliceRuns(slices_[group])) return skip_group(SliceSkipReason(settings_, slices_[group]), true);
+  // Split chain: a later group the budget cut to no pass skips before anything is recorded; its next recording starts afresh.
+  if (group > 0u && !session_->SliceRuns(slices_[group])) return skip_group(nr::SkipReason::BUDGET, true);
   // DLSS's output changed format while NR runs (an HDR toggle). Its pipelines are built at the next present, never inside the
   // game's evaluate (a first compile takes milliseconds): this one frame keeps DLSS's own output, and NR's history starts afresh after it.
   if (!pipeline_->Prepared(output_format_)) return skip_group(nr::SkipReason::PREPARING_FORMAT, true);

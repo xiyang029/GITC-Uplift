@@ -12,13 +12,6 @@ namespace uplift::sources {
 
 inline constexpr size_t LATER_PASSES = nr::MAX_PASSES - 1u;
 
-// Pass n ≥ 2's own Transfer and Colour strength between passes; (1, 1) resolves nothing.
-struct PassStrengths {
-  float transfer = 1.f;
-  float color = 1.f;
-  friend bool operator==(const PassStrengths&, const PassStrengths&) = default;
-};
-
 // Colour preparation, exposure and final composition settings.
 struct ColorFixes {
   color::Primaries primaries = color::Primaries::AUTO;
@@ -54,7 +47,6 @@ struct LookConfig {
   look::LookSettings look;
   ColorFixes fixes;
   std::array<std::optional<nr::Controls>, LATER_PASSES> later_controls = {};  // pass n at [n - 2]; nullopt follows pass 1
-  std::array<PassStrengths, LATER_PASSES> later_strengths = {};              // pass n's own; (1, 1) resolves nothing
   bool mask = false;                   // Mask = Auto: bind the mask copy once the add-on has copied into it
   bool present_ui_correction = false;  // UICorrection = On: forwarded on the Present path only (no effect without a Backbuffer)
   float frame_seconds = 1.f / 60.f;    // Δt since this placement's last recording: the stabiliser and the governor

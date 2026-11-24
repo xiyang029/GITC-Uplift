@@ -396,7 +396,6 @@ void HelperFront::Present(HelperDevice& entry, const HelperFrame& frame, Microso
   ipc::Frame wire = {
       .settings_generation = settings_generation_,
       .drag_bits = ipc::DragBits(frame.overlay->drag),
-      .defaults_view = (frame.overlay->defaults_view ? 1u : 0u),
       .marker_expected = (!early && frame.marker.handle != 0u ? 1u : 0u),
       .nr_allowed = (frame.nr_allowed ? 1u : 0u),
       .unreported_point = static_cast<uint32_t>(entry.unreported_point),

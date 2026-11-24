@@ -207,16 +207,6 @@ struct ChangeStabilizePass {
   bool flat_denoise = false;           // Present only: softly filter small spatial variations in the current change
 };
 
-// v2 design §3.10: a pass's own strengths between NR passes.
-struct ResolveStrengthsPass {
-  ID3D12Resource* given = nullptr;     // the pass's input, NON_PIXEL_SHADER_RESOURCE
-  ID3D12Resource* returned = nullptr;  // its raw output, UNORDERED_ACCESS: rewritten
-  nr::Size size;
-  float transfer_strength = 1.f;
-  float color_strength = 1.f;
-  bool swapped = false;                // B -> A rather than A -> B: its own descriptor table
-};
-
 // Keep faces (2026-10-08): shaders/faces_cs.hlsl's passes, which recombine pass 1 and its twin, then keep only the broad part of each later pass's change
 // inside the face mask (the shader's header has the maths). Every resource RGBA16F at the canvas (the atlas: look::MakeAtlas of it).
 struct FacesPass {
@@ -235,7 +225,7 @@ struct FacesPass {
   ID3D12Resource* fill = nullptr;
   look::Atlas layout;
   look::FacesParameters parameters;
-  bool swapped = false;  // a later pass from B into A: its own descriptor tables (RecordResolve's rule)
+  bool swapped = false;  // a later pass from B into A: its own descriptor tables
 };
 
 // The D3D12 side of spec §7: one root signature, the encode and compute-decode pipelines, one
@@ -246,7 +236,7 @@ class ColorPipeline {
  public:
   // Fix round 2, Important 1: sized for Timeline's own AGED_SUBMISSION_TIME (250 ms) at up to 240 fps
   // on a submit-only thread (a common engine shape, e.g. Unreal Engine 5's D3D12 RHI), so the ring
-  // never starves NR into nr::SkipReason::DESCRIPTORS_BUSY there: 128 slots of 21 tables of 7 descriptors (Keep faces' ten included), about 600 KB.
+  // never starves NR into nr::SkipReason::DESCRIPTORS_BUSY there: 128 slots of 20 tables of 7 descriptors (Keep faces' ten included), about 570 KB.
   static constexpr uint32_t RING_SLOTS = 128u;
 
   ColorPipeline() = default;
@@ -274,7 +264,6 @@ class ColorPipeline {
   bool RecordDetail(ID3D12GraphicsCommandList* list, uint32_t slot, const StabilizePass& pass);
   bool RecordShape(ID3D12GraphicsCommandList* list, uint32_t slot, const ShapePass& pass);
   bool RecordChangeStabilize(ID3D12GraphicsCommandList* list, uint32_t slot, const ChangeStabilizePass& pass);
-  bool RecordResolve(ID3D12GraphicsCommandList* list, uint32_t slot, const ResolveStrengthsPass& pass);
   // Keep faces: the pyramid of the pass's weighted change (one dispatch per level, a UAV barrier on the atlas between them), the combine, and Show the face
   // mask's tint of the mask (NON_PIXEL_SHADER_RESOURCE) into the target (UNORDERED_ACCESS) at `size`. Each: false (logged, nothing recorded) when slot is out
   // of range. They need typed UAV loads (SupportsUavLoads).
@@ -318,13 +307,12 @@ class ColorPipeline {
   Microsoft::WRL::ComPtr<ID3D12PipelineState> in_place_decode_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> depth_pipeline_;
-  // Plan 5: the look, meter and resolve pipelines.
+  // Plan 5: the look and meter pipelines.
   Microsoft::WRL::ComPtr<ID3D12PipelineState> meter_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> pyramid_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> stabilize_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> shape_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> change_stabilize_pipeline_;
-  Microsoft::WRL::ComPtr<ID3D12PipelineState> resolve_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> faces_pipeline_;  // Keep faces
   // A null entry records a format whose pipeline could not be built, so it is not retried every frame.
   std::unordered_map<DXGI_FORMAT, Microsoft::WRL::ComPtr<ID3D12PipelineState>> decode_pipelines_;

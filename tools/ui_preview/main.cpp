@@ -89,7 +89,7 @@ bool RunPreview(HWND window) {
     settings.pass_count = 2u;
     SetSourcePick(&settings, SourcePick::PRESENT);
     OverlayState state;
-    state.panel_open = true;
+    OpenPanel(&state);
     state.panel_tab = 1;
     state.panel_focus = "ResolutionMode";
     OverlayView view;
@@ -144,7 +144,12 @@ bool RunPreview(HWND window) {
       ExpireKeyCapture(&state, now);
       view.last_key_pressed = pressed_key;
       if (pressed_key && pressed_key == settings.panel_key && !state.capturing_key && !state.capturing_panel_key) {
-        state.panel_open = !state.panel_open;
+        // Same two paths as the add-on: closing resets the intro, opening replays it from the top.
+        if (state.panel_open) {
+          ClosePanel(&state);
+        } else {
+          OpenPanel(&state);
+        }
       }
       pressed_key = 0;
       facts.preferred_stage = SourcePickOf(settings);
@@ -158,7 +163,7 @@ bool RunPreview(HWND window) {
       } else {
         ImGui::SetNextWindowPos({24.f, 24.f}, ImGuiCond_Once);
         if (ImGui::Begin("GITC Uplift UI Preview", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
-          if (ImGui::Button("Open panel")) state.panel_open = true;
+          if (ImGui::Button("Open panel")) OpenPanel(&state);
         }
         ImGui::End();
       }

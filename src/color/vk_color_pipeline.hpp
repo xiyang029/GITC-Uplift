@@ -188,15 +188,6 @@ struct VkMeterPass {
   float game_weight = 0.f;  // 2026-10-09, Auto's Blend (with `probe`), as Direct3D 12's MeterPass
 };
 
-// Plan 14 Task 10 (v2 design §3.10): pass n's own Transfer and Colour strength, applied to its raw output in place. Every image GENERAL.
-struct VkResolvePass {
-  VkImageView given = VK_NULL_HANDLE;     // what the pass was given: RGBA16F, sampled
-  VkImageView returned = VK_NULL_HANDLE;  // what it returned: RGBA16F storage, rewritten
-  nr::Size size;                          // the canvas
-  float transfer_strength = 1.f;
-  float color_strength = 1.f;
-};
-
 // Keep faces (2026-10-08): ColorPipeline's FacesPass on Vulkan (shaders/faces_cs.hlsl). Every image RGBA16F in GENERAL, at the canvas (the atlas:
 // look::MakeAtlas of it).
 struct VkFacesPass {
@@ -211,8 +202,8 @@ struct VkFacesPass {
 };
 
 // The SPIR-V twin of ColorPipeline's compute side (design §4.2): one push-descriptor set layout (sampled images 0-4, storage images 16-18, a uniform
-// buffer 32), one pipeline layout, compute pipelines made per variant on first use, a host-visible coherent constants ring (RING_SLOTS recordings x 94
-// slots x 256 B: Plan 14's look, meter and resolve passes, one slot per dispatch, and Keep faces' 52), and two 1x1 placeholders (RGBA16F sampled + storage, RG16F storage) for the bindings a
+// buffer 32), one pipeline layout, compute pipelines made per variant on first use, a host-visible coherent constants ring (RING_SLOTS recordings x 86
+// slots x 256 B: Plan 14's look and meter passes, one slot per dispatch, and Keep faces' 52), and two 1x1 placeholders (RGBA16F sampled + storage, RG16F storage) for the bindings a
 // pass leaves empty. ReShade-free: raw Vulkan through vk::NrFunctions. Never blocks. Not thread-safe: the caller's lock.
 class VkColorPipeline {
  public:
@@ -220,9 +211,6 @@ class VkColorPipeline {
   static constexpr uint32_t RING_SLOTS = 128u;
   // The output formats a DLSS Output can have here (an sRGB-typed or BGRA view cannot be a storage image of these).
   static constexpr uint32_t OUTPUT_VARIANTS = 5u;
-  // Passes 2..10 each have one resolve (the Session's passes are at most MAX_PASSES = 10).
-  static constexpr uint32_t RESOLVE_PASSES = 9u;
-
   VkColorPipeline() = default;
   ~VkColorPipeline();
   VkColorPipeline(const VkColorPipeline&) = delete;
@@ -261,9 +249,8 @@ class VkColorPipeline {
   bool RecordChangeStabilize(VkCommandBuffer buffer, uint32_t slot, const VkChangeStabilizePass& pass);  // the change field's own stabiliser
   // Orders Uplift's compute writes before its next compute reads/writes.
   void ComputeBarrier(VkCommandBuffer buffer) const;
-  // Plan 14 Task 10: the meter before the encode; and pass `index`'s (1..RESOLVE_PASSES: passes 2..10) own strengths between NR's passes.
+  // Plan 14 Task 10: the meter before the encode.
   bool RecordMeter(VkCommandBuffer buffer, uint32_t slot, const VkMeterPass& pass);
-  bool RecordResolve(VkCommandBuffer buffer, uint32_t slot, uint32_t index, const VkResolvePass& pass);
   // Keep faces: the pyramid of a pass's weighted change (one dispatch per level, a barrier between them), the combine, and Show the face mask's tint of
   // `mask` into `target` at `size`. The later passes of one recording share their constants' ring slots: theirs are the same.
   [[nodiscard]] bool FacesReady() const;  // the Keep faces pipeline exists (Prepare, PreparePreSr build it); never builds
@@ -284,7 +271,7 @@ class VkColorPipeline {
   [[nodiscard]] bool SlotInRange(uint32_t slot, const char* pass) const;
   // The pipeline for `index` (see the .cpp), made on first use; VK_NULL_HANDLE (logged once) when it cannot be.
   VkPipeline PipelineFor(uint32_t index);
-  // The three look passes' pipelines and the per-pass resolve (both placements use them), made now. True when all exist.
+  // The three look passes' pipelines (both placements use them), made now. True when all exist.
   bool PrepareLook();
   // The encode's pipeline for `pass` (its in-place variant, or the sampled one); VK_NULL_HANDLE when there is none.
   VkPipeline EncodePipelineFor(const VkEncodePass& pass);
@@ -297,8 +284,8 @@ class VkColorPipeline {
   VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
   VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
   // The sampled encode, the in-place encodes, the private-colour decode, the in-place decodes, the motion copy, the look's three, the change field's
-  // stabiliser, the resolve, the sampled meter, the in-place meters, and Keep faces'.
-  static constexpr size_t PIPELINES = 1u + OUTPUT_VARIANTS + 1u + OUTPUT_VARIANTS + 1u + 3u + 1u + 1u + 1u + OUTPUT_VARIANTS + 1u;
+  // stabiliser, the sampled meter, the in-place meters, and Keep faces'.
+  static constexpr size_t PIPELINES = 1u + OUTPUT_VARIANTS + 1u + OUTPUT_VARIANTS + 1u + 3u + 1u + 1u + OUTPUT_VARIANTS + 1u;
   std::array<VkPipeline, PIPELINES> pipelines_ = {};
   std::array<bool, PIPELINES> failed_ = {};  // a variant that could not be built is not retried every frame
   VkBuffer ring_buffer_ = VK_NULL_HANDLE;

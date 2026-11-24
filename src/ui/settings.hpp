@@ -224,8 +224,6 @@ struct PassSettings {
   float local_structure = 1.f;
   float skin_structure = 1.f;
   bool auto_mask = true;
-  float transfer_strength = 1.f;
-  float color_strength = 1.f;
   PassStage stage = PassStage::SAME;
   uint32_t preset = 0u;  // 0 = inherit Setup; 1 = Legacy; 2 = Small FP8
   friend bool operator==(const PassSettings&, const PassSettings&) = default;

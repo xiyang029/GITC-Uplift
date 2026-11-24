@@ -58,13 +58,6 @@ inline constexpr std::string_view FRAME_GENERATION_REASON = nr::SkipReasonText(n
   return std::any_of(settings.pass_stages.begin(), settings.pass_stages.begin() + later, [](ui::PassStage stage) { return stage != ui::PassStage::SAME; });
 }
 
-// Why a later group's `slice` the Session will not run skips, as Session::Evaluate says it: the Defaults view hides a pass without a reason; a budget
-// cut is the Session's budget reason.
-[[nodiscard]] inline nr::SkipReason SliceSkipReason(const FrameSettings& settings, const nr::StageSlice& slice) {
-  const bool hidden_by_view = (settings.pass_view_limit != 0u && slice.first >= settings.pass_view_limit);
-  return (hidden_by_view ? nr::SkipReason::NONE : nr::SkipReason::BUDGET);
-}
-
 // "Keep faces here" for a later group at `stage`. Before upscaling is always pass 1's group, which Keep faces itself protects.
 [[nodiscard]] inline bool LaterStageKeepsFaces(const FrameSettings& settings, Stage stage) {
   switch (stage) {
@@ -190,7 +183,7 @@ struct LayoutTarget {
 }
 
 // The group whose change Result shaping acts on: the last of `chain` whose slice runs (`slice_runs(group)`), down to pass 1's. Shaping twice would double
-// it, so an earlier group's change passes through as it is; a later group the budget cut (or the Defaults view hides) never takes the shaping away. A
+// it, so an earlier group's change passes through as it is; a later group the budget cut never takes the shaping away. A
 // group that skips for the order cannot be known ahead: rare, accepted.
 template <typename SliceRuns>
 [[nodiscard]] uint32_t ShapedGroup(const ChainPlan& chain, SliceRuns&& slice_runs) {
@@ -306,7 +299,6 @@ void ApplySessionOptions(SessionSink& session, const FrameSettings& settings, co
     session.NoteFacesWanted(static_cast<uint8_t>(stage), settings.look.keep_faces.enabled && LaterStageKeepsFaces(settings, stage));
   }
   session.SetAutoRetry(options.auto_retry);
-  session.SetPassViewLimit(settings.pass_view_limit);
   if (settings.settings_generation != settings_generation) {
     settings_generation = settings.settings_generation;
     session.ResetRetries();

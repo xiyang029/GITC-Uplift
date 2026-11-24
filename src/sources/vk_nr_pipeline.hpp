@@ -73,8 +73,8 @@ struct VkPresentTarget {
 // The Vulkan DLSS placements' recordings: encode DLSS's Output in place into A, the Session's NR passes, Direct3D 12's
 // change path and look stage (RecordAfterNr's port: the change field, the pyramids, the stabiliser, the shape), decode in place (After DLSS); or encode the
 // game's Color (sampled) into A, the same, and decode into Uplift's own colour that DLSS reads instead (Before upscaling). Both work at a
-// settled work size below the output (the decode upsamples the change field), meter the input's exposure when InputExposure asks for it, give each later pass
-// its own Transfer and Colour strength (this class is the Session's nr::PassResolver), and bind the NR mask copy. Owns A, B, the change field, the all-zero
+// settled work size below the output (the decode upsamples the change field), meter the input's exposure when InputExposure asks for it, run Keep faces after each
+// later pass (this class is the Session's nr::PassResolver), and bind the NR mask copy. Owns A, B, the change field, the all-zero
 // motion image, Before upscaling's canvas motion and private colour (each an image with its NVSDK_NGX_Resource_VK, which is what the Session's opaque handles
 // point at: nr/vk_handles.hpp), the look surfaces, the exposure state, the mask copy and the VkColorPipeline; they are freed at their marks. Every Uplift image starts each recording
 // from UNDEFINED into GENERAL, except the stabiliser's histories and scene-cut state, which carry across frames in GENERAL; no game image is ever
@@ -91,10 +91,10 @@ class VkNrPipeline final : private nr::PassResolver {
 
   bool Initialize(std::string* error);
   // The look stage, the colour fixes (InputExposure included: Auto or Game binds DLSS's exposure texture and scale, Metered the meter's
-  // state, Manual none), the mask and passes 2..10's model controls and own strengths for the next recordings, with Δt per recording.
+  // state, Manual none), the mask and passes 2..10's model controls for the next recordings, with Δt per recording.
   void SetLookConfig(const LookConfig& config);
-  // The device can load and store the look's R16F and RGBA32F images (RGBA16F is native NR's own requirement); without them the look stage, the meter and the
-  // per-pass strengths are skipped, as on a Direct3D 12 device without typed UAV loads.
+  // The device can load and store the look's R16F and RGBA32F images (RGBA16F is native NR's own requirement); without them the look stage, the meter and
+  // Keep faces are skipped, as on a Direct3D 12 device without typed UAV loads.
   void SetLookStorage(bool supported) { look_storage_ = supported; }
   // Builds the encode, decode and look pipelines of `output_format` now (the caller warms them at enable, outside the hooked
   // evaluate). False when the format has no variant or one could not be built: nothing would be recorded for it.
@@ -375,7 +375,7 @@ class VkNrPipeline final : private nr::PassResolver {
   void PollExposureChecks();   // reads the samples the GPU has passed into the set's auto_exposure
   // Frees `image` now when `mark` is complete, else keeps it in `reshade_retired_` (never in the timeline's pending releases).
   void RetireReshadeImage(const vk::NrImage& image, const nr::Mark& mark);
-  // The Session's nr::PassResolver: pass `index`'s own Transfer and Colour strength applied to its raw output in place (Direct3D 12's ResolvePass).
+  // The Session's nr::PassResolver: the Keep-faces recombination of pass `index`'s result (Direct3D 12's ResolvePass).
   void ResolvePass(ID3D12GraphicsCommandList* list, uint32_t index, ID3D12Resource* given, ID3D12Resource* returned) override;
   // Keep faces: pass 1's recombination, after the Session's twin evaluate (Direct3D 12's CombineFaces).
   void CombineFaces(ID3D12GraphicsCommandList* list, ID3D12Resource* lighting, ID3D12Resource* faces) override;
@@ -439,7 +439,7 @@ class VkNrPipeline final : private nr::PassResolver {
   bool faces_ran_ = false;
   uint32_t faces_first_ = 0u;
   MaskCopy mask_;
-  uint32_t resolve_slot_ = 0u;  // the recording's ring slot, for ResolvePass
+  uint32_t resolve_slot_ = 0u;  // the recording's ring slot, for Keep faces
   std::array<PresentMotionSlot, PRESENT_MOTION_SLOTS> present_motion_;
   nr::Size present_motion_size_;        // the slots' size: the motion region
   uint64_t present_motion_bytes_ = 0u;  // the slots in use, while they exist

@@ -218,7 +218,7 @@ set(UPLIFT_SHADER_OUTPUT "${CMAKE_BINARY_DIR}/generated/shaders")
 file(MAKE_DIRECTORY "${UPLIFT_SHADER_OUTPUT}")
 set(UPLIFT_SHADER_HEADERS)
 foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0" "decode_cs|cs_6_0" "decode_in_place_cs|cs_6_0" "motion_cs|cs_6_0" "depth_cs|cs_6_0"
-                        "look_pyramid_cs|cs_6_0" "look_stabilize_cs|cs_6_0" "look_shape_cs|cs_6_0" "resolve_cs|cs_6_0"
+                        "look_pyramid_cs|cs_6_0" "look_stabilize_cs|cs_6_0" "look_shape_cs|cs_6_0"
                         "meter_cs|cs_6_0" "faces_cs|cs_6_0" "change_stabilize_cs|cs_6_0")
   string(REPLACE "|" ";" shader_parts "${shader}")
   list(GET shader_parts 0 shader_name)
@@ -271,8 +271,7 @@ uplift_add_spirv(motion_vk motion_cs)
 uplift_add_spirv(look_pyramid_vk look_pyramid_cs)
 uplift_add_spirv(look_stabilize_vk look_stabilize_cs)
 uplift_add_spirv(look_shape_vk look_shape_cs)
-# Each later pass's own Transfer/Colour strength, and the exposure meter (sampled for Before upscaling, one per output format for After DLSS).
-uplift_add_spirv(resolve_vk resolve_cs)
+# The exposure meter (sampled for Before upscaling, one per output format for After DLSS).
 uplift_add_spirv(meter_vk_sampled meter_cs)
 # Keep faces: the twin's recombination and the later passes' protection.
 uplift_add_spirv(faces_vk faces_cs)

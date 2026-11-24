@@ -55,8 +55,6 @@ void RecordingBatches() {
   std::array<std::optional<nr::Controls>, 2> later = {active, std::nullopt};
   Check(session.SliceHasIntensity({.first = 0u, .count = 3u}, zero, later), "later active pass was skipped with pass 1 at zero");
   Check(!session.SliceHasIntensity({.first = 2u, .count = 1u}, zero, later), "slice included a different pass's intensity");
-  session.SetPassViewLimit(1u);
-  Check(!session.SliceHasIntensity({.first = 0u, .count = 3u}, zero, later), "hidden pass prevented zero-intensity skip");
   std::cout << "PASS recording batching, exception restore and per-slice intensity\n";
 }
 

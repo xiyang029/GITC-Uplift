@@ -264,7 +264,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
 nr::SkipReason DeviceContext::PresentWorkSkip() const {
   const auto group = GroupAt(chain_, Stage::PRESENT);
   if (!group) return nr::SkipReason::INACTIVE;
-  if (!session_->SliceRuns(slices_[*group])) return SliceSkipReason(settings_, slices_[*group]);
+  if (!session_->SliceRuns(slices_[*group])) return nr::SkipReason::BUDGET;
   // The face debug overlay can draw even on a zero-intensity slice.
   if (!settings_.look.keep_faces.show_mask && !session_->SliceHasIntensity(slices_[*group], controls_, settings_.look.later_controls)) {
     return nr::SkipReason::INTENSITY_ZERO;
@@ -297,7 +297,7 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
   // The detector's evidence of frame generation: NGX's live features and the present cadence.
   const bool frame_generation_on = frame_generation_.ObservedState().active;
   if (FrameGenerationSkipsPresent(frame_generation_on, facts_.fg_present_path)) return skip(nr::SkipReason::FRAME_GENERATION_ON);
-  // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before its source copy and encode.
+  // Split chain: a later group the budget cut to no pass skips before its source copy and encode.
   if (const auto reason = PresentWorkSkip(); reason != nr::SkipReason::NONE) {
     present_reset_owed_ = true;
     return skip(reason);
@@ -484,11 +484,11 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
     return {.reason = nr::SkipReason::NR_OFF};
   }
   if (*group > 0u && !session_->SliceRuns(slices_[*group])) {
-    // Split chain: a later group the budget cut to no pass (or the Defaults view hides) skips before its source copy; its next recording starts afresh.
+    // Split chain: a later group the budget cut to no pass skips before its source copy; its next recording starts afresh.
     after_dlss_->OweReset();
     stages_[static_cast<size_t>(Stage::AFTER_DLSS)].nr_applied = false;
-    stages_[static_cast<size_t>(Stage::AFTER_DLSS)].skip_reason = SliceSkipReason(settings_, slices_[*group]);
-    return {.reason = SliceSkipReason(settings_, slices_[*group])};
+    stages_[static_cast<size_t>(Stage::AFTER_DLSS)].skip_reason = nr::SkipReason::BUDGET;
+    return {.reason = nr::SkipReason::BUDGET};
   }
   return RecordAfterDlss(frame, recording_host, layout, now, *group, before_reset);
 }
@@ -797,11 +797,11 @@ BridgedDlssDecision DeviceContext::DecideAfterEvaluate(const ngx_hooks::DlssFram
     return decision;
   }
   if (*group > 0u && !session_->SliceRuns(slices_[*group])) {
-    // Split chain: a later group the budget cut to no pass (or the Defaults view hides) crosses nothing; its next recording starts afresh.
+    // Split chain: a later group the budget cut to no pass crosses nothing; its next recording starts afresh.
     after_dlss_->OweReset();
     stage.nr_applied = false;
     stage.passes_run = 0u;
-    stage.skip_reason = SliceSkipReason(settings_, slices_[*group]);
+    stage.skip_reason = nr::SkipReason::BUDGET;
     before_reset_.reset();
     return decision;
   }

@@ -17,7 +17,8 @@ inline constexpr uint32_t MAGIC = 0x464C5055u;    // "UPLF"
 // 11: network diagnostics for all ten passes (+3840 bytes).
 // 12-13: game-facing Present and per-pass network/style records; 14: the early-marker motion extent; 15: Status::keep_faces_supported.
 // 16: RequestKind::FRAME_RUN (the steady FENCED path) and Reply::reserved -> run_skipped (same offset and size).
-inline constexpr uint32_t PROTOCOL_VERSION = 16u;
+// 17: Frame::defaults_view dropped (the Compare view is gone): Frame shrinks by 8 bytes with its padding.
+inline constexpr uint32_t PROTOCOL_VERSION = 17u;
 inline constexpr size_t TEXT_BYTES = 256u;
 inline constexpr size_t NETWORK_DIAGNOSTIC_BYTES = 4096u;
 inline constexpr size_t PATH_BYTES = 1024u;
@@ -84,7 +85,6 @@ struct Frame {
   uint64_t game_budget = 0u;  // the game process's DXGI local budget and usage; 0 = not measured this frame
   uint64_t game_usage = 0u;
   uint32_t drag_bits = 0u;  // ui::DragState, bit i = its i-th field in declaration order
-  uint32_t defaults_view = 0u;
   uint32_t marker_expected = 0u;
   uint32_t nr_allowed = 1u;
   uint32_t unreported_point = 0u;  // addon::TriggerPoint the add-on reached last frame without a RUN

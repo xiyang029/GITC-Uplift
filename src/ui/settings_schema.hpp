@@ -45,11 +45,11 @@ inline constexpr uint32_t NEXT_DLSS_CREATE = 1u << 2u;  // applies when the game
 inline constexpr uint32_t PASS_SWITCH = 1u << 4u;       // a pass's look-sharing, stage or network selection: always written, shown while it follows pass 1
 inline constexpr uint32_t BOOKKEEPING = 1u << 5u;       // hidden state Uplift writes itself: Restore all keeps it
 inline constexpr uint32_t APPLY_ON_RELEASE = 1u << 6u;  // a UINT row: shows its value while held/typed, applies it once on release or focus loss
-// Split chain (2026-10-10): a pass's "Runs at". Never part of the Defaults view: moving a pass to another stage rebuilds NR's features.
+// Split chain (2026-10-10): a pass's "Runs at": moving a pass to another stage rebuilds NR's features.
 inline constexpr uint32_t PASS_STAGE = 1u << 7u;
 // A FLOAT whose slider's range is its meaning (a share of the output, a blend): Ctrl+click cannot type past the slider's end.
 inline constexpr uint32_t SLIDER_RANGE_ONLY = 1u << 8u;
-inline constexpr uint32_t NETWORK_PRESET = 1u << 9u;  // creation configuration, independent of look sharing and Compare
+inline constexpr uint32_t NETWORK_PRESET = 1u << 9u;  // creation configuration, independent of look sharing
 // A FLOAT in the resolution scales' group: the grouped rail slider clamps typed values to the slider's range.
 inline constexpr uint32_t SLIDER_ALWAYS_CLAMP = 1u << 10u;
 // The Keep faces mask's tuning rows (Advanced): hidden while Keep faces is off, and greyed with it where it cannot run.
@@ -116,12 +116,6 @@ void ResetSetting(Settings* settings, const SettingDescriptor& descriptor);
 // True when a row of `section` differs from its default: the section header's "(changed)".
 [[nodiscard]] bool SectionChanged(const Settings& settings, SettingSection section);
 void ResetSection(Settings* settings, SettingSection section);
-// The look group the Defaults view swaps -- the whole of LOOK (Intensity, the
-// Model rows, Pass Count and every pass's own rows included), RESULT, LIMITS and PASSES. Mask and UI
-// correction belong to MASK and are excluded, as are a pass's "Runs at" or network selection (PASS_STAGE / NETWORK_PRESET).
-[[nodiscard]] bool InDefaultsView(const SettingDescriptor& descriptor);
-// `mine` with the look group at its built-in values. A view only: nothing ever saves it.
-[[nodiscard]] Settings DefaultsView(Settings mine);
 // Every row back to its default, the hotkey and the hidden DLSS-SR overrides included, except Enable and BOOKKEEPING rows.
 void RestoreAllDefaults(Settings* settings);
 // The value as the overlay shows it: "1.00", "50 %", "on", "Model A", "automatic", "none", "empty".

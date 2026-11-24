@@ -44,7 +44,7 @@ enum class FgPresentPath {
   return allowed ? FgPresentPath::ALL_PRESENTS : FgPresentPath::NORMAL;
 }
 
-// The settings one frame runs with on its route: BuildFrameSettings's output (the user's settings, the drag, the Defaults view and the controls'
+// The settings one frame runs with on its route: BuildFrameSettings's output (the user's settings, the drag and the controls'
 // coalescer at the present), which a route adjusts on its own copy only to drain at once (NO_GRACE), to run at Present (`source`, `pre_upscale`) or for
 // Before FG's outer inputs (ApplyOuterInputs: the three motion fields). Used by the evaluates until the next present.
 struct FrameSettings {
@@ -85,7 +85,6 @@ struct FrameSettings {
   bool pre_upscale = false;  // NR before DLSS-SR upscales
   sources::LookConfig look;  // the look stage, the colour fixes, Mask, UI correction, passes 2..10
   bool launchpad_motion = true;       // MotionVectors Auto, Launchpad or Lumenite: the Present path may bind UPLIFT_MV
-  uint32_t pass_view_limit = 0u;      // the Defaults view's passes on the live features; 0 = all
   uint64_t settings_generation = 0u;  // changes with every saved settings change; restarts the retry backoff
   // Passes 2..10's stored "Runs at" (Pass{n}Stage). Without FrameFacts::split_capable every pass runs at pass 1's stage.
   std::array<ui::PassStage, ui::MAX_PASSES - 1u> pass_stages = {};
@@ -144,12 +143,11 @@ inline std::string_view NoUpliftMvReason(const FrameFacts& facts) {
                                                  const std::array<std::optional<nr::Controls>, sources::LATER_PASSES>& later_controls);
 
 
-// The FrameSettings one present runs with, for the 64-bit add-on and the helper alike: a function of the settings, the drag, the Defaults view, the
+// The FrameSettings one present runs with, for the 64-bit add-on and the helper alike: a function of the settings, the drag, the
 // settings generation and the coalescer's state at `now` (it advances the coalescer, as each present does).
 struct FrameSettingsInputs {
   const ui::Settings* settings = nullptr;
   ui::DragState drag;
-  bool defaults_view = false;
   uint64_t settings_generation = 0u;
 };
 [[nodiscard]] FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::ControlsCoalescer* coalescer,

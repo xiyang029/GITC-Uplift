@@ -263,31 +263,32 @@ void OnReshadePresent(api::effect_runtime* runtime) {
       found->second.motion_links.early.BeginObserving();
     }
     ui::ExpireKeyCapture(&state.overlay, std::chrono::steady_clock::now());
-    // Only capture game input if the standalone panel actually drew in ReShade's ImGui frame.
+    // The panel hotkey toggles this panel only; ReShade's own key is never touched. The two windows exclude each other:
+    // opening this one closes ReShade's first, and ReShade opening its own closes this one (host::OnOpenOverlay).
+    const uint32_t panel_key = state.settings.panel_key;
+    const bool panel_key_pressed =
+        (panel_key != 0u && runtime->is_key_pressed(panel_key) && found != state.devices.end() && found->second.runtime == runtime);
+    // Only capture game input if the standalone panel actually draws. A press that closes it blocks nothing: from the next
+    // frame on the panel is gone, so the game must have its input back at once.
     const bool panel_drew = std::exchange(state.overlay.panel_drew, false);
-    if (state.overlay.panel_open && panel_drew) runtime->block_input_next_frame();
+    if (state.overlay.panel_open && panel_drew && !panel_key_pressed) runtime->block_input_next_frame();
     if (state.overlay.key_captured_this_frame) {
       // The press that bound the hotkey is still in this frame's input: do not let it toggle Enable.
       state.overlay.key_captured_this_frame = false;
       return;
     }
     if (state.overlay.capturing_key || state.overlay.capturing_panel_key) return;  // a capture owns the next press
-    // The panel hotkey toggles this panel only; ReShade's own key is never touched. The two windows exclude each other:
-    // opening this one closes ReShade's first, and ReShade opening its own closes this one (host::OnOpenOverlay).
-    const uint32_t panel_key = state.settings.panel_key;
-    if (panel_key != 0u && runtime->is_key_pressed(panel_key) && found != state.devices.end() && found->second.runtime == runtime) {
+    if (panel_key_pressed) {
       if (state.overlay.panel_open) {
-        state.overlay.panel_open = false;
+        ui::ClosePanel(&state.overlay);
       } else {
         // open_overlay dispatches reshade_open_overlay synchronously and that handler takes this same lock, so the
-        // lock is released around the call; the handler clears the panel, hence the assignment after it.
+        // lock is released around the call. OpenPanel then owns the state: the panel starts from a clean slate whatever
+        // ReShade's handler did, and stays alive even if ReShade ever stops dispatching that event.
         lock.unlock();
         runtime->open_overlay(false, api::input_source::keyboard);
         lock.lock();
-        // open_overlay's handler already cleared this; the assignment keeps the panel alive even if ReShade ever stops
-        // dispatching that event, because a stuck flag would otherwise hide the panel forever.
-        state.overlay.reshade_overlay_open = false;
-        state.overlay.panel_open = true;
+        ui::OpenPanel(&state.overlay);
       }
       nr::Logf(nr::LogLevel::INFO, "Hotkey: Uplift panel {}", state.overlay.panel_open ? "open" : "closed");
       return;

@@ -23,7 +23,6 @@
 #include "meter_cs.h"
 #include "motion_cs.h"
 #include "nr/log.hpp"
-#include "resolve_cs.h"
 
 namespace uplift::color {
 namespace {
@@ -44,22 +43,20 @@ constexpr uint32_t PYRAMID_TABLE = 5u * TABLE_SIZE;
 constexpr uint32_t STABILIZE_TABLE = 6u * TABLE_SIZE;
 constexpr uint32_t DETAIL_TABLE = 7u * TABLE_SIZE;
 constexpr uint32_t SHAPE_TABLE = 8u * TABLE_SIZE;
-constexpr uint32_t RESOLVE_TABLE = 9u * TABLE_SIZE;
-constexpr uint32_t RESOLVE_SWAPPED_TABLE = 10u * TABLE_SIZE;
 // Keep faces: pass 1's pyramid and combine, a later pass's (A -> B, or swapped B -> A), and Show the face mask.
-constexpr uint32_t FACES_LEVEL_FIRST_TABLE = 11u * TABLE_SIZE;
-constexpr uint32_t FACES_LEVEL_TABLE = 12u * TABLE_SIZE;
-constexpr uint32_t FACES_LEVEL_SWAPPED_TABLE = 13u * TABLE_SIZE;
-constexpr uint32_t FACES_COMBINE_FIRST_TABLE = 14u * TABLE_SIZE;
-constexpr uint32_t FACES_COMBINE_TABLE = 15u * TABLE_SIZE;
-constexpr uint32_t FACES_COMBINE_SWAPPED_TABLE = 16u * TABLE_SIZE;
-constexpr uint32_t FACES_SHOW_TABLE = 17u * TABLE_SIZE;
+constexpr uint32_t FACES_LEVEL_FIRST_TABLE = 9u * TABLE_SIZE;
+constexpr uint32_t FACES_LEVEL_TABLE = 10u * TABLE_SIZE;
+constexpr uint32_t FACES_LEVEL_SWAPPED_TABLE = 11u * TABLE_SIZE;
+constexpr uint32_t FACES_COMBINE_FIRST_TABLE = 12u * TABLE_SIZE;
+constexpr uint32_t FACES_COMBINE_TABLE = 13u * TABLE_SIZE;
+constexpr uint32_t FACES_COMBINE_SWAPPED_TABLE = 14u * TABLE_SIZE;
+constexpr uint32_t FACES_SHOW_TABLE = 15u * TABLE_SIZE;
 // Fix round 4: the despike of pass 1's difference, and of a later pass's (A -> B, or swapped B -> A).
-constexpr uint32_t FACES_DESPIKE_FIRST_TABLE = 18u * TABLE_SIZE;
-constexpr uint32_t FACES_DESPIKE_TABLE = 19u * TABLE_SIZE;
-constexpr uint32_t FACES_DESPIKE_SWAPPED_TABLE = 20u * TABLE_SIZE;
-constexpr uint32_t CHANGE_STABILIZE_TABLE = 21u * TABLE_SIZE;
-constexpr uint32_t DESCRIPTORS_PER_SLOT = 22u * TABLE_SIZE;
+constexpr uint32_t FACES_DESPIKE_FIRST_TABLE = 16u * TABLE_SIZE;
+constexpr uint32_t FACES_DESPIKE_TABLE = 17u * TABLE_SIZE;
+constexpr uint32_t FACES_DESPIKE_SWAPPED_TABLE = 18u * TABLE_SIZE;
+constexpr uint32_t CHANGE_STABILIZE_TABLE = 19u * TABLE_SIZE;
+constexpr uint32_t DESCRIPTORS_PER_SLOT = 20u * TABLE_SIZE;
 constexpr uint32_t STABILIZE_CUT = 0u;  // look_stabilize_cs.hlsl's modes and flags
 constexpr uint32_t STABILIZE_LEVELS = 1u;
 constexpr uint32_t STABILIZE_DETAIL = 2u;
@@ -204,7 +201,7 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
       .CS = {.pShaderBytecode = g_depth_cs, .BytecodeLength = sizeof(g_depth_cs)},
   };
   if (FAILED(device->CreateComputePipelineState(&depth, IID_PPV_ARGS(&depth_pipeline_)))) depth_pipeline_.Reset();
-  // Plan 5: the look, meter and resolve pipelines.
+  // Plan 5: the look and meter pipelines.
   const auto build_compute = [&](const void* bytecode, size_t length, Microsoft::WRL::ComPtr<ID3D12PipelineState>* pipeline,
                                  const char* name) {
     const D3D12_COMPUTE_PIPELINE_STATE_DESC description = {
@@ -222,8 +219,7 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
       || !build_compute(g_look_pyramid_cs, sizeof(g_look_pyramid_cs), &pyramid_pipeline_, "look pyramid")
       || !build_compute(g_look_stabilize_cs, sizeof(g_look_stabilize_cs), &stabilize_pipeline_, "look stabiliser")
       || !build_compute(g_look_shape_cs, sizeof(g_look_shape_cs), &shape_pipeline_, "look shape")
-      || !build_compute(g_change_stabilize_cs, sizeof(g_change_stabilize_cs), &change_stabilize_pipeline_, "change stabiliser")
-      || !build_compute(g_resolve_cs, sizeof(g_resolve_cs), &resolve_pipeline_, "resolve")) {
+      || !build_compute(g_change_stabilize_cs, sizeof(g_change_stabilize_cs), &change_stabilize_pipeline_, "change stabiliser")) {
     return false;
   }
   // Keep faces fix round 1 (C3): optional. Without it NR runs as before and Keep faces is unavailable (FacesReady).
@@ -241,7 +237,7 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
     if (FAILED(device->CreateComputePipelineState(&in_place, IID_PPV_ARGS(&in_place_decode_pipeline_)))) in_place_decode_pipeline_.Reset();
   }
   if (!uav_loads_) {
-    nr::Log(nr::LogLevel::WARN, "this GPU has no typed UAV loads: Shape result, Metered exposure, pass strengths and Keep faces are unavailable");
+    nr::Log(nr::LogLevel::WARN, "this GPU has no typed UAV loads: Shape result, Metered exposure and Keep faces are unavailable");
   }
   const D3D12_DESCRIPTOR_HEAP_DESC shader_heap = {.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                                                   .NumDescriptors = RING_SLOTS * DESCRIPTORS_PER_SLOT,
@@ -528,16 +524,6 @@ bool ColorPipeline::RecordChangeStabilize(ID3D12GraphicsCommandList* list, uint3
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + CHANGE_STABILIZE_TABLE;
   WriteTable(base, {{pass.change}, {pass.previous}, {pass.motion.vectors.resource, MotionViewOf(pass.motion)}}, {{pass.current}});
   DispatchCompute(list, change_stabilize_pipeline_.Get(), ChangeStabilizeConstants(pass), base, pass.image.width, pass.image.height);
-  return true;
-}
-
-bool ColorPipeline::RecordResolve(ID3D12GraphicsCommandList* list, uint32_t slot, const ResolveStrengthsPass& pass) {
-  if (!SlotInRange(slot, "RecordResolve")) return false;
-  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + (pass.swapped ? RESOLVE_SWAPPED_TABLE : RESOLVE_TABLE);
-  WriteTable(base, {{pass.given}}, {{pass.returned}});
-  const std::array<uint32_t, 4> constants = {pass.size.width, pass.size.height, Bits(pass.transfer_strength),
-                                             Bits(pass.color_strength)};
-  DispatchCompute(list, resolve_pipeline_.Get(), constants, base, pass.size.width, pass.size.height);
   return true;
 }
 
