@@ -44,6 +44,9 @@ enum class FgPresentPath {
   return allowed ? FgPresentPath::ALL_PRESENTS : FgPresentPath::NORMAL;
 }
 
+// HUD-less: whether NR may run on the game's HUD-less image before frame generation. Only UICorrection On uses it.
+enum class HudlessUse : uint8_t { NEVER, USE };
+
 // The settings one frame runs with on its route: BuildFrameSettings's output (the user's settings, the drag and the controls'
 // coalescer at the present), which a route adjusts on its own copy only to drain at once (NO_GRACE), to run at Present (`source`, `pre_upscale`) or for
 // Before FG's outer inputs (ApplyOuterInputs: the three motion fields). Used by the evaluates until the next present.
@@ -56,6 +59,8 @@ struct FrameSettings {
   float color_strength = 1.f;
   ui::PlacementSource source = ui::PlacementSource::AUTO;
   bool allow_cross_queue_passes = false;
+  HudlessUse hudless_use = HudlessUse::NEVER;  // UICorrection On
+  bool hide_hudless = true;                     // HideHudless
   bool motion_vectors = true;           // MotionVectors is not None, or must act like it is (MotionVectors ==
                                          // Launchpad while placement is inside the game's frame)
   bool motion_vectors_want_launchpad = false;  // MotionVectors == Launchpad (or Lumenite), for the motion

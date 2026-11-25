@@ -307,6 +307,14 @@ class DeviceContext {
   [[nodiscard]] bool FrameReady() const { return frame_ready_; }
   [[nodiscard]] bool PresentFoveated() const { return present_layout_.foveation.active(); }
   [[nodiscard]] nr::SkipReason PresentWorkSkip() const;
+  // HUD-less (design §5): a frame BeginFrame armed and the same call did not record. Nothing stays armed for a later point
+  // (begin-effects, a technique) to record into its target.
+  void CancelFrame() noexcept {
+    frame_ready_ = false;
+    frame_target_ = {};
+  }
+  // HUD-less (design §3): NR's target changed between the game's frame and N; the next Present recording starts its history afresh.
+  void OwePresentReset() noexcept { present_reset_owed_ = true; }
   // The Session's state (OFF once torn down after a removal), for the bridge's surfaces and its mask copy.
   [[nodiscard]] nr::SessionState NrState() const { return (session_ ? session_->State() : nr::SessionState::OFF); }
   // The recordings that applied NR so far, at every placement (each Present-path run, each DLSS evaluate's), and the latest recording's

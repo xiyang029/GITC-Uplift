@@ -16,6 +16,7 @@
 #include "ui/settings_schema.hpp"
 #include "nr/foveation.hpp"
 #include "sources/work_size.hpp"
+#include "text/hudless_messages.hpp"
 #include "ui/overlay_widgets.hpp"
 
 namespace uplift::ui {
@@ -1014,7 +1015,9 @@ void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
         }
       }
       const float timing_width = nr_time.empty() ? 0.f : gui::CalcTextSize("NR GPU time (inference · chain)").x;
-      const float key_width = (std::max)({timing_width, gui::CalcTextSize("Running at").x, gui::CalcTextSize("Motion vectors").x,
+      const bool show_hudless = view.hudless_on_card && !view.hudless_line.empty();
+      const float hudless_width = show_hudless ? gui::CalcTextSize(text::HUDLESS_DETAILS_LABEL.data()).x : 0.f;
+      const float key_width = (std::max)({timing_width, hudless_width, gui::CalcTextSize("Running at").x, gui::CalcTextSize("Motion vectors").x,
                                           gui::CalcTextSize("Backend").x, gui::CalcTextSize("Resolution").x,
                                           gui::CalcTextSize("Frame generation").x, gui::CalcTextSize("Network / style").x});
       const float value_offset = style::SnapUp(key_width) + style::BlockGap();
@@ -1029,6 +1032,7 @@ void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
       row("Motion vectors", view.live.motion);
       if (!view.details_backend.empty()) row("Backend", view.details_backend);
       row("Resolution", view.live.resolution);
+      if (show_hudless) row(text::HUDLESS_DETAILS_LABEL.data(), gui::Display(view.hudless_line));
       if (!view.live.frame_generation.empty()) row("Frame generation", view.live.frame_generation);
       const std::string styles = NetworkStyles(view);
       if (!styles.empty()) row("Network / style", styles);
@@ -1234,7 +1238,11 @@ bool DrawFixesTab(const OverlayView& view, Settings* settings, OverlayState* sta
 bool DrawAdvancedTab(const OverlayView& view, Settings* settings, OverlayState* state) {
   bool changed = false;
   widgets::GroupHeading("Routing");
-  changed |= DrawRows(view, settings, state, {"PresentWithFrameGen", "BeforeFGMotion", "VulkanNr", "AllowCrossQueuePasses", "UseD3D9Ex"});
+  changed |= DrawRows(view, settings, state, {"PresentWithFrameGen", "BeforeFGMotion", "HideHudless", "VulkanNr", "AllowCrossQueuePasses", "UseD3D9Ex"});
+  if (!view.hudless_line.empty()) {
+    const std::string line = gui::Display(text::HUDLESS_DETAILS_LABEL) + ": " + gui::Display(view.hudless_line);
+    widgets::SecondaryWrapped(line.c_str());
+  }
   widgets::NextGap(style::BlockGap());
   widgets::GroupHeading("Memory and recovery");
   changed |= DrawRows(view, settings, state, {"VramCheck", "BudgetMarginMB", "GraceSeconds", "AutoResume", "AutoRetry"});

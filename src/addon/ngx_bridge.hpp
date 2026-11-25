@@ -14,6 +14,7 @@
 #include "addon/dlss_ratio.hpp"
 #include "addon/fg_preset.hpp"
 #include "addon/dlss_swap.hpp"
+#include "addon/fg_input.hpp"
 #include "addon/reshade_version.hpp"
 #include "ngx_hooks/dlss_capture.hpp"
 #include "ngx_hooks/dlss_overrides.hpp"
@@ -104,7 +105,9 @@ class NgxRouting {
 // registry (frame generation and foreign NR included), and the main handle's evaluates. Thread-safe.
 class NgxBridge final : public ngx_hooks::NgxObserver {
  public:
-  explicit NgxBridge(NgxRouting& routing) : routing_(routing), swap_(routing) {}
+  // `fg_input`: the add-on's record of the images its NR changed before frame generation (HUD-less, design §6); null in tests that
+  // do not exercise it.
+  explicit NgxBridge(NgxRouting& routing, FgInput* fg_input = nullptr) : routing_(routing), swap_(routing), fg_input_(fg_input) {}
 
   void BeforeCreate(ngx_hooks::CreateCall* call) override;  // also an early EnsureFgPresetHook install point
   void AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle* handle, NVSDK_NGX_Result result) override;
@@ -131,6 +134,8 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   // on/off for Before upscaling (PreUpscale, Source ≠ Present, DLSS unavailable is
   // empty). One relaxed load per evaluate while off.
   void SetPreSr(bool on) { pre_sr_.store(on, std::memory_order_relaxed); }
+  // HideHudless, from the add-on's settings at each Present.
+  void SetHideHudless(bool on) { hide_hudless_.store(on, std::memory_order_relaxed); }
   // The add-on's live native Vulkan contexts (+1 when one is made, -1 when it goes with its device). While there are none, a
   // core shutdown is a pure passthrough: one relaxed load, then the core's own call.
   void AddVkContexts(int change) { vk_contexts_.fetch_add(change, std::memory_order_relaxed); }
@@ -145,7 +150,7 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
     vk_nr_contexts_.fetch_add((watching ? 1 : -1), std::memory_order_relaxed);
   }
   // The add-on's Direct3D 11 bridge contexts that watch the game's DLSS evaluates (the context exists and NR is
-  // on or not yet released). While none does, a Direct3D 11 evaluate is a pure passthrough: one relaxed load, no lookup, no lock. `counted` is the context's
+  // on or not yet released). While none does, a Direct3D 11 evaluate is, beyond the registry's activity stamp, a pure passthrough: one relaxed load, no lookup, no lock. `counted` is the context's
   // own flag; the count moves with its changes.
   void NoteD3D11Watch(bool& counted, bool watching) {
     if (counted == watching) return;
@@ -165,6 +170,8 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   void NoteDlssRenderScales(const std::array<uint32_t, 6>& scales_percent) { SetDlssRenderScales(scales_percent); }
 
  private:
+  // HUD-less: what DLSS-G's evaluate does with DLSSG.HUDLess (design §6). Asked before the Before-upscaling gate.
+  void DecideHudless(ngx_hooks::EvaluateCall* call);
   // The device of a hooked call's list, through the API's own routing (a VkCommandBuffer never reaches a Direct3D 12 lookup, nor a Direct3D 11 context a
   // Direct3D 12 or Vulkan one).
   [[nodiscard]] const void* DeviceOf(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list) const;
@@ -196,6 +203,10 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   ngx_hooks::FeatureRegistry registry_;
   DlssSwap swap_;  // the live DLSS preset switch (addon/dlss_swap.hpp); runs on the main handle only
   std::atomic<bool> pre_sr_{false};
+  FgInput* const fg_input_ = nullptr;
+  std::atomic<bool> hide_hudless_{true};
+  std::atomic<uint8_t> logged_hudless_action_{UINT8_MAX};  // the last state an INFO line reported
+  std::atomic<const char*> logged_hudless_reason_{nullptr};
   std::atomic<int> vk_contexts_{0};
   std::atomic<int> vk_nr_contexts_{0};
   std::atomic<int> d3d11_watching_{0};

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -50,6 +51,12 @@ struct EvaluateCall {
   // it produces nothing anyway. A skipped evaluate reports success: the frame exists. Set only for a
   // frame XeFG really generated; a refusal leaves it false and the core runs its own generation.
   bool skip_original = false;
+  // HUD-less (design §6): what DLSS-G reads as DLSSG.HUDLess for this call only. 0 leaves it, 1 hides it (null), 2 uses `hudless`
+  // (an ID3D12Resource*, or an NVSDK_NGX_Resource_VK* on Vulkan). `hudless_owner` keeps that image alive until the game's value is back.
+  // Direct3D 12 and Vulkan only. The detour writes it with the type the game's value was read with and puts the game's back after the original.
+  uint8_t hudless_action = 0;
+  void* hudless = nullptr;
+  std::shared_ptr<const void> hudless_owner;
 };
 
 // Receives the hooked NGX calls. Every method runs on the game's calling
@@ -112,13 +119,12 @@ struct HookedModule {
   bool evaluate_c = false;  // the module exports D3D12 EvaluateFeature_C, and it is hooked too
   bool d3d12 = false;       // the D3D12 entry points are hooked
   bool vulkan = false;      // the Vulkan entry points are hooked
+  bool vulkan_shutdown = false;  // NVSDK_NGX_VULKAN_Shutdown1 is hooked (Uplift releases NR on a device before it)
+  bool d3d12_shutdown = false;   // NVSDK_NGX_D3D12_Shutdown1 is hooked (the same, on the game's Direct3D 12 device)
   bool d3d11 = false;               // the Direct3D 11 entry points are hooked
+  bool d3d11_shutdown = false;      // NVSDK_NGX_D3D11_Shutdown1 is hooked
+  bool d3d11_shutdown_all = false;  // the device-less NVSDK_NGX_D3D11_Shutdown is hooked (Final Fantasy XV's DLSS 1 SDK has no Shutdown1)
 };
-
-// 1.1.2 (RTX40MFG-Unlock): where another tool's Windows hotpatch on `entry` leads, or null. The hotpatch is the classic one: `jmp short -7` (EB F9) at
-// the entry, into a `jmp rel32` (E9) written over the five padding bytes before it. MinHook cannot hook such an entry (two bytes, and the padding is
-// taken), so Uplift hooks the jump's target instead and the calls run game -> the tool's patch -> Uplift -> the tool's code -> NGX.
-[[nodiscard]] void* HotpatchChainTarget(const void* entry);
 
 // The hooked APIs of `module` for the log: "Direct3D 12, Direct3D 11 and Vulkan", "Direct3D 12 and Vulkan", "Direct3D 11", ...
 [[nodiscard]] std::string HookedApis(const HookedModule& module);
@@ -134,7 +140,7 @@ struct HookedModule {
 // API), EvaluateFeature_C, Shutdown1 and Shutdown (optional, where exported); a Direct3D 11 entry point that cannot be hooked costs the Direct3D 11
 // placements only. A copy is hooked when it exports any API's create, evaluate and release. The detours are process-wide, so one installer runs
 // at a time. Uplift's module and every hooked module are pinned, so no detour, trampoline or notification
-// ever dangles.
+// ever dangles. GetCapabilityParameters is also hooked when exported by a supported API.
 class HookInstaller {
  public:
   static constexpr size_t MAX_MODULES = 8u;
@@ -164,7 +170,14 @@ class HookInstaller {
  private:
   struct Installed {
     HookedModule module;
-    std::vector<void*> targets;  // the hooked export addresses
+    std::vector<void*> exports;  // the export addresses whose calls reach Uplift
+    std::vector<void*> targets;  // what MinHook hooks for them: the export, or what another tool's patch on it leads to
+    std::vector<void*> hooked;     // by entry point, what takes that entry's calls (null where none does); another copy's same entry may share it
+    // By entry point, where the calls `hooked` takes go on: MinHook's trampoline, or past another copy's hook further on (null where this module's
+    // hook is not the one there).
+    std::vector<void*> originals;
+    std::vector<std::vector<void*>> ways;        // by entry point, the places its calls pass behind another tool's patch (hooks::ToolPatch::way)
+    std::vector<std::vector<void*>> other_ways;  // the same for every other function the module exports, where a tool patched one
     size_t slot = 0;             // the DETOURS/g_originals index; never reused while poisoned
   };
 
@@ -175,6 +188,7 @@ class HookInstaller {
   mutable std::shared_mutex mutex_;
   std::vector<Installed> installed_;
   std::vector<HMODULE> rejected_;  // NGX-named modules that cannot be hooked; never retried
+  std::vector<std::vector<void*>> rejected_ways_;  // the ways behind patches on the functions of those Uplift read before it gave up
   std::atomic<bool> pending_{false};
   void* notification_cookie_ = nullptr;
   bool started_ = false;
