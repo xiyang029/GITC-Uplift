@@ -14,6 +14,7 @@
 #include <imgui_internal.h>
 
 #include "ui/overlay_style.hpp"
+#include "ui/panel_font.hpp"
 
 namespace uplift::ui::widgets {
 
@@ -31,7 +32,7 @@ inline void SecondaryText(const char* text) {
 inline void Heading(const char* text, const ImVec4& color = tokens::kTextPrimary) {
   StyleScope scope;
   scope.Color(ImGuiCol_Text, color);
-  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * tokens::kHeadingScale);
+  ImGui::PushFont(PanelBoldFont(), ImGui::GetStyle().FontSizeBase * tokens::kHeadingScale);
   gui::TextWrapped("%s", text);
   ImGui::PopFont();
 }
@@ -197,29 +198,29 @@ inline void DrawAlignedText(ImDrawList* draw, ImVec2 anchor, ImU32 ink, const ch
 }
 
 inline void DrawActionIcon(ImDrawList* draw, icons::Action icon, ImVec2 center, ImU32 ink) {
-  // A 20 px optical box at the reference body size, with one stroke weight for every action.
+  // Shared 16 px optical box and stroke keep reset, navigation and close actions in one icon family.
   const float scale = ImGui::GetFontSize() / tokens::kBodyFont;
-  const float stroke = 3.f * scale;
+  const float stroke = 2.f * scale;
   const auto point = [&](float x, float y) { return ImVec2(center.x + x * scale, center.y + y * scale); };
   switch (icon) {
     case icons::Action::Reset: {
       constexpr float degree = 0.01745329252f;
-      draw->PathArcTo(center, 8.25f * scale, -150.f * degree, 139.f * degree);
+      draw->PathArcTo(center, 6.5f * scale, -150.f * degree, 139.f * degree);
       draw->PathStroke(ink, ImDrawFlags_None, stroke);
-      const ImVec2 head[]{point(-7.15f, -9.25f), point(-7.15f, -4.125f), point(-1.5f, -4.125f)};
+      const ImVec2 head[]{point(-5.5f, -7.5f), point(-5.5f, -3.25f), point(-1.f, -3.25f)};
       draw->AddPolyline(head, 3, ink, ImDrawFlags_None, stroke);
       break;
     }
     case icons::Action::Previous:
     case icons::Action::Next: {
       const float dir = icon == icons::Action::Previous ? -1.f : 1.f;
-      const ImVec2 chevron[]{point(-4.25f * dir, -8.75f), point(4.25f * dir, 0.f), point(-4.25f * dir, 8.75f)};
+      const ImVec2 chevron[]{point(-3.5f * dir, -6.f), point(3.5f * dir, 0.f), point(-3.5f * dir, 6.f)};
       draw->AddPolyline(chevron, 3, ink, ImDrawFlags_None, stroke);
       break;
     }
     case icons::Action::Close:
-      draw->AddLine(point(-8.5f, -8.5f), point(8.5f, 8.5f), ink, stroke);
-      draw->AddLine(point(-8.5f, 8.5f), point(8.5f, -8.5f), ink, stroke);
+      draw->AddLine(point(-6.f, -6.f), point(6.f, 6.f), ink, stroke);
+      draw->AddLine(point(-6.f, 6.f), point(6.f, -6.f), ink, stroke);
       break;
   }
 }
@@ -257,6 +258,10 @@ inline bool ResetButton(const char* id, const char* default_text) {
   ImGui::PopID();
   ItemTooltip(gui::Display("Reset to default (%s)").c_str(), gui::Display(default_text).c_str());
   ImGui::SetCursorScreenPos(layout_cursor);
+  // Putting the cursor back where the row laid it out is not a layout extension. Without clearing the flag
+  // SetCursorScreenPos raised, a row whose reset arrow is the last thing the panel draws (the left column's
+  // final row) ends on a bare SetCursorPos and ImGui reports it as extending the window's boundaries.
+  ImGui::GetCurrentWindow()->DC.IsSetPos = false;
   return clicked;
 }
 
@@ -301,7 +306,14 @@ bool DrawSlider(const char* id, Number* value, Number min, Number max, const cha
   // Reserve the endpoint widths so the rail does not move when the displayed value gains a digit.
   const float value_width = SnapUp((std::max)({measure(min), measure(max), measure(*value)})) + RowGap();
   const float width = ImGui::CalcItemWidth();
-  const bool native = ImGui::TempInputIsActive(ImGui::GetID(id)) || width - value_width < height * 1.5f;
+  const ImGuiID slider_id = ImGui::GetID(id);
+  const bool native = ImGui::TempInputIsActive(slider_id) || width - value_width < height * 1.5f;
+  // Ctrl+click hands the slider to ImGui's own value field, which submits its item a second time over the
+  // slider's. That second, frame-high item drops the line the label above the control established, so the
+  // row and everything under it moves by a pixel. Note the line the row already has, to put it back.
+  ImGuiWindow* const window = ImGui::GetCurrentWindow();
+  const float line_before = window->DC.CurrLineSize.y;
+  const float row_top = window->DC.CursorPos.y;
   bool changed = false;
   {
     StyleScope hidden;
@@ -321,7 +333,19 @@ bool DrawSlider(const char* id, Number* value, Number min, Number max, const cha
   if (dragging != nullptr) {
     *dragging = active;
   }
-  if (native) return changed;
+  // The field is no longer active on the frame it closes, but its item still went through ImGui's text path.
+  const bool typing = ImGui::TempInputIsActive(slider_id) || ImGui::GetCurrentContext()->TempInputId == slider_id;
+  if (typing) {
+    const ImVec2 lo = ImGui::GetItemRectMin();
+    const ImVec2 hi = ImGui::GetItemRectMax();
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float bottom = row_top + (std::max)(line_before, hi.y - lo.y) + style.ItemSpacing.y;
+    if (window->DC.CursorPos.y < bottom) {
+      window->DC.CursorPos.y = bottom;
+      window->DC.CursorMaxPos.y = (std::max)(window->DC.CursorMaxPos.y, bottom - style.ItemSpacing.y);
+    }
+  }
+  if (native || typing) return changed;
 
   const ImVec2 lo = ImGui::GetItemRectMin();
   const ImVec2 hi = ImGui::GetItemRectMax();
@@ -410,10 +434,17 @@ inline void Readout(const char* title, const char* value, float right) {
   }
 }
 
-// Groups use the primary ink. A heading paired with a value is a readout and stays muted.
+// Group titles sit between the page title and row labels; paired notes remain intentionally muted.
 inline void GroupHeading(const char* title, const char* note = nullptr) {
-  if (note) Readout(title, note, MeasureRow().control_right);
-  else gui::TextWrapped("%s", title);
+  if (note) {
+    Readout(title, note, MeasureRow().control_right);
+    return;
+  }
+  StyleScope heading;
+  heading.Color(ImGuiCol_Text, tokens::kTextPrimary);
+  ImGui::PushFont(PanelBoldFont(), ImGui::GetStyle().FontSizeBase * tokens::kGroupHeadingScale);
+  gui::TextWrapped("%s", title);
+  ImGui::PopFont();
 }
 
 // A flat section shares the column's scroll, padding and row grid.
@@ -447,8 +478,13 @@ inline bool Switch(const char* id, bool* value) {
   const ImVec4 track = tokens::Mix(tokens::kBgControl, active_track, progress);
   ImDrawList* draw = ImGui::GetWindowDrawList();
   draw->AddRectFilled(at, ImVec2(at.x + width, at.y + height), ToU32(track), CardRadius());
+  draw->AddRect(ImVec2(at.x, at.y + 1.f), ImVec2(at.x + width, at.y + height), ToU32(tokens::Fade(tokens::kPlateInk, 0.18f)), CardRadius(), 0, Px(1.f));
   const float thumb_width = held ? center * 0.82f : center * 0.68f;
   const float thumb_x = at.x + center + thumb_progress * (width - 2.f * center);
+  draw->AddRectFilled(ImVec2(thumb_x - thumb_width - 1.f, at.y + center - center * 0.68f - 1.f),
+                      ImVec2(thumb_x + thumb_width + 1.f, at.y + center + center * 0.68f + 1.f),
+                      ToU32(tokens::Fade(tokens::kAccent, 0.14f)), center * 0.8f);
+  draw->AddCircleFilled(ImVec2(thumb_x, at.y + center + 1.f), thumb_width * 0.72f, ToU32(tokens::Fade(tokens::kPlateInk, 0.18f)));
   draw->AddRectFilled(ImVec2(thumb_x - thumb_width, at.y + center - center * 0.68f),
                       ImVec2(thumb_x + thumb_width, at.y + center + center * 0.68f),
                       ToU32(tokens::kTextPrimary), center * 0.68f);
@@ -476,9 +512,20 @@ inline KeyCaptureHit KeyCaptureButton(const char* id, const char* label, bool ca
   ImGui::SetCursorScreenPos({right - width, ImGui::GetCursorScreenPos().y});
   const std::string shown = Ellipsize(gui::Display(text).c_str(), (std::max)(1.f, width - padding)) + "###capture_key";
   ImGui::PushID(id);
-  const bool pressed = ImGui::Button(shown.c_str(), {width, 0.f});
+  const float height = RowHeight() * 0.62f;
+  const ImVec2 size(width, height);
+  const ImVec2 pos = gui::GetCursorScreenPos();
+  const bool pressed = ImGui::InvisibleButton(shown.c_str(), size, ImGuiButtonFlags_EnableNav);
+  const bool hovered = ImGui::IsItemHovered();
+  const bool right_clicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
+  ImDrawList* draw = gui::GetWindowDrawList();
+  draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), ToU32(tokens::kBgControl), CapsuleRadius());
+  if (hovered) draw->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), ToU32(tokens::kSurfaceHover), CapsuleRadius());
+  const ImVec2 text_size = gui::CalcTextSize(gui::Display(text).c_str());
+  draw->AddText(ImVec2(pos.x + (width - text_size.x) * 0.5f, pos.y + (height - text_size.y) * 0.5f),
+                ToU32(tokens::kTextPrimary), gui::Display(text).c_str());
   ImGui::PopID();
-  return {pressed, ImGui::IsItemClicked(ImGuiMouseButton_Right)};
+  return {pressed, right_clicked};
 }
 
 // One row owns the hit area for the caption and both chevrons. A chevron skips unavailable options.
@@ -815,24 +862,22 @@ inline bool DetailOption(const char* label, std::string_view why, int index, boo
   const float selection = Animate(ImGui::GetID("##radio_selection"), selected ? 1.f : 0.f, motion::kChoiceFeedback);
   const ImVec2 lo = gui::GetItemRectMin(), hi = gui::GetItemRectMax();
   ImDrawList* draw = gui::GetWindowDrawList();
-  const ImVec4 wash = tokens::Fade(tokens::kSurfaceActive, tokens::kSurfaceActive.w * hover);
-  const ImVec4 selected_fill = tokens::Mix(tokens::kSelected, tokens::kSelectedActive, hover);
-  draw->AddRectFilled(lo, hi, ToU32(tokens::Mix(wash, selected_fill, selection)), ControlRadius());
+  if (hover > 0.f) draw->AddRectFilled(lo, hi, ToU32(tokens::Fade(tokens::kSurfaceHover, tokens::kSurfaceHover.w * hover)), ControlRadius());
+  if (selection > 0.f) {
+    draw->AddRectFilled(lo, hi, ToU32(tokens::Fade(tokens::kAccent, 0.075f * selection)), ControlRadius());
+  }
 
   const float label_y = lo.y + (label_band - label_height) * 0.5f;
   const float text_x = lo.x + text_inset;
   const ImVec4 label_ink = disabled ? tokens::kTextTertiary
-                                   : tokens::Mix(tokens::kTextSecondary, tokens::kTextPrimary, selection);
+                                   : tokens::Mix(tokens::kTextPrimary, tokens::kAccent, selection);
   draw->AddText(gui::GetFont(), font, {text_x, label_y}, ToU32(label_ink),
                 text.text.c_str(), nullptr, text.native_width);
   const ImVec2 center{lo.x + padding_x + icon_width * 0.5f, label_y + gui::GetTextLineHeight() * 0.5f};
-  const float radius = font * 0.34f;
-  const ImVec4 accent = disabled ? tokens::kTextTertiary : tokens::kAccent;
-  const ImVec4 ring = tokens::Mix(disabled ? tokens::kTextFaint : tokens::kTextSecondary, accent, (std::max)(selection, hover));
-  draw->AddCircle(center, radius, ToU32(ring), 0, (std::max)(1.f, Px(1.f)));
-  if (selection > 0.f) {
-    draw->AddCircleFilled(center, radius * 0.55f * selection, ToU32(tokens::Fade(accent, selection)));
-  }
+  const float radio_radius = font * 0.38f;
+  const ImVec4 radio_ink = tokens::Mix(tokens::kTextTertiary, tokens::kAccent, (std::max)(selection, hover * 0.55f));
+  draw->AddCircle(center, radio_radius, ToU32(radio_ink), 0, Px(1.5f));
+  if (selection > 0.f) draw->AddCircleFilled(center, radio_radius * 0.55f * selection, ToU32(tokens::Fade(tokens::kAccent, selection)));
   if (!reason.text.empty()) {
     draw->AddText(gui::GetFont(), font, {text_x, lo.y + label_band - padding_y * 0.5f},
                   ToU32(tokens::kTextTertiary), reason.text.c_str(), nullptr, reason.native_width);
@@ -902,14 +947,19 @@ inline bool CapsuleTabBar(const char* id, const char* const* english, int count,
     const float selection = Animate(ImGui::GetID("##tab_active"), live ? 1.f : 0.f, motion::kTabSlide);
     const float hover = Animate(ImGui::GetID("##tab_hover"), hot[i] || held[i] ? 1.f : 0.f, motion::kHover);
     gui::PopID();
-    // One white surface: the hover wash carries on under the moving plate instead of the two being blended twice.
-    const float hover_alpha = (held[i] ? 0.08f : 0.05f) * hover;
-    const float plate_alpha = hover_alpha + (1.f - hover_alpha) * selection;
-    draw->AddRectFilled(lo[i], hi[i], ToU32(tokens::Fade(tokens::kTextPrimary, plate_alpha)), CapsuleRadius());
+    const bool selected_tab = i == (clicked >= 0 ? clicked : *current);
+    // A restrained tonal pill keeps navigation legible without the stark white chip of a default theme.
+    if (selected_tab) {
+      draw->AddRectFilled(lo[i], hi[i], ToU32(tokens::kBgControlHover), CapsuleRadius());
+    } else if (hover > 0.f) {
+      draw->AddRectFilled(lo[i], hi[i], ToU32(tokens::Fade(tokens::kTextPrimary, (held[i] ? 0.08f : 0.05f) * hover)), CapsuleRadius());
+    }
+    if (selected_tab) ImGui::PushFont(PanelBoldFont(), ImGui::GetStyle().FontSizeBase);
     const ImVec2 size = gui::CalcTextSize(shown[i].c_str());
     const ImVec4 inactive_text = tokens::Mix(tokens::kTextSecondary, tokens::kTextPrimary, hover);
-    const ImVec4 color = tokens::Mix(inactive_text, tokens::kPlateInk, selection);
-    draw->AddText(ImVec2((lo[i].x + hi[i].x - size.x) * 0.5f, (lo[i].y + hi[i].y - size.y) * 0.5f), ToU32(color), shown[i].c_str());
+    const ImVec4 color = tokens::Mix(inactive_text, tokens::kTextPrimary, selection);
+    draw->AddText(gui::GetFont(), gui::GetFontSize(), ImVec2((lo[i].x + hi[i].x - size.x) * 0.5f, (lo[i].y + hi[i].y - size.y) * 0.5f), ToU32(color), shown[i].c_str());
+    if (selected_tab) ImGui::PopFont();
   }
   gui::PopID();
   if (clicked < 0 || clicked == *current) return false;

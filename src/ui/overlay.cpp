@@ -993,6 +993,13 @@ void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
   if (card.idle) return;
   if (card.title.empty() && card.reason.empty() && card.before_fg_note.empty() && card.fixes.empty()
       && !card.working && card.button == CardButton::NONE) return;
+  ImDrawList* card_draw = gui::GetWindowDrawList();
+  const ImVec2 card_origin = gui::GetCursorScreenPos();
+  const float card_inset = style::CardInset();
+  card_draw->ChannelsSplit(2);
+  card_draw->ChannelsSetCurrent(1);
+  gui::BeginGroup();
+  gui::SetCursorScreenPos(ImVec2(card_origin.x + card_inset, card_origin.y + card_inset));
   widgets::Section("##status_card", [&] {
     // While running, the panel's own state pill already says so.
     if (!card.working && !card.title.empty()) {
@@ -1020,11 +1027,18 @@ void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
       const float key_width = (std::max)({timing_width, hudless_width, gui::CalcTextSize("Running at").x, gui::CalcTextSize("Motion vectors").x,
                                           gui::CalcTextSize("Backend").x, gui::CalcTextSize("Resolution").x,
                                           gui::CalcTextSize("Frame generation").x, gui::CalcTextSize("Network / style").x});
+      const float row_left_x = gui::GetCursorPosX();
       const float value_offset = style::SnapUp(key_width) + style::BlockGap();
-      const float value_x = gui::GetCursorPosX() + value_offset;
+      const float value_x = row_left_x + value_offset;
       const bool inline_values = value_offset <= gui::GetContentRegionAvail().x * 0.40f;
-      const auto row = [inline_values, value_x](const char* key, const std::string& value) {
-        widgets::SecondaryWrapped(key);
+      const auto row = [inline_values, row_left_x, value_x](const char* key, const std::string& value) {
+        // SameLine advances ImGui's current-line cursor. Reset each new key/value row to the shared card inset.
+        gui::SetCursorPosX(row_left_x);
+        {
+          style::StyleScope key_ink;
+          key_ink.Color(ImGuiCol_Text, style::tokens::kTextTertiary);
+          gui::TextWrapped("%s", key);
+        }
         if (inline_values) gui::SameLine(value_x);
         gui::TextWrapped("%s", value.c_str());
       };
@@ -1044,13 +1058,23 @@ void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
       }
       if (!view.setup.why.empty()) {
         const std::string why = gui::Display("Why: ") + gui::Display(view.setup.why);
+        gui::SetCursorPosX(row_left_x);
         widgets::SecondaryWrapped(why.c_str());
         widgets::ItemTooltip("%s", why.c_str());
       } else {
-        if (!view.live.note.empty()) widgets::SecondaryText(view.live.note.c_str());
-        if (!card.before_fg_note.empty()) widgets::SecondaryWrapped(card.before_fg_note.c_str());
+        if (!view.live.note.empty()) {
+          gui::SetCursorPosX(row_left_x);
+          widgets::SecondaryText(view.live.note.c_str());
+        }
+        if (!card.before_fg_note.empty()) {
+          gui::SetCursorPosX(row_left_x);
+          widgets::SecondaryWrapped(card.before_fg_note.c_str());
+        }
       }
-      if (!view.live.footer.empty()) widgets::SecondaryText(view.live.footer.c_str());
+      if (!view.live.footer.empty()) {
+        gui::SetCursorPosX(row_left_x);
+        widgets::SecondaryText(view.live.footer.c_str());
+      }
     } else {
       if (!card.reason.empty()) gui::TextWrapped("%s", card.reason.c_str());
       if (!card.before_fg_note.empty()) widgets::SecondaryWrapped(card.before_fg_note.c_str());
@@ -1066,6 +1090,16 @@ void DrawStatusPanel(const OverlayView& view, OverlayState* state) {
         break;
     }
   });
+  gui::EndGroup();
+  const ImVec2 content_max = ImGui::GetItemRectMax();
+  const ImVec2 card_min(card_origin.x, card_origin.y);
+  const ImVec2 card_max(content_max.x + card_inset, content_max.y + card_inset);
+  const ImVec2 cursor_after = gui::GetCursorScreenPos();
+  gui::SetCursorScreenPos(ImVec2(card_origin.x, cursor_after.y + card_inset));
+  ImGui::GetCurrentWindow()->DC.IsSetPos = false;
+  card_draw->ChannelsSetCurrent(0);
+  style::RaisedSurface(card_draw, card_min, card_max, 0.34f);
+  card_draw->ChannelsMerge();
 }
 
 void DrawSafetyPanel(const OverlayView& view, Settings* settings, OverlayState* state, bool* changed) {
@@ -1356,8 +1390,13 @@ bool DrawPanel(const OverlayView& view, Settings* settings, OverlayState* state)
     {
       // The detail pane shares the panel background. Its child window only provides clipping and scrolling.
       style::StyleScope column;
-      column.Var(ImGuiStyleVar_WindowPadding, {0.f, style::CardInset()});
+      column.Var(ImGuiStyleVar_WindowPadding, {style::CardInset(), style::CardInset()});
       constexpr auto flags = ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened;
+      // The surface goes into the panel's own draw list before the child opens: the child clips its content,
+      // and the shadow reaches outside the rect the child fills.
+      const ImVec2 pane_min = gui::GetCursorScreenPos();
+      const ImVec2 pane_max(pane_min.x + right_width, pane_min.y + body_height);
+      style::RaisedSurface(gui::GetWindowDrawList(), pane_min, pane_max, 0.42f);
       if (gui::BeginChild("##panel_right", ImVec2(right_width, body_height), flags,
                           ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse)) {
         ScrollColumnWithWheel();

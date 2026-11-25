@@ -39,7 +39,7 @@ constexpr ImVec4 Fade(const ImVec4& color, float alpha) {
 constexpr ImVec4 kTransparent = ImVec4(0.f, 0.f, 0.f, 0.f);
 
 // Near-black panel, neutral controls and one accent.
-constexpr ImVec4 kBgWindow = Hex(0x090B10, 0.93f);
+constexpr ImVec4 kBgWindow = Hex(0x090B10, 0.97f);
 constexpr ImVec4 kBgControl = Hex(0x1F2024);
 constexpr ImVec4 kBgPopup = Hex(0x2A2B31);
 constexpr ImVec4 kBgControlHover = Mix(kBgControl, kBgPopup, 0.70f);
@@ -69,6 +69,7 @@ constexpr float kBaseFont = 13.f;      // unit reference for the existing panel 
 constexpr float kBodyFont = 19.f;      // body size in pixels at 96 DPI
 constexpr float kHeadingScale = 1.2f;   // card and group headings: the reference panel's bold captions
 constexpr float kRowLabelScale = 1.03f;  // row labels, a touch larger than the body so they read as bold
+constexpr float kGroupHeadingScale = 1.08f;
 
 // Row geometry measured in the body font; the width limit is relative to the current column.
 constexpr float kLabelEm = 10.5f;
@@ -106,9 +107,40 @@ inline float CardRadius() { return SnapUp(Units(2.5f)); }
 inline float CapsuleRadius() { return 999.f; }
 
 // Leave two body lines of room before snapping to the panel grid.
-inline float RowHeight() { return SnapUp(gui::GetFontSize() * 2.f); }
+inline float RowHeight() { return SnapUp(gui::GetFontSize() * 2.3f); }
 
 inline ImU32 ToU32(const ImVec4& color) { return ImGui::GetColorU32(color); }
+
+
+// A soft shadow: stacked rounded rects, each a step wider and fainter than the one inside it, so the edge
+// falls off instead of ending on a line. ImGui has no blurred primitive, and this is what replaces the single
+// hairline border a surface used to draw. Draw it before the surface, into a draw list that is not clipped to
+// the surface's own rect.
+inline void SoftShadow(ImDrawList* draw, const ImVec2& lo, const ImVec2& hi, float rounding, float strength = 1.f) {
+  constexpr int kLayers = 4;
+  const float unit = (std::max)(1.f, Px(1.f));
+  // The shadow falls downward: the surface sits above what it covers, so the offset grows with each layer.
+  for (int layer = kLayers; layer >= 1; --layer) {
+    const float grow = unit * static_cast<float>(layer);
+    const float drop = grow * 0.55f;
+    const ImU32 ink = ToU32(tokens::Fade(tokens::kPlateInk, strength * 0.10f / static_cast<float>(layer)));
+    draw->AddRectFilled(ImVec2(lo.x - grow, lo.y - grow + drop), ImVec2(hi.x + grow, hi.y + grow + drop), ink,
+                        rounding + grow);
+  }
+}
+
+// The translucent fill of a raised surface: no border, and light enough that the panel behind it still reads.
+inline void SurfaceFill(ImDrawList* draw, const ImVec2& lo, const ImVec2& hi, float fill_alpha) {
+  draw->AddRectFilled(lo, hi, ToU32(tokens::Fade(tokens::kBgControl, fill_alpha)), CardRadius());
+}
+
+// A raised surface in one call, for a caller whose draw list is not clipped to the rect: the shadow falls
+// outside the rect, so whatever follows has to leave it room.
+inline void RaisedSurface(ImDrawList* draw, const ImVec2& lo, const ImVec2& hi, float fill_alpha,
+                          float strength = 1.f) {
+  SoftShadow(draw, lo, hi, CardRadius(), strength);
+  SurfaceFill(draw, lo, hi, fill_alpha);
+}
 
 // Small, ID-backed transitions keep animation state with ImGui's window and disappear with it.
 inline ImGuiID AnimationID(const char* id) {
@@ -243,7 +275,7 @@ inline void ApplyPanelStyle() {
   style.PopupRounding = CardRadius();
   style.ScrollbarRounding = ControlRadius();
   style.WindowPadding = ImVec2(3.f * step, 3.f * step);
-  style.FramePadding = ImVec2(2.f * step, step);
+  style.FramePadding = ImVec2(10.f * scale, 6.f * scale);
   style.FrameRounding = ControlRadius();
   style.GrabRounding = ControlRadius();
   style.ItemSpacing = ImVec2(step, step);
