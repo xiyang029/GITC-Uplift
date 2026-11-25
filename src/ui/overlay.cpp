@@ -613,7 +613,7 @@ bool DrawStageRow(const OverlayView& view, Settings* settings, OverlayState* sta
 
 // The target row shows the grid that will actually run: with edge scaling on, the warped extent.
 nr::Size FovAdjustedSize(nr::Size uniform, const OverlayView& view, const Settings& settings) {
-  if (!settings.foveation || uniform.Empty()) return uniform;
+  if (uniform.Empty()) return uniform;
   const nr::Size out = view.output_size.Empty() ? view.first_stage_input : view.output_size;
   if (out.Empty()) return uniform;
   const nr::foveation::Plan plan = sources::FoveatedWorkPlan(
@@ -868,10 +868,10 @@ bool DrawPanelHeader(const OverlayView& view, OverlayState* state) {
   gui::SetCursorScreenPos(at);
   if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
     const ImVec2 delta = gui::GetIO().MouseDelta;
-    // Never past the top-left edge: a negative position is also the "not placed yet" sentinel, so letting a drag
-    // through there made the next frame take the default corner instead of staying at the edge.
-    state->panel_x = (std::max)(0.f, state->panel_x + delta.x);
-    state->panel_y = (std::max)(0.f, state->panel_y + delta.y);
+    // Position bounds are applied by DrawOverlayWindow. Allow the panel to cross the display edge while dragging;
+    // its visible title strip remains the grab handle so it can always be brought back.
+    state->panel_x += delta.x;
+    state->panel_y += delta.y;
   }
   // The name, then its state in the panel's quiet ink.
   gui::SetCursorScreenPos(ImVec2(at.x, at.y + (height - font * style::tokens::kHeadingScale) * 0.5f));
@@ -1432,12 +1432,20 @@ bool DrawOverlayWindow(const OverlayView& view, Settings* settings, OverlayState
   // Wide enough for both columns at the panel's font size, bounded by the available display area.
   const float width = std::clamp(room.x - style::Units(4.f), 1.f, style::Units(200.f));
   const float height = std::clamp(room.y - style::Units(4.f), 1.f, style::Units(120.f));
-  if (state->panel_x < 0.f || state->panel_y < 0.f) {
+  if (!state->panel_position_set) {
     state->panel_x = style::Units(6.f);
     state->panel_y = style::Units(10.f);
+    state->panel_position_set = true;
   }
-  state->panel_x = std::clamp(state->panel_x, 0.f, (std::max)(0.f, room.x - width));
-  state->panel_y = std::clamp(state->panel_y, 0.f, (std::max)(0.f, room.y - height));
+  // Keep a useful piece of the draggable title band reachable, rather than requiring the whole panel to stay on-screen.
+  const float font = gui::GetFontSize();
+  const float header_height = style::SnapUp(font * 1.9f);
+  const float close_width = style::SnapUp(font * 1.75f);
+  const float title_grab = (std::min)(style::Units(40.f), (std::max)(1.f, width - close_width - style::RowGap()));
+  const float min_x = close_width + style::RowGap() + title_grab - width;
+  const float max_x = room.x - title_grab;
+  state->panel_x = std::clamp(state->panel_x, (std::min)(0.f, min_x), (std::max)(0.f, max_x));
+  state->panel_y = std::clamp(state->panel_y, 0.f, (std::max)(0.f, room.y - header_height));
   gui::SetNextWindowPos(ImVec2(state->panel_x, state->panel_y + style::Units(2.f) * (1.f - intro_eased)), ImGuiCond_Always);
   gui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
   bool changed = false;

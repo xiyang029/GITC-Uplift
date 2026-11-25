@@ -159,8 +159,9 @@ struct OverlayState {
   // the panel hotkey does.
   bool reshade_overlay_open = false;
   bool panel_drew = false;   // set by DrawOverlayWindow when the window actually drew; input is blocked only then
-  float panel_x = -1.f;      // where the window was last dragged; negative means the default corner
-  float panel_y = -1.f;
+  float panel_x = 0.f;       // where the window was last dragged
+  float panel_y = 0.f;
+  bool panel_position_set = false;  // keeps a dragged off-screen coordinate distinct from the initial position
   // The panel's transitions, all of them session-only: negative means "start it on the next draw".
   double panel_intro_started = -1.0;          // when the panel appeared, for the opening slide and fade
   double panel_tab_transition_started = -1.0;  // when the shown tab changed; negative means no transition in flight

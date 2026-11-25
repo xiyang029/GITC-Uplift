@@ -1,6 +1,7 @@
 #ifndef UPLIFT_DECODE_COMMON_HLSLI
 #define UPLIFT_DECODE_COMMON_HLSLI
 
+#include "../src/color/shader_values.h"
 #include "change_common.hlsli"
 #include "foveation.hlsli"
 #include "vk_common.hlsli"
@@ -61,7 +62,7 @@ static const float CLAMP_SLACK = 0.15f;               // how far past the neighb
 // caller divides it by the density, which widens the Gaussian as sqrt(density).
 static const float RANGE_K = -2.885390082f;
 // Fade out the correction at 1:1; reach full strength at 1.25 output texels per work texel.
-static const float KERNEL_FADE_IN = 4.f;
+static const float KERNEL_FADE_IN = UPLIFT_EDGE_AWARE_GAIN_FADE_IN;
 
 // Classic: a bilinear sample of the change field at `position` (work pixels), clamped to its texels.
 float3 ChangeBilinear(float2 position, uint2 size) {
@@ -290,14 +291,17 @@ float4 DecodePixel(uint2 pixel) {
     uint2 size;
     change_texture.GetDimensions(size.x, size.y);
     if (upsampling == 2u) {
-      // Only a base gain below the clamp margin can need the neighbourhood range.
-      const bool hull = 1.f - guided_low_gain > CLAMP_SLACK;
       const FovSample sx = FovFullToWorkSample1(pixel.x, width, size.x, foveation_x, foveation_gmax_x);
       const FovSample sy = FovFullToWorkSample1(pixel.y, height, size.y, foveation_y, foveation_gmax_y);
       // Undo gmax's normalization to get output texels per work texel on each axis.
       const float2 axis = float2(sx.density, sy.density) * (float2(width, height) / float2(size))
                           * float2(foveation_gmax_x, foveation_gmax_y);
       const float density = max(axis.x, axis.y);
+      // Ease the optional base-band attenuation in with the actual local sampling density. Native-density
+      // plateaus stay bit-identical, while compressed FOV edges receive the full configured restraint.
+      const float base_gain = lerp(1.f, guided_low_gain, saturate((density - 1.f) * KERNEL_FADE_IN));
+      // Only a base gain below the clamp margin can need the neighbourhood range.
+      const bool hull = 1.f - base_gain > CLAMP_SLACK;
       // Reuse the output pixel's scene light for the guide and composition.
       original = SceneLinear(encoding, primaries, source.rgb, scale);
       has_original = true;
@@ -307,7 +311,7 @@ float4 DecodePixel(uint2 pixel) {
         // Both axes are 1:1, so ChangeBands adds no correction. The warp can still offset the texel.
         const uint2 texel = min(uint2(max(float2(sx.position, sy.position) + 0.5f, 0.f)), size - 1u);
         const float4 value = change_texture.Load(int3(texel, 0));
-        change = dark * guided_low_gain * value.xyz;
+        change = dark * value.xyz;
       } else {
         // The coarser axis keeps the original tent. Narrow the finer one toward bilinear, even when both are reduced.
         const float2 spatial_mix = saturate((axis - NATIVE_DENSITY_LIMIT) / (density - NATIVE_DENSITY_LIMIT));
@@ -318,7 +322,7 @@ float4 DecodePixel(uint2 pixel) {
         float3 classic;
         const float3 edge = ChangeEdgeAware(float2(sx.position, sy.position), size, tent_slope, density, output_guide,
                                            warp_guide_mix, unwarped, hull, tap_min, tap_max, classic);
-        change = dark * ChangeBands(classic, edge, tap_min, tap_max, guided_low_gain, density, hull);
+        change = dark * ChangeBands(classic, edge, tap_min, tap_max, base_gain, density, hull);
       }
     } else {
       change = ChangeBilinear(FovFullToWorkPos(pixel, uint2(width, height), size, uint2(foveation_x, foveation_y),

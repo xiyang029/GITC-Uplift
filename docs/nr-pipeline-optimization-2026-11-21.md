@@ -141,3 +141,9 @@ cost 5.7-5.9% more (about 1.4 microseconds). These full-resolution kernel probes
 are not game or whole-chain timings; neither alternative is included. Probe
 sources and logs are under ignored build/nr-quality. MV jitter conventions for
 native NR before/after SR remain unverified; no blanket correction was applied.
+
+## Quality follow-up — scene-cut signature
+
+The Look history cut check now complements its existing 1.5-stop mean-light threshold with the standard deviation of the coarsest Gaussian level's log-light values. A tonal-spread change above 0.75 stops resets the Look stabilization history even when mean brightness is unchanged. The thresholds are shared between HLSL and the C++ regression helper. The added GPU regression covers a same-mean, changed-spread cut; unit cases cover first-frame validity, modest exposure drift and both cut paths.
+
+This reset belongs to Uplift's Look histories; it does not reset the vendor NR model's private temporal state. The existing NR-change stabilizer already rejects history by guide mismatch and change-field edit, chooses between static and motion-reprojected history by confidence, and clips stale values near the local hull. Stabilization mode and time remain separate tuning controls. Those paths are intentionally not duplicated or made more aggressive without representative real-game captures: extra smoothing can trade flicker for motion trails. Custom height, foveated edges and Edge-aware already have independent controls and validation boundaries; the source contains no evidence that changing them alone removes vendor-model noise or ghosting.

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 
+#include "color/shader_values.h"
 #include "nr/types.hpp"
 
 namespace uplift::look {
@@ -46,6 +48,14 @@ struct LookSettings {
   uint32_t stabilize_change_ms = 60u;  // τ, whole milliseconds
   friend bool operator==(const LookSettings&, const LookSettings&) = default;
 };
+
+// The CUT pass resets Look history on a large mean-light change or a substantial change in the coarse tonal spread.
+inline constexpr float SCENE_CUT_MEAN_STOPS = UPLIFT_SCENE_CUT_MEAN_STOPS;
+inline constexpr float SCENE_CUT_SPREAD_STOPS = UPLIFT_SCENE_CUT_SPREAD_STOPS;
+[[nodiscard]] inline bool SceneCutDetected(float mean, float spread, float previous_mean, float previous_spread, bool previous_valid) {
+  return previous_valid && (std::abs(mean - previous_mean) > SCENE_CUT_MEAN_STOPS
+                            || std::abs(spread - previous_spread) > SCENE_CUT_SPREAD_STOPS);
+}
 
 // Whether the look stage runs: Shape result is on and a control would change NR's result.
 [[nodiscard]] bool LookRuns(const LookSettings& settings);

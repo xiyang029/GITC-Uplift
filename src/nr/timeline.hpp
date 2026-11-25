@@ -41,6 +41,8 @@ class QueueFences {
   virtual bool Signal(ID3D12CommandQueue* queue, uint64_t value) = 0;
   // The value `queue`'s fence has reached; 0 for a queue never signalled.
   [[nodiscard]] virtual uint64_t Completed(ID3D12CommandQueue* queue) const = 0;
+  // Queue an asynchronous wait on `producer_queue`'s fence before later work on `consumer_queue`.
+  virtual bool EnqueueWait(ID3D12CommandQueue* consumer_queue, ID3D12CommandQueue* producer_queue, uint64_t value) = 0;
   // Device teardown only: waits up to `timeout` for `queue`'s fence to reach `value`.
   virtual bool Wait(ID3D12CommandQueue* queue, uint64_t value, std::chrono::milliseconds timeout) = 0;
 };
@@ -118,8 +120,23 @@ class Timeline {
     bool complete_ = false;
     bool replayed_ = false;
   };
+  struct SubmissionStatus {
+    bool has_proof = false;
+    bool ordered = false;
+    bool complete = false;
+    bool replayed = false;
+    bool same_queue = false;
+    bool fence_ready = false;
+    bool gpu_wait_enqueued = false;
+    bool gpu_wait_failed = false;
+    uint64_t submitted_frame = 0u;
+    uint64_t fence = 0u;
+  };
   [[nodiscard]] std::shared_ptr<SubmissionProof> TrackSubmission(uint64_t token);
   [[nodiscard]] bool OrderedBefore(const SubmissionProof* proof, ID3D12CommandQueue* consumer) const;
+  [[nodiscard]] SubmissionStatus InspectSubmission(const SubmissionProof* proof, ID3D12CommandQueue* consumer) const;
+  // For a current-frame read, turn a signalled producer fence into queue-to-queue GPU ordering without a CPU stall.
+  [[nodiscard]] SubmissionStatus PrepareSubmissionRead(const SubmissionProof* proof, ID3D12CommandQueue* consumer);
 
   // A new token, for a recording Uplift is about to make on a game command list. `now` defaults to
   // the real clock; a test wanting a deterministic issue time for the stuck-token check (StampAged)

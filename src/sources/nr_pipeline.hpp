@@ -349,19 +349,24 @@ class NrPipeline final : private nr::PassResolver {
   struct PresentMotionCounters : PresentMotionCounts {
     uint64_t age_max = 0u;
     uint64_t resets = 0u;
+    uint64_t gpu_waits = 0u;
+    uint64_t gpu_wait_failures = 0u;
+    uint64_t slot_redirects = 0u;
+    std::string miss_sample;
     std::chrono::steady_clock::time_point since;
   };
 
-  // Copies indexed by the frame the next present closes. The ring grows from PRESENT_MOTION_MIN_SLOTS to PRESENT_MOTION_SLOTS when a copy is skipped
-  // because its slot is still read. A present without its own copy binds the newest at most PRESENT_MOTION_MAX_AGE frames older
-  // (present_motion_ring.hpp), so the motion source never switches for a missed copy.
+  // Copies tagged with the frame the next present closes. Writes prefer the frame's natural ring slot but can use any retired slot; the ring grows from
+  // PRESENT_MOTION_MIN_SLOTS to PRESENT_MOTION_SLOTS only when no slot is safe to reuse. A present without its own copy binds the newest at most
+  // PRESENT_MOTION_MAX_AGE frames older (present_motion_ring.hpp), so the motion source never switches for a missed copy.
   static constexpr size_t MOTION_COPY_SLOTS = PRESENT_MOTION_SLOTS;  // room for the grown ring
   struct MotionCopies {
     std::array<Texture, MOTION_COPY_SLOTS> textures;
     std::array<std::shared_ptr<nr::Timeline::SubmissionProof>, MOTION_COPY_SLOTS> producers;
     std::array<uint64_t, MOTION_COPY_SLOTS> frames = {};    // the frame each copy was made for; 0 = none
     size_t slots = PRESENT_MOTION_MIN_SLOTS;                 // the slots in use, starting at PRESENT_MOTION_MIN_SLOTS
-    std::array<nr::Mark, MOTION_COPY_SLOTS> last_use = {};  // the newest recording that wrote or read it
+    std::array<nr::Mark, MOTION_COPY_SLOTS> last_write = {}; // game-list recording that wrote it; keep its replayable resources alive
+    std::array<nr::Mark, MOTION_COPY_SLOTS> last_read = {};  // one-shot Present recording; execution completion is enough for reuse
     nr::Size size;
   };
 

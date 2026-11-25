@@ -2,9 +2,12 @@
 
 #include <dxgiformat.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string_view>
+
+#include "color/shader_values.h"
 
 namespace uplift::color {
 
@@ -27,6 +30,12 @@ enum class Upsampling : uint32_t {
   CLASSIC = 0u,     // a bilinear sample
   EDGE_AWARE = 1u,  // a joint bilateral upsample with a base-band gain
 };
+
+// Mirrors decode_common.hlsli: configured broad-band attenuation fades in only where local sampling is coarser than native.
+[[nodiscard]] inline float EffectiveEdgeAwareBaseGain(float configured_gain, float density) {
+  const float fade = std::clamp((density - 1.f) * UPLIFT_EDGE_AWARE_GAIN_FADE_IN, 0.f, 1.f);
+  return 1.f + (configured_gain - 1.f) * fade;
+}
 
 // Plan 5 (v2 design §3.14, F7): the SourcePrimaries index, which is also the shaders' primaries bits (color_common.hlsli's
 // PRIMARIES_*). AUTO is BT.709, and BT.2020 for HDR10 PQ, so a shader whose options are 0 keeps Plan 4's maths.

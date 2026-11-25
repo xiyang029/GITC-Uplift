@@ -691,8 +691,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::FLOAT,
         .section = SettingSection::PLACEMENT,
         .label = "Edge-aware base gain",
-        .tooltip = "Edge-aware's gain on the change's base band, its large and gradual edits. Below 1 steadies NR's broadening at a "
-                   "reduced resolution; 1 leaves it unchanged. Applies when Upsampling = Edge-aware below Full.",
+        .tooltip = "Edge-aware's gain on the change's base band, its large and gradual edits. Below 1 steadies NR's broadening where the "
+                   "local grid is reduced; it fades in with local sampling density and leaves native-density regions unchanged. Applies below Full.",
         .min = 0.5,
         .max = 1.0,
         .flags = SLIDER_RANGE_ONLY,  // a shaping, not a state: it applies when the slider is released

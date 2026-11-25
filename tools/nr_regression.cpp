@@ -14,12 +14,49 @@
 #include "look/look_math.hpp"
 #include "nr/timeline.hpp"
 #include "sources/after_dlss_source.hpp"
+#include "sources/present_motion_ring.hpp"
 #include "testing/identity_host.hpp"
 
 using Microsoft::WRL::ComPtr;
 using namespace uplift;
 void Check(bool yes, const char* why) { if (!yes) throw std::runtime_error(why); }
 void Hr(HRESULT r) { if (FAILED(r)) throw std::runtime_error("D3D12 operation failed: " + std::to_string(r)); }
+
+void EdgeAwareDensityRegression() {
+  using color::EffectiveEdgeAwareBaseGain;
+  Check(EffectiveEdgeAwareBaseGain(.5f, 1.f) == 1.f, "Edge-aware attenuation changed a native-density plateau");
+  Check(std::abs(EffectiveEdgeAwareBaseGain(.5f, 1.125f) - .75f) < 1e-6f,
+        "Edge-aware attenuation did not fade linearly over its density ramp");
+  Check(EffectiveEdgeAwareBaseGain(.5f, 1.25f) == .5f, "Edge-aware attenuation did not reach its configured value");
+  Check(EffectiveEdgeAwareBaseGain(1.f, 4.f) == 1.f, "default Edge-aware gain changed under compression");
+  std::cout << "PASS Edge-aware base gain preserves native plateaus and fades in with local density\n";
+}
+
+void SceneCutRegression() {
+  using look::SceneCutDetected;
+  Check(!SceneCutDetected(0.f, 0.f, 0.f, 0.f, false), "first Look frame was treated as a scene cut");
+  Check(!SceneCutDetected(0.4f, 0.2f, 0.f, 0.2f, true), "small exposure drift was treated as a scene cut");
+  Check(SceneCutDetected(2.f, 0.2f, 0.f, 0.2f, true), "large mean-light scene cut was missed");
+  Check(SceneCutDetected(0.f, 1.1f, 0.f, 0.2f, true), "same-mean tonal-distribution cut was missed");
+  Check(!SceneCutDetected(0.f, 0.9f, 0.f, 0.2f, true), "small tonal-spread change was over-triggered");
+  std::cout << "PASS Look scene-cut signature: validity, exposure drift, mean cut and same-mean tonal cut\n";
+}
+
+void PresentMotionWriteSlots() {
+  const std::array<uint64_t, 4> frames = {8u, 5u, 6u, 7u};
+  const std::array<uint8_t, 4> writable = {0u, 1u, 1u, 0u};
+  Check(sources::PickPresentMotionWriteSlot(frames, writable, 0u) == 1u,
+        "busy preferred motion slot did not redirect to the oldest safe copy");
+  const std::array<uint64_t, 4> with_empty = {8u, 5u, 0u, 7u};
+  Check(sources::PickPresentMotionWriteSlot(with_empty, writable, 0u) == 2u,
+        "motion writer overwrote an old copy while an empty slot was available");
+  const std::array<uint8_t, 4> all_busy = {};
+  Check(!sources::PickPresentMotionWriteSlot(frames, all_busy, 0u), "motion writer selected a busy slot");
+  const std::array<uint8_t, 4> preferred_free = {1u, 1u, 1u, 0u};
+  Check(sources::PickPresentMotionWriteSlot(frames, preferred_free, 0u) == 0u,
+        "motion writer stopped preferring its natural ring slot");
+  std::cout << "PASS motion-copy writes redirect only to retired slots\n";
+}
 
 void RecordingBatches() {
   nr::Timeline timeline([] { return UINT64_MAX; }, [](auto*, auto) {}, [](auto, auto) { return true; });
@@ -61,8 +98,14 @@ void RecordingBatches() {
 void ProducerProofs() {
   struct Fences final : nr::QueueFences {
     uint64_t completed = 0u, signalled = 0u;
+    ID3D12CommandQueue* wait_queue = nullptr;
+    ID3D12CommandQueue* producer_queue = nullptr;
+    uint64_t wait_value = 0u;
     bool Signal(ID3D12CommandQueue*, uint64_t value) override { signalled = value; return true; }
     uint64_t Completed(ID3D12CommandQueue*) const override { return completed; }
+    bool EnqueueWait(ID3D12CommandQueue* consumer, ID3D12CommandQueue* producer, uint64_t value) override {
+      wait_queue = consumer; producer_queue = producer; wait_value = value; return true;
+    }
     bool Wait(ID3D12CommandQueue*, uint64_t value, std::chrono::milliseconds) override { return completed >= value; }
   };
   nr::Timeline timeline([] { return UINT64_MAX; }, [](auto*, auto) {}, [](auto, auto) { return true; });
@@ -81,6 +124,11 @@ void ProducerProofs() {
   Check(timeline.OrderedBefore(first.get(), producer) && !timeline.OrderedBefore(first.get(), other),
         "a copy submitted on this queue in an earlier frame was refused");
   timeline.StampThread(17u);
+  const auto queued_read = timeline.PrepareSubmissionRead(first.get(), other);
+  Check(queued_read.ordered && queued_read.gpu_wait_enqueued && progress->wait_queue == other && progress->producer_queue == producer &&
+            progress->wait_value == progress->signalled,
+        "a signalled cross-queue producer fence was not queued before its consumer");
+  Check(!timeline.OrderedBefore(first.get(), other), "queue ordering wait was mistaken for CPU fence completion");
   Check(timeline.OrderedBefore(first.get(), producer) && !timeline.OrderedBefore(first.get(), other), "producer queue ordering was not checked");
   progress->completed = progress->signalled; timeline.Poll();
   Check(timeline.OrderedBefore(first.get(), other), "completed producer proof did not survive token pruning");
@@ -111,6 +159,7 @@ void Lifetime() {
   done = true; t.Poll();
   const auto once = t.MarkNow();
   Check(!t.IsReusable(owned) && t.IsReusable(once), "unrelated executable list blocked a one-shot slot");
+  Check(!t.IsComplete(once) && t.IsExecutionComplete(once), "one-shot GPU read waited for an unrelated executable recording");
   const auto later = t.IssueToken();
   const auto later_mark = t.MarkNow(true);
   t.ReleaseRecordings({&later, 1}); t.Poll();
@@ -314,6 +363,47 @@ void LookHistory() {
   std::cout << "PASS " << cases << " GPU bit-exact compact Look history cases: radius, motion reprojection, reset and shaped output" << std::endl;
 }
 
+
+void LookSceneCutGpu() {
+  Gpu gpu;
+  constexpr nr::Size image{64u, 64u};
+  const look::Atlas atlas = look::MakeAtlas(image);
+  const uint32_t level = atlas.levels;
+  const nr::Size top = look::LevelSize(image, level);
+  const uint32_t base = look::LevelOffset(image, level);
+  const auto half = [](float f) { return DirectX::PackedVector::XMConvertFloatToHalf(f); };
+  std::vector<uint16_t> first(size_t(atlas.size.Pixels()) * 4u), second(first.size());
+  for (size_t i = 0u; i < first.size(); i += 4u) {
+    first[i + 3u] = half(0.f);
+    second[i + 3u] = half(0.f);
+  }
+  for (uint32_t y = 0u; y < top.height; ++y) for (uint32_t x = 0u; x < top.width; ++x) {
+    const size_t index = (size_t(y) * atlas.size.width + base + x) * 4u + 3u;
+    second[index] = half(((x + y) & 1u) ? 1.f : -1.f);  // same mean, changed coarse tonal spread
+  }
+  const auto bands = look::MakeBands(2.f, image.height, atlas.levels);
+  const auto history_size = look::LowHistorySize(atlas, 2.f);
+  auto gauss_a = gpu.Texture(atlas.size.width, atlas.size.height, DXGI_FORMAT_R16G16B16A16_FLOAT, first.data(), 8u);
+  auto gauss_b = gpu.Texture(atlas.size.width, atlas.size.height, DXGI_FORMAT_R16G16B16A16_FLOAT, second.data(), 8u);
+  auto old_history = gpu.Texture(history_size.width, history_size.height, DXGI_FORMAT_R16G16B16A16_FLOAT);
+  auto next_history = gpu.Texture(history_size.width, history_size.height, DXGI_FORMAT_R16G16B16A16_FLOAT);
+  const std::array<float, 4> zero{};
+  auto state = gpu.Texture(1u, 1u, DXGI_FORMAT_R32G32B32A32_FLOAT, zero.data(), 16u);
+  gpu.Barrier(state.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  color::StabilizePass pass{.gauss = gauss_a.Get(), .previous = old_history.Get(), .current = next_history.Get(), .state = state.Get(),
+                            .atlas = atlas, .bands = bands, .rate = .25f, .reset = true};
+  Check(gpu.color.RecordStabilize(gpu.list.Get(), 0u, pass), "initial Look cut-signature dispatch failed");
+  gpu.Submit();
+  pass.gauss = gauss_b.Get(); pass.previous = next_history.Get(); pass.current = old_history.Get(); pass.reset = false;
+  Check(gpu.color.RecordStabilize(gpu.list.Get(), 0u, pass), "same-mean Look cut-signature dispatch failed");
+  auto read = gpu.Readback(state.Get()); gpu.Submit();
+  void* mapped = nullptr; Hr(read.buffer->Map(0u, nullptr, &mapped));
+  const auto* values = static_cast<const float*>(mapped);
+  Check(values[1] > 0.5f, "GPU Look cut detector missed a same-mean tonal-spread change");
+  read.buffer->Unmap(0u, nullptr);
+  std::cout << "PASS GPU Look cut detector catches same-mean tonal-spread changes\n";
+}
+
 void DepthCopies() {
   Gpu gpu;
   constexpr UINT width = 31u, height = 29u;
@@ -429,6 +519,6 @@ void Pixels() {
 }
 
 int main() {
-  try { Lifetime(); ProducerProofs(); RecordingBatches(); ColorHistory(); Pixels(); LookHistory(); DepthCopies(); Timings(); return 0; }
+  try { EdgeAwareDensityRegression(); SceneCutRegression(); PresentMotionWriteSlots(); Lifetime(); ProducerProofs(); RecordingBatches(); ColorHistory(); Pixels(); LookHistory(); LookSceneCutGpu(); DepthCopies(); Timings(); return 0; }
   catch (const std::exception& e) { std::cerr << "FAIL " << e.what() << '\n'; return 1; }
 }

@@ -317,7 +317,7 @@ constexpr auto CHINESE = std::to_array<Translation>({
     {"Edge falloff (% of height)", "边缘衰减（画面高度百分比）"},
     {"Edge-aware", "边缘感知升采样"},
     {"Edge-aware base gain", "边缘感知基频增益"},
-    {"Edge-aware's gain on the change's base band, its large and gradual edits. Below 1 steadies NR's broadening at a reduced resolution; 1 leaves it unchanged. Applies when Upsampling = Edge-aware below Full.", "边缘感知对变化基频段（大而平缓的调整）的增益。低于 1 可减轻降分辨率下 NR 的画面扩张；1 表示不变。仅在“升采样”为“边缘感知”且低于全分辨率时生效。"},
+    {"Edge-aware's gain on the change's base band, its large and gradual edits. Below 1 steadies NR's broadening where the local grid is reduced; it fades in with local sampling density and leaves native-density regions unchanged. Applies below Full.", "边缘感知对变化基频段（大而平缓的调整）的增益。低于 1 可减轻局部降分辨率区域的 NR 扩张；效果随局部采样密度渐进增强，原生密度区域不变。仅在低于全分辨率时生效。"},
     {"Edit pass", "选择处理层"},
     {"Edit strength", "调整强度"},
     {"Enable", "启用"},

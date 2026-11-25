@@ -172,8 +172,13 @@ bool NrPipeline::MakeMotionCopies(size_t first, size_t end, nr::Size size) {
 
 void NrPipeline::RetireMotionCopies() {
   for (size_t index = 0u; index < motion_copies_.textures.size(); ++index) {
-    if (motion_copies_.textures[index] && !timeline_.IsComplete(motion_copies_.last_use[index])) {
-      timeline_.ReleaseAfter(motion_copies_.last_use[index], [retired = motion_copies_.textures[index]] {});
+    if (!motion_copies_.textures[index]) continue;
+    const Texture retired = motion_copies_.textures[index];
+    if (!timeline_.IsComplete(motion_copies_.last_write[index])) {
+      timeline_.ReleaseAfter(motion_copies_.last_write[index], [retired] {});
+    }
+    if (!timeline_.IsComplete(motion_copies_.last_read[index])) {
+      timeline_.ReleaseAfter(motion_copies_.last_read[index], [retired] {});
     }
   }
   motion_copies_ = {};
@@ -879,9 +884,20 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   nr::FrameInputs inputs = {.ui_correction = config_.present_ui_correction, .reset_hint = reset_hint};
   MotionSource motion_source = MotionSource::NONE;
   bool flip_y = false;
+  uint64_t gpu_waits = 0u;
+  uint64_t gpu_wait_failures = 0u;
   std::array<uint64_t, MOTION_COPY_SLOTS> copy_frames = {};
+  std::array<nr::Timeline::SubmissionStatus, MOTION_COPY_SLOTS> copy_status = {};
   for (size_t index = 0u; index < MOTION_COPY_SLOTS; ++index) {
-    if (timeline_.OrderedBefore(motion_copies_.producers[index].get(), timing_queue)) {
+    copy_status[index] = timeline_.InspectSubmission(motion_copies_.producers[index].get(), timing_queue);
+    // Foveated warps cannot use a prior frame's vectors. If this is the exact copy for this Present and its
+    // producer fence has been signalled, order the consumer queue after it instead of dropping current-frame MV.
+    if (!copy_status[index].ordered && motion_copies_.frames[index] == frame) {
+      copy_status[index] = timeline_.PrepareSubmissionRead(motion_copies_.producers[index].get(), timing_queue);
+      gpu_waits += (copy_status[index].gpu_wait_enqueued ? 1u : 0u);
+      gpu_wait_failures += (copy_status[index].gpu_wait_failed ? 1u : 0u);
+    }
+    if (copy_status[index].ordered) {
       copy_frames[index] = motion_copies_.frames[index];
     }
   }
@@ -891,7 +907,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   if (pick.slot) {
     const size_t copy = *pick.slot;
     inputs.motion = {.resource = motion_copies_.textures[copy].Get()};  // full subrect, scale (1, 1)
-    motion_copies_.last_use[copy] = slot_marks_[slot];
+    motion_copies_.last_read[copy] = slot_marks_[slot];
     motion_source = MotionSource::PRESENT_COPY;
   } else if (bridged_motion && target.dlss_motion_raw) {
     // Fold the raw D3D11 scale and flip into the warp rather than copying twice.
@@ -957,6 +973,8 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   if (motion_copies_.textures[0] || present_motion_counters_.evaluates != 0u) {
     PresentMotionCounters& counters = present_motion_counters_;
     ++counters.presents;
+    counters.gpu_waits += gpu_waits;
+    counters.gpu_wait_failures += gpu_wait_failures;
     if (!pick.slot) {
       ++counters.missed;
     } else if (pick.age == 0u) {
@@ -966,13 +984,32 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
     }
     counters.age_max = std::max(counters.age_max, pick.age);
     counters.resets += (inputs.reset_hint || motion_source != set_->present_motion ? 1u : 0u);
+    if (!pick.slot && counters.miss_sample.empty()) {
+      std::string sample = std::format("present-frame={} foveated={} pick=none; bridge={} raw={} bridge-age={} launchpad={} final-source={}; exposure='{}' factor={} metered={} probe={}; slots=[",
+          frame, foveated, bridged_motion, target.dlss_motion_raw, target.dlss_motion_age,
+          target.launchpad_motion.resource != nullptr, static_cast<uint32_t>(motion_source), ExposureLine(set_->exposure_report),
+          exposure.factor, exposure.metered, exposure.probe);
+      bool first = true;
+      for (size_t index = 0u; index < motion_copies_.slots; ++index) {
+        if (!first) sample += ";";
+        first = false;
+        const auto& status = copy_status[index];
+        sample += std::format("{}:frame={},proof={},ordered={},submit={},sameq={},fence={},ready={},gpuwait={},waitfail={},done={},replay={}",
+            index, motion_copies_.frames[index], status.has_proof, status.ordered, status.submitted_frame,
+            status.same_queue, status.fence, status.fence_ready, status.gpu_wait_enqueued, status.gpu_wait_failed, status.complete, status.replayed);
+      }
+      sample += "]";
+      counters.miss_sample = std::move(sample);
+    }
     const auto now = std::chrono::steady_clock::now();
     if (counters.since == std::chrono::steady_clock::time_point{}) {
       counters.since = now;
     } else if (now - counters.since >= std::chrono::seconds(1)) {
-      nr::Logf(nr::LogLevel::TRACE, "Direct3D 12: Present motion: {} copy attempts for {} presents; {} copies, skipped {} (input) {} (ring slot) {} (slot's last use); presents bound {} own, {} older, {} none; max copy age {}, max GPU lag {}; {} pipeline reset hints; latest jitter correction {} x {} px",
+      nr::Logf(nr::LogLevel::TRACE, "Direct3D 12: Present motion: {} copy attempts for {} presents; {} copies, skipped {} (input) {} (ring slot) {} (no writable slot); {} writes redirected; presents bound {} own, {} older, {} none; max copy age {}, max GPU lag {}; {} producer GPU waits ({} failed); {} pipeline reset hints; latest jitter correction {} x {} px{}{}",
                counters.evaluates, counters.presents, counters.copies, counters.skipped_input, counters.skipped_ring, counters.skipped_slot,
-               counters.own, counters.older, counters.missed, counters.age_max, counters.lag_max, counters.resets, counters.offset_x, counters.offset_y);
+               counters.slot_redirects, counters.own, counters.older, counters.missed, counters.age_max, counters.lag_max, counters.gpu_waits, counters.gpu_wait_failures,
+               counters.resets, counters.offset_x, counters.offset_y,
+               counters.miss_sample.empty() ? "" : "; miss sample: ", counters.miss_sample);
       counters = {.since = now};
     }
   }
@@ -1425,18 +1462,37 @@ bool NrPipeline::RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::Bou
     }
     motion_copies_.size = size;
   }
-  const size_t index = PresentMotionSlotOf(frame, motion_copies_.slots);
-  if (!timeline_.IsComplete(motion_copies_.last_use[index])) {
-    ++counters.skipped_slot;
-    // The GPU runs too far behind for the minimum motion ring: the ring grows once, its new copies made beside the first ones (none of those is freed or
-    // moved). This frame goes without its copy; its present binds an older one.
-    if (PresentMotionGrows(motion_copies_.slots, PresentMotionWrite::SLOT_BUSY) && MakeMotionCopies(motion_copies_.slots, MOTION_COPY_SLOTS, size)) {
-      nr::Logf(nr::LogLevel::INFO, "Direct3D 12: the GPU runs too far behind for four slots: DLSS's motion copies for Present grow from {} to {} slots",
-               motion_copies_.slots, MOTION_COPY_SLOTS);
-      motion_copies_.slots = MOTION_COPY_SLOTS;
+  const size_t preferred = PresentMotionSlotOf(frame, motion_copies_.slots);
+  std::array<uint8_t, MOTION_COPY_SLOTS> writable{};
+  const auto refresh_writable = [&](size_t first, size_t end) {
+    for (size_t candidate = first; candidate < end; ++candidate) {
+      // The writer's own game-list recording must be reset before this texture can be overwritten, and its GPU work must be complete.
+      // Unrelated earlier executable lists do not own this slot; a Present read is one-shot and needs only execution completion.
+      writable[candidate] = (timeline_.IsReusable(motion_copies_.last_write[candidate])
+                             && timeline_.IsExecutionComplete(motion_copies_.last_read[candidate])) ? 1u : 0u;
     }
+  };
+  refresh_writable(0u, motion_copies_.slots);
+  auto selected = PickPresentMotionWriteSlot(
+      std::span<const uint64_t>{motion_copies_.frames.data(), motion_copies_.slots},
+      std::span<const uint8_t>{writable.data(), motion_copies_.slots}, preferred);
+  if (!selected && PresentMotionGrows(motion_copies_.slots, PresentMotionWrite::SLOT_BUSY)
+      && MakeMotionCopies(motion_copies_.slots, MOTION_COPY_SLOTS, size)) {
+    const size_t previous_slots = motion_copies_.slots;
+    motion_copies_.slots = MOTION_COPY_SLOTS;
+    refresh_writable(previous_slots, motion_copies_.slots);  // new slots have no writer or reader
+    selected = PickPresentMotionWriteSlot(
+        std::span<const uint64_t>{motion_copies_.frames.data(), motion_copies_.slots},
+        std::span<const uint8_t>{writable.data(), motion_copies_.slots}, preferred);
+    nr::Logf(nr::LogLevel::INFO, "Direct3D 12: DLSS's motion copies for Present grow from {} to {} slots",
+             previous_slots, motion_copies_.slots);
+  }
+  if (!selected) {
+    ++counters.skipped_slot;
     return false;
   }
+  const size_t index = *selected;
+  if (index != preferred) ++counters.slot_redirects;
   CommitSlot(slot, true);
   ID3D12Resource* const target = motion_copies_.textures[index].Get();
   Transition(list, target, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1458,7 +1514,7 @@ bool NrPipeline::RecordMotionCopy(ID3D12GraphicsCommandList* list, const nr::Bou
   ++counters.copies;
   motion_copies_.frames[index] = frame;
   motion_copies_.producers[index] = producer;
-  motion_copies_.last_use[index] = slot_marks_[slot];
+  motion_copies_.last_write[index] = slot_marks_[slot];
   return true;
 }
 

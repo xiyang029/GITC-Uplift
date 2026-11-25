@@ -31,7 +31,8 @@ static const uint STABILIZE_DETAIL = UPLIFT_STABILIZE_DETAIL;
 static const uint STABILIZE_FLAG_RESET = UPLIFT_STABILIZE_FLAG_RESET;    // this frame starts the history afresh
 static const uint STABILIZE_FLAG_MOTION = UPLIFT_STABILIZE_FLAG_MOTION;   // Motion: reproject, and drop history where the image changed
 static const uint STABILIZE_FLAG_VECTORS = UPLIFT_STABILIZE_FLAG_VECTORS;  // t2 holds motion vectors; without them Motion is change-gated static
-static const float SCENE_CUT_STOPS = 1.5f;
+static const float SCENE_CUT_STOPS = UPLIFT_SCENE_CUT_MEAN_STOPS;
+static const float SCENE_CUT_SPREAD_STOPS = UPLIFT_SCENE_CUT_SPREAD_STOPS;  // same-mean cuts with a substantially different tonal spread
 
 Texture2D<float4> gauss_atlas : register(t0);
 Texture2D<float4> previous_texture : register(t1);  // last frame's history: the level atlas, or the detail texture
@@ -77,15 +78,22 @@ void main(uint3 id : SV_DispatchThreadID) {
     const uint2 top = LevelSize(image, levels);
     const int top_base = int(LevelOffset(image, levels));
     float sum = 0.f;
+    float sum_squared = 0.f;
     for (uint y = 0u; y < top.y; ++y) {
       for (uint x = 0u; x < top.x; ++x) {
-        sum += gauss_atlas.Load(int3(top_base + int(x), int(y), 0)).w;
+        const float key = gauss_atlas.Load(int3(top_base + int(x), int(y), 0)).w;
+        sum += key;
+        sum_squared += key * key;
       }
     }
-    const float mean = sum / float(top.x * top.y);
-    const float4 previous = state_texture[uint2(0, 0)];
-    const bool cut = (previous.z > 0.5f && abs(mean - previous.x) > SCENE_CUT_STOPS);
-    state_texture[uint2(0, 0)] = float4(mean, (cut ? 1.f : 0.f), 1.f, 0.f);
+    const float count = float(top.x * top.y);
+    const float mean = sum / count;
+    const float spread = sqrt(max(sum_squared / count - mean * mean, 0.f));
+    const float4 previous = state_texture[uint2(0, 0)];  // x: mean, y: cut, z: valid, w: tonal spread
+    const bool cut = (previous.z > 0.5f
+                      && (abs(mean - previous.x) > SCENE_CUT_STOPS
+                          || abs(spread - previous.w) > SCENE_CUT_SPREAD_STOPS));
+    state_texture[uint2(0, 0)] = float4(mean, (cut ? 1.f : 0.f), 1.f, spread);
     return;
   }
   if (mode == STABILIZE_DETAIL) {

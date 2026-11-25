@@ -7,9 +7,10 @@
 
 namespace uplift::sources {
 
-// DLSS's vectors are copied at the game's evaluate into the slot of the present that closes the frame
-// (PresentMotionSlotOf), and a slot is written only once the CPU sees its last reader complete. A present stamps the copy it binds, its own or an older
-// one, with its own mark, so an older read moves that slot's last use forward too. In the per-second line's terms, present P's mark
+// DLSS's vectors are copied at the game's evaluate for the present that closes the frame. Vulkan and D3D11 use the frame's indexed slot
+// (PresentMotionSlotOf); D3D12 prefers that slot and redirects to another retired slot when needed. A slot is written only once the CPU sees its last
+// reader complete. A present stamps the copy it binds, its own or an older one, with its own mark, so an older read moves that slot's last use forward too.
+// In the per-second line's terms, present P's mark
 // completes when the GPU passes frame value P, which is signalled at the start of present P+1. The evaluate for frame F runs with CurrentFrame F-1 and
 // lag L = CurrentFrame - CompletedFrame (at least 1: value F-1 is only signalled at present F), so the GPU has passed F-1-L, and the reader of slot
 // F % N, present F-N, is complete when L <= N-1: four slots keep every copy up to a lag of 3, eight up to 7.
@@ -32,6 +33,23 @@ static_assert(PRESENT_MOTION_MIN_SLOTS <= PRESENT_MOTION_SLOTS);
 
 // The slot a copy for `frame` is written to, in a ring of `slots`. Pure.
 [[nodiscard]] constexpr size_t PresentMotionSlotOf(uint64_t frame, size_t slots) { return static_cast<size_t>(frame % slots); }
+
+// Prefer the frame's natural slot, but use another slot whose writer and reader have both retired before dropping a copy.
+// Empty slots are preferred over old copies; otherwise overwrite the oldest available copy to preserve the newest fallback.
+[[nodiscard]] inline std::optional<size_t> PickPresentMotionWriteSlot(std::span<const uint64_t> frames,
+                                                                       std::span<const uint8_t> writable,
+                                                                       size_t preferred) {
+  if (frames.empty() || frames.size() != writable.size() || preferred >= frames.size()) return std::nullopt;
+  if (writable[preferred] != 0u) return preferred;
+  for (size_t index = 0u; index < frames.size(); ++index) {
+    if (writable[index] != 0u && frames[index] == 0u) return index;
+  }
+  std::optional<size_t> oldest;
+  for (size_t index = 0u; index < frames.size(); ++index) {
+    if (writable[index] != 0u && (!oldest || frames[index] < frames[*oldest])) oldest = index;
+  }
+  return oldest;
+}
 
 struct PresentMotionPick {
   std::optional<size_t> slot;  // none: no copy within the age limit
@@ -64,7 +82,7 @@ enum class PresentMotionWrite : uint8_t {
   SLOT_BUSY,  // the copy slot's last reader is not complete yet
 };
 
-// A ring of `slots` grows to PRESENT_MOTION_SLOTS after a copy skipped because its slot was still read. Pure.
+// A ring of `slots` may grow to PRESENT_MOTION_SLOTS when no slot is safe to write. Pure.
 [[nodiscard]] constexpr bool PresentMotionGrows(size_t slots, PresentMotionWrite write) {
   return write == PresentMotionWrite::SLOT_BUSY && slots < PRESENT_MOTION_SLOTS;
 }

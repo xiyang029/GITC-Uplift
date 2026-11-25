@@ -173,8 +173,6 @@ void BeforeFgVk::BeginHud(const HudPresentVk& hud, VkQueue queue, const VkPresen
   color::HudComposerVk* const composer = (hud_.reason == HudReason::USABLE ? ComposerFor(chain) : nullptr);
   if (composer != nullptr) composer->Retire(hud.input->Presents());
   if (hud_.reason != HudReason::USABLE) return;
-  const HudFrame* const unused = nullptr;
-  static_cast<void>(unused);
   const auto& tagged = *taken.frame;
   const color::HudComposerVk::Inputs inputs = {
       .back_buffer = frame->image.image, .format = chain.vk_format, .size = {chain.size.width, chain.size.height},

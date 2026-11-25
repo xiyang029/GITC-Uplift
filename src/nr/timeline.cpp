@@ -49,6 +49,12 @@ class D3D12QueueFences final : public QueueFences {
     const auto found = fences_.find(queue);
     return (found == fences_.end() ? 0u : found->second->GetCompletedValue());
   }
+  bool EnqueueWait(ID3D12CommandQueue* consumer, ID3D12CommandQueue* producer, uint64_t value) override {
+    const auto found = fences_.find(producer);
+    if (consumer == nullptr || producer == nullptr || found == fences_.end()) return false;
+    if (found->second->GetCompletedValue() >= value) return true;
+    return SUCCEEDED(consumer->Wait(found->second.Get(), value));
+  }
   bool Wait(ID3D12CommandQueue* queue, uint64_t value, std::chrono::milliseconds timeout) override {
     const auto found = fences_.find(queue);
     if (found == fences_.end() || found->second->GetCompletedValue() >= value) return true;
@@ -361,8 +367,18 @@ std::shared_ptr<Timeline::SubmissionProof> Timeline::TrackSubmission(uint64_t to
 }
 
 bool Timeline::OrderedBefore(const SubmissionProof* proof, ID3D12CommandQueue* consumer) const {
-  if (proof == nullptr) return false;
+  return InspectSubmission(proof, consumer).ordered;
+}
+
+Timeline::SubmissionStatus Timeline::InspectSubmission(const SubmissionProof* proof, ID3D12CommandQueue* consumer) const {
+  SubmissionStatus status;
+  if (proof == nullptr) return status;
   const std::shared_lock lock(tokens_mutex_);
+  status.has_proof = true;
+  status.submitted_frame = proof->submitted_frame_;
+  status.fence = proof->fence_;
+  status.complete = proof->complete_;
+  status.replayed = proof->replayed_;
   // A producer submitted to the consumer's own queue is ordered by submission: the queue runs lists in order, so the
   // consumer's list executes after it whatever the GPU has finished. A stamp is not needed for that -- but a submit is
   // not enough either: ReShade raises execute_command_list before the native call, so a list submitted within the
@@ -371,10 +387,37 @@ bool Timeline::OrderedBefore(const SubmissionProof* proof, ID3D12CommandQueue* c
   // the copy's list is submitted on the game's render thread, nothing stamps it before the same frame's present, and
   // the aged stamp takes 250 ms -- far past the copy's one-frame shelf life. Foreign queues still need completion.
   // A stamp names the queue and already orders it; a submission from an earlier frame proves the native call returned.
-  const bool same_queue = (proof->queue_ != nullptr && consumer != nullptr && proof->queue_ == consumer &&
-                           (proof->fence_ != 0u || proof->submitted_frame_ < CurrentFrame()));
-  return !proof->replayed_ && (proof->complete_ || same_queue ||
-      (proof->fence_ != 0u && fences_ != nullptr && fences_->Completed(proof->queue_) >= proof->fence_));
+  status.same_queue = (proof->queue_ != nullptr && consumer != nullptr && proof->queue_ == consumer &&
+                       (proof->fence_ != 0u || proof->submitted_frame_ < CurrentFrame()));
+  if (!proof->replayed_ && !proof->complete_ && !status.same_queue && proof->fence_ != 0u && fences_ != nullptr) {
+    status.fence_ready = fences_->Completed(proof->queue_) >= proof->fence_;
+  }
+  status.ordered = !proof->replayed_ && (proof->complete_ || status.same_queue || status.fence_ready);
+  return status;
+}
+
+Timeline::SubmissionStatus Timeline::PrepareSubmissionRead(const SubmissionProof* proof, ID3D12CommandQueue* consumer) {
+  SubmissionStatus status;
+  if (proof == nullptr || consumer == nullptr) return status;
+  const std::unique_lock lock(tokens_mutex_);
+  status.has_proof = true;
+  status.submitted_frame = proof->submitted_frame_;
+  status.fence = proof->fence_;
+  status.complete = proof->complete_;
+  status.replayed = proof->replayed_;
+  status.same_queue = (proof->queue_ != nullptr && proof->queue_ == consumer &&
+                       (proof->fence_ != 0u || proof->submitted_frame_ < CurrentFrame()));
+  if (!proof->replayed_ && !proof->complete_ && !status.same_queue && proof->fence_ != 0u && fences_ != nullptr) {
+    status.fence_ready = (fences_->Completed(proof->queue_) >= proof->fence_);
+  }
+  status.ordered = !proof->replayed_ && (proof->complete_ || status.same_queue || status.fence_ready);
+  if (!status.ordered && !proof->replayed_ && proof->queue_ != nullptr && proof->queue_ != consumer &&
+      proof->fence_ != 0u && fences_ != nullptr) {
+    status.gpu_wait_enqueued = fences_->EnqueueWait(consumer, proof->queue_, proof->fence_);
+    status.gpu_wait_failed = !status.gpu_wait_enqueued;
+    status.ordered = status.gpu_wait_enqueued;
+  }
+  return status;
 }
 
 uint64_t Timeline::IssueToken(std::chrono::steady_clock::time_point now) {
