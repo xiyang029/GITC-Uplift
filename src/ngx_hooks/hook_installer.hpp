@@ -39,6 +39,8 @@ struct EvaluateCall {
   ID3D12GraphicsCommandList* list = nullptr;  // on Vulkan, the VkCommandBuffer; on Direct3D 11, the ID3D11DeviceContext
   const NVSDK_NGX_Handle* handle = nullptr;
   const NVSDK_NGX_Parameter* parameters = nullptr;
+  // Optional game-native DLSS-NR panel overrides. The detour applies only keys already present in the game's block and restores them after the original call.
+  std::optional<nr::Controls> native_nr_controls;
   // Set by BeforeEvaluate: what DLSS reads as Color for this call only. On Vulkan an NVSDK_NGX_Resource_VK* (nr::AsResource), which the
   // detour writes into the block as a void*, as the game sets its own. On Direct3D 11 an ID3D11Resource* (nr::AsResource), which the
   // detour writes into the block with the ID3D11Resource* overload, as NGX_D3D11_EVALUATE_DLSS_EXT does, and puts back after the original.

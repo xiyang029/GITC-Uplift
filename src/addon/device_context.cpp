@@ -275,6 +275,10 @@ nr::SkipReason DeviceContext::PresentWorkSkip() const {
 sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES entry_state, TriggerPoint point,
                                           ID3D12Resource* motion, bool motion_is_dlss, float dlss_scale_x, float dlss_scale_y,
                                           nr::Rect dlss_motion_region, uint64_t dlss_motion_age, ID3D12Resource* shared_mask) {
+  if (settings_.uplift_after_native_nr || settings_.replace_native_nr) {
+    frame_ready_ = false;
+    return {};  // The game-owned DLSS-NR evaluate is the exclusive Uplift execution point.
+  }
   if (point == TriggerPoint::NONE || !frame_ready_) return {};
   frame_ready_ = false;
   ran_since_present_ = true;
@@ -425,6 +429,40 @@ void DeviceContext::NoteDlssFeature(uint64_t serial) {
   dlss_feature_serial_ = serial;
 }
 
+sources::PipelineResult DeviceContext::OnNativeNrEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
+                                                          std::chrono::steady_clock::time_point now, bool replacing_native) {
+  if (torn_down_ || device_lost_ || NoteDeviceRemoved(now)) return {.reason = nr::SkipReason::DEVICE_REMOVED};
+  if ((replacing_native ? !settings_.replace_native_nr : !settings_.uplift_after_native_nr)
+      || session_->State() != nr::SessionState::ACTIVE) return {.reason = nr::SkipReason::NR_OFF};
+  if (frame.output == nullptr || frame.output_region.width == 0u || frame.output_region.height == 0u) return {.reason = nr::SkipReason::INVALID_INPUT};
+  // Native DLSS-NR is expected to leave its output in UAV state on this same list. Reject outputs
+  // that cannot legally take the UAV hand-off used by AfterDlssSource/RecordUav.
+  if ((frame.output->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0u) {
+    native_nr_reset_owed_ = true;
+    return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
+  }
+  frame_size_ = {frame.output_region.width, frame.output_region.height};
+  const sources::WorkLayout layout = SettleLayout(frame_size_, Stage::AFTER_DLSS, now);
+  ApplyLookConfig(now, 0u);
+  sources::AfterDlssConfig config = DlssConfig(layout, 0u);
+  config.part.slice.first = 0u;
+  config.part.slice.count = nr::MAX_PASSES;
+  const sources::PipelineResult result = after_dlss_->Run(host, frame, frame.reset || native_nr_reset_owed_, config);
+  NoteResult(Stage::AFTER_DLSS, 0u, result);
+  if (result.recorded) {
+    native_nr_reset_owed_ = false;
+    last_game_list_recording_ = now;
+    last_dlss_token_ = result.token;
+  } else {
+    native_nr_reset_owed_ = true;
+  }
+  if (result.nr_applied && !logged_after_dlss_) {
+    logged_after_dlss_ = true;
+    nr::Log(nr::LogLevel::INFO, (replacing_native ? "NR trigger: replaced native DLSS-NR" : "NR trigger: after native DLSS-NR"));
+  }
+  return result;
+}
+
 sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                       std::chrono::steady_clock::time_point now) {
   if (!NoteMainEvaluate(frame, now)) {
@@ -432,6 +470,7 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
     return {.reason = nr::SkipReason::DEVICE_REMOVED};
   }
   NoteDlssFeature(frame.serial);
+  if (settings_.uplift_after_native_nr || settings_.replace_native_nr) return {.reason = nr::SkipReason::NONE};
   const std::optional<bool> before_reset = std::exchange(before_reset_, std::nullopt);  // this evaluate's, from BeforeDlssEvaluate
   const ngx_hooks::MotionJitterOffset jitter = present_jitter_.Update(frame);
   sources::DlssRecordingBatch recording_host(host, settings_.restore);
@@ -694,6 +733,7 @@ sources::AfterDlssConfig DeviceContext::DlssConfig(const sources::WorkLayout& la
 ID3D12Resource* DeviceContext::BeforeDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                   std::chrono::steady_clock::time_point now) {
   if (torn_down_ || device_lost_ || NoteDeviceRemoved(now)) return nullptr;
+  if (settings_.uplift_after_native_nr || settings_.replace_native_nr) return nullptr;
   NoteDlssFeature(frame.serial);
   if (placement_.placement != Placement::BEFORE_UPSCALING || dlss_idle_) return nullptr;
   frame_size_ = {frame.color_region.width, frame.color_region.height};

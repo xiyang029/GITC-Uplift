@@ -19,6 +19,7 @@
 #include "ngx_hooks/minhook_once.hpp"
 #include "nvsdk_ngx_defs_dlssg.h"
 #include "nr/d3d11_handles.hpp"
+#include "nr/keys.hpp"
 #include "nr/log.hpp"
 #include "nr/vk_handles.hpp"
 
@@ -348,6 +349,10 @@ class EvaluateSwaps {
       observer->BeforeEvaluate(call);
       // NGX takes the block as const, but it is the game's own mutable object, set again every frame.
       auto* const block = const_cast<NVSDK_NGX_Parameter*>(call->parameters);
+      if (call->api == NgxApi::D3D12 && call->native_nr_controls) {
+        native_block_ = block;
+        ApplyNativeNrControls(block, *call->native_nr_controls);
+      }
       if (call->hudless_action != HUDLESS_LEAVE && (call->api == NgxApi::D3D12 || call->api == NgxApi::VULKAN)) {
         hudless_owner_ = std::move(call->hudless_owner);
         hudless_.Apply(call->api, block, HUDLESS_KEY, call->hudless_action == HUDLESS_HIDE, call->hudless);
@@ -385,6 +390,7 @@ class EvaluateSwaps {
     }
   }
   ~EvaluateSwaps() {
+    RestoreNativeNrControls();
     if (block_ != nullptr) {
       switch (kind_) {
         case Kind::D3D12:   block_->Set(NVSDK_NGX_Parameter_Color, game_color_); break;
@@ -400,6 +406,57 @@ class EvaluateSwaps {
   EvaluateSwaps& operator=(const EvaluateSwaps&) = delete;
 
  private:
+  enum class NativeValueKind : uint8_t { FLOAT, UINT, INT };
+  struct NativeRestore {
+    const char* key = nullptr;
+    NativeValueKind kind = NativeValueKind::FLOAT;
+    float f = 0.f;
+    uint32_t u = 0u;
+    int32_t i = 0;
+  };
+  void ApplyNativeNrControls(NVSDK_NGX_Parameter* block, const nr::Controls& controls) {
+    const auto swap_float = [&](const char* key, float value) {
+      float old = 0.f;
+      if (NVSDK_NGX_SUCCEED(block->Get(key, &old))) {
+        block->Set(key, value);
+        native_restore_[native_restore_count_++] = {.key = key, .kind = NativeValueKind::FLOAT, .f = old};
+      }
+    };
+    const auto swap_uint = [&](const char* key, uint32_t value) {
+      uint32_t old = 0u;
+      if (NVSDK_NGX_SUCCEED(block->Get(key, &old))) {
+        block->Set(key, value);
+        native_restore_[native_restore_count_++] = {.key = key, .kind = NativeValueKind::UINT, .u = old};
+      }
+    };
+    const auto swap_int = [&](const char* key, int32_t value) {
+      int32_t old = 0;
+      if (NVSDK_NGX_SUCCEED(block->Get(key, &old))) {
+        block->Set(key, value);
+        native_restore_[native_restore_count_++] = {.key = key, .kind = NativeValueKind::INT, .i = old};
+      }
+    };
+    swap_float(nr::keys::INTENSITY, controls.intensity);
+    swap_float(nr::keys::LOCAL_TONE, controls.local_tone);
+    swap_float(nr::keys::LOCAL_STRUCTURE, controls.local_structure);
+    swap_float(nr::keys::SKIN_STRUCTURE, controls.skin_structure);
+    swap_uint(nr::keys::STYLE, controls.style);
+    // NGX games use both signed and unsigned integer representations for boolean DLSS-NR flags.
+    int32_t auto_mask = 0;
+    if (NVSDK_NGX_SUCCEED(block->Get(nr::keys::USE_AUTO_MASK, &auto_mask))) swap_int(nr::keys::USE_AUTO_MASK, controls.auto_mask ? 1 : 0);
+    else swap_uint(nr::keys::USE_AUTO_MASK, controls.auto_mask ? 1u : 0u);
+  }
+  void RestoreNativeNrControls() noexcept {
+    if (native_block_ == nullptr) return;
+    while (native_restore_count_ > 0u) {
+      const NativeRestore& restore = native_restore_[--native_restore_count_];
+      switch (restore.kind) {
+        case NativeValueKind::FLOAT: native_block_->Set(restore.key, restore.f); break;
+        case NativeValueKind::UINT: native_block_->Set(restore.key, restore.u); break;
+        case NativeValueKind::INT: native_block_->Set(restore.key, restore.i); break;
+      }
+    }
+  }
   enum class Kind : uint8_t { D3D12, D3D11, POINTER };  // the type the game's Color was read with, and is put back with
   NVSDK_NGX_Parameter* block_ = nullptr;
   Kind kind_ = Kind::D3D12;
@@ -407,6 +464,9 @@ class EvaluateSwaps {
   ID3D11Resource* game_color11_ = nullptr;
   ID3D11Resource* swapped11_ = nullptr;     // the bridge's texture DLSS reads, referenced until the swap ends (either branch)
   void* game_pointer_ = nullptr;
+  NVSDK_NGX_Parameter* native_block_ = nullptr;
+  std::array<NativeRestore, 6> native_restore_{};
+  size_t native_restore_count_ = 0u;
   // Members are destroyed in reverse order: restore the game's image before releasing Uplift's.
   std::shared_ptr<const void> hudless_owner_;
   ResourceSwap hudless_;

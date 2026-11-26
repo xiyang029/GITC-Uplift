@@ -1282,7 +1282,8 @@ bool DrawAdvancedTab(const OverlayView& view, Settings* settings, OverlayState* 
   changed |= DrawRows(view, settings, state, {"VramCheck", "BudgetMarginMB", "GraceSeconds", "AutoResume", "AutoRetry"});
   widgets::NextGap(style::BlockGap());
   widgets::GroupHeading("Runtime and logging");
-  changed |= DrawRows(view, settings, state, {"SnippetPath", "NgxHooks", "ForeignNr", "LogLevel", "ShowNvIndicator"});
+  changed |= DrawRows(view, settings, state, {"SnippetPath", "NgxHooks", "ForeignNr", "OverrideNativeNrParameters",
+                                             "UpliftAfterNativeNr", "ReplaceNativeNr", "LogLevel", "ShowNvIndicator"});
   if (settings->keep_faces) {
     widgets::NextGap(style::BlockGap());
     widgets::GroupHeading("Face mask tuning");

@@ -201,6 +201,9 @@ class DeviceContext {
   // add-on's lock. Records NR after DLSS when that is the chosen placement; otherwise notes the evaluate.
   sources::PipelineResult OnDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                          std::chrono::steady_clock::time_point now);
+  // Records Uplift NR after the game-owned DLSS-NR evaluate on that same command list.
+  sources::PipelineResult OnNativeNrEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
+                                             std::chrono::steady_clock::time_point now, bool replacing_native = false);
   // Before the hooked evaluate of this device's main handle, under the add-on's lock.
   // Records NR before upscaling when that is the chosen placement, and returns the texture DLSS must read
   // as Color for this one call (null: the game's own).
@@ -446,6 +449,7 @@ class DeviceContext {
   bool dlss_paused_ = false;  // no evaluate for DLSS_IDLE_MINIMUM, at any placement (Status's DLSS_PAUSED)
   bool dlss_latch_tripped_ = false;
   bool logged_after_dlss_ = false;  // "NR trigger: after DLSS" was logged in this activation
+  bool native_nr_reset_owed_ = true;
   // A submit-only thread's tokens age out only after Timeline's own
   // AGED_SUBMISSION_TIME, so the descriptor ring can stay fully busy for a while by design on that
   // engine shape. Tracks how long nr::SkipReason::DESCRIPTORS_BUSY has been the After-DLSS result, back to back, so

@@ -39,6 +39,13 @@ class NgxRouting {
   // The hidden DLSS-SR create overrides (DLSSQualityMode / DLSSAutoExposure): always empty (see
   // addon::ToSrOverrides), so the game's own choices stand; kept as the create-side seam.
   [[nodiscard]] virtual ngx_hooks::SrOverrides SrCreateOverrides() = 0;
+  // Native DLSS-NR controls are opt-in and independent from post-evaluate Uplift NR.
+  [[nodiscard]] virtual std::optional<nr::Controls> NativeNrParameterOverrides() = 0;
+  [[nodiscard]] virtual bool NativeNrFollowupEnabled() = 0;
+  [[nodiscard]] virtual bool NativeNrReplacementEnabled() = 0;
+  virtual bool TryReplaceNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list,
+                                          const ngx_hooks::DlssFrame& frame) = 0;
+  virtual void OnNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) = 0;
   // The ReShade device a game list was created on (Uplift's identity data), or null when untracked.
   [[nodiscard]] virtual const void* DeviceOf(ID3D12GraphicsCommandList* list) = 0;
   // The primary swap chain's size on `device`, for the main-handle choice; empty before its first present.
@@ -172,6 +179,9 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
  private:
   // HUD-less: what DLSS-G's evaluate does with DLSSG.HUDLess (design §6). Asked before the Before-upscaling gate.
   void DecideHudless(ngx_hooks::EvaluateCall* call);
+  // Read-only first-pass probe for a game-owned DLSS-NR evaluate. It records the DLSSNR contract
+  // before the runtime consumes it; it does not rewrite parameters or alter the game's result.
+  void ProbeNativeNr(ngx_hooks::EvaluateCall* call, const ngx_hooks::FeatureRecord& record);
   // The device of a hooked call's list, through the API's own routing (a VkCommandBuffer never reaches a Direct3D 12 lookup, nor a Direct3D 11 context a
   // Direct3D 12 or Vulkan one).
   [[nodiscard]] const void* DeviceOf(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list) const;
@@ -212,6 +222,7 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   std::atomic<int> d3d11_watching_{0};
   std::atomic<bool> foreign_d3d12_{false};
   std::atomic<bool> summary_logged_{false};
+  std::atomic<bool> native_nr_probe_logged_{false};
 };
 
 // The message DlssUnavailableReason returns for a latch read from the

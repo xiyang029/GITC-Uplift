@@ -5,8 +5,11 @@
 #include <d3d12.h>
 #include <vulkan/vulkan.h>
 
+#include <array>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "addon/submit_epoch.hpp"
@@ -18,6 +21,13 @@ namespace uplift::addon {
 
 // One game command list as Uplift sees it. It lives in ReShade's private data, and
 // its address in the native list's private data, so the NGX hook finds it from the list NGX was given.
+struct BarrierTraceRecord {
+  uint64_t resource = 0u;
+  uint64_t ordinal = 0u;
+  uint32_t before = UINT32_MAX;
+  uint32_t after = UINT32_MAX;
+};
+
 struct __declspec(uuid("3f2a9c64-8b0e-4f1d-9e57-c1a2b3d4e5f6")) ListState {
   reshade::api::command_list* list = nullptr;
   reshade::api::device* device = nullptr;
@@ -30,6 +40,12 @@ struct __declspec(uuid("3f2a9c64-8b0e-4f1d-9e57-c1a2b3d4e5f6")) ListState {
   // SubmitEpochs::AtReset at the list's last Reset (or creation); 0 never counts as a later call. Handed over like `tokens`, `first_token` and
   // `executed`: the game never resets a list while it executes it.
   uint64_t reset_epoch = NO_SUBMIT_EPOCH;
+  // Diagnostic-only ring of explicit ReShade-observed barriers. This is not a complete D3D12
+  // resource-state tracker (implicit promotion/decay and other queues are not represented).
+  std::array<BarrierTraceRecord, 128> barrier_trace{};
+  uint32_t barrier_trace_next = 0u;
+  uint32_t barrier_trace_count = 0u;
+  uint64_t barrier_trace_total = 0u;
 };
 
 // init_command_list: creates the list's state and stamps the native list with its address.
@@ -64,6 +80,12 @@ void SetTracking(bool on);
 [[nodiscard]] uint64_t TrackingEpoch();  // 0 while tracking is off
 // bind_pipeline, bind_descriptor_tables, push_constants, push_descriptors, execute_secondary_command_list.
 void RegisterTrackingEvents();
+void ResetBarrierTrace(ListState* state);
+void LogNativeNrBarrierTrace(ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* output,
+                             ID3D12Resource* depth, ID3D12Resource* motion, std::string_view phase);
+[[nodiscard]] bool NativeNrReplaceInputsReady(const ListState* tracked, ID3D12Resource* color,
+                                                   ID3D12Resource* output, ID3D12Resource* depth,
+                                                   ID3D12Resource* motion, std::string* reason);
 
 // One game list for an After-DLSS recording: native recording, ReShade replay, tokens on the list.
 class ReshadeDlssFrameHost final : public sources::DlssFrameHost {

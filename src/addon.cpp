@@ -373,6 +373,12 @@ class AddonRouting final : public addon::NgxRouting {
   ngx_hooks::SrOverrides DlssPresetOverrides() override;
   ngx_hooks::SrOverrides RrPresetOverrides() override;
   ngx_hooks::SrOverrides SrCreateOverrides() override;
+  std::optional<nr::Controls> NativeNrParameterOverrides() override;
+  bool NativeNrFollowupEnabled() override;
+  bool NativeNrReplacementEnabled() override;
+  bool TryReplaceNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list,
+                                  const ngx_hooks::DlssFrame& frame) override;
+  void OnNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) override;
   const void* DeviceOf(ID3D12GraphicsCommandList* list) override;
   nr::Size SwapchainSize(const void* device) override;
   bool IsOwnCode(const void* address) override;
@@ -694,6 +700,68 @@ ngx_hooks::SrOverrides AddonRouting::RrPresetOverrides() {
 ngx_hooks::SrOverrides AddonRouting::SrCreateOverrides() {
   const std::unique_lock lock(g_state->mutex);
   return addon::ToSrOverrides(g_state->settings);
+}
+std::optional<nr::Controls> AddonRouting::NativeNrParameterOverrides() {
+  const std::unique_lock lock(g_state->mutex);
+  if (!g_state->settings.override_native_nr_parameters) return std::nullopt;
+  return ui::ToControls(g_state->settings);
+}
+bool AddonRouting::NativeNrFollowupEnabled() {
+  const std::unique_lock lock(g_state->mutex);
+  return g_state->settings.enabled && g_state->settings.uplift_after_native_nr && !g_state->settings.replace_native_nr;
+}
+
+bool AddonRouting::NativeNrReplacementEnabled() {
+  const std::unique_lock lock(g_state->mutex);
+  return g_state->settings.enabled && g_state->settings.replace_native_nr;
+}
+
+bool AddonRouting::TryReplaceNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list,
+                                               const ngx_hooks::DlssFrame& frame) {
+  StampThisThread();
+  addon::ListState* const list_state = addon::FindListState(list);
+  std::string reason;
+  if (!addon::NativeNrReplaceInputsReady(list_state, frame.color, frame.output, frame.depth, frame.motion_vectors, &reason)) {
+    static std::atomic<bool> logged_unavailable{false};
+    if (!logged_unavailable.exchange(true, std::memory_order_relaxed)) {
+      nr::Logf(nr::LogLevel::INFO, "Native DLSS-NR replacement bypassed; native evaluate will run: {}", reason);
+    }
+    return false;
+  }
+  const std::unique_lock lock(g_state->mutex);
+  const HoldsLockForNr holds;
+  if (!g_state->settings.enabled || !g_state->settings.replace_native_nr) return false;
+  addon::DeviceContext* const context = ContextOf(static_cast<api::device*>(const_cast<void*>(device)));
+  if (context == nullptr) return false;
+  addon::ReshadeDlssFrameHost host(list_state);
+  const uplift::sources::PipelineResult result = context->OnNativeNrEvaluate(frame, host, std::chrono::steady_clock::now(), true);
+  NoteLatchIfTripped(g_state, context);
+  if (!result.nr_applied) {
+    static std::atomic<bool> logged_pipeline_skip{false};
+    if (!logged_pipeline_skip.exchange(true, std::memory_order_relaxed)) {
+      nr::Logf(nr::LogLevel::INFO, "Native DLSS-NR replacement did not complete (reason {}); native evaluate will run",
+               static_cast<uint32_t>(result.reason));
+    }
+    return false;
+  }
+  static std::atomic<bool> logged_replacement{false};
+  if (!logged_replacement.exchange(true, std::memory_order_relaxed)) {
+    nr::Log(nr::LogLevel::INFO, "Uplift replaced native DLSS-NR on the game's command list; native evaluate skipped (subsequent replacements are not logged)");
+  }
+  return true;
+}
+
+void AddonRouting::OnNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) {
+  StampThisThread();
+  addon::ListState* const list_state = addon::FindListState(list);
+  if (list_state == nullptr) return;
+  const std::unique_lock lock(g_state->mutex);
+  const HoldsLockForNr holds;
+  addon::DeviceContext* const context = ContextOf(static_cast<api::device*>(const_cast<void*>(device)));
+  if (context == nullptr) return;
+  addon::ReshadeDlssFrameHost host(list_state);
+  context->OnNativeNrEvaluate(frame, host, std::chrono::steady_clock::now());
+  NoteLatchIfTripped(g_state, context);
 }
 
 const void* AddonRouting::DeviceOf(ID3D12GraphicsCommandList* list) {
@@ -1688,6 +1756,7 @@ void OnResetCommandList(api::command_list* cmd_list) {
     list_state->first_token = 0u;
     list_state->executed = false;
     list_state->shadow.OnReset(addon::TrackingEpoch());  // 0 while tracking is off: unknown until the next Reset
+    addon::ResetBarrierTrace(list_state);
     list_state->reset_epoch = g_state->submit_epochs.AtReset();
   }
   UPLIFT_CATCH("reset_command_list", )
@@ -2196,7 +2265,8 @@ std::string BlockedReason(AddonState& state, DeviceEntry& entry) {
     const std::optional<std::chrono::steady_clock::time_point> last_evaluated =
         state.bridge.Registry().LastEvaluated(ngx_hooks::FeatureKind::NEURAL_RENDERING);
     foreign = addon::ForeignNrProducer({
-        .foreign_nr_evaluating = last_evaluated && now - *last_evaluated < addon::FOREIGN_NR_IDLE_MS,
+        .foreign_nr_evaluating = !state.settings.uplift_after_native_nr && !state.settings.replace_native_nr && last_evaluated
+                                 && now - *last_evaluated < addon::FOREIGN_NR_IDLE_MS,
         .renodx_marker = addon::IsEnvironmentMarkerSet(addon::RENODX_NR_MARKER),
     });
   }

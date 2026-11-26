@@ -1,31 +1,24 @@
 # AGENTS.md
 
-## Shell and tools
-
-- Use PowerShell 7 (`pwsh`); do not switch to `cmd.exe` or Windows PowerShell 5.1. Invoke the repository build script as documented below.
-- Search with `rg` or `fd`, not PowerShell's native search equivalents. For large files, locate code first and read only the relevant area (about 30 lines around a match).
-- In PowerShell, use backticks for escaping and `-eq` for string equality. Use `$true`/`$false` for booleans and `$env:NAME = "value"` for environment variables. Use Python for complex commands instead of dense one-liners.
+## Tools
+- PowerShell 7 (`pwsh`) only; never `cmd.exe` or PowerShell 5.1.
+- Search with `rg`/`fd`; in large files read only ~30 lines around a match.
+- Prefer Python for complex commands. PowerShell: backticks escape, `-eq` for strings, `$true`/`$false`, `$env:NAME = "value"`.
 
 ## Change discipline
+- List exact deletion targets and wait for confirmation; build and test afterwards.
+- Bug reports: state location and trigger first, fix only the confirmed issue.
+- Never edit vendored code to silence pre-existing warnings.
 
-- Before deleting anything, list the exact targets and wait for user confirmation. After an approved deletion, build and test.
-- For bug reports, state the location and trigger condition first; limit changes to the confirmed issue.
-- Do not edit vendored code to silence pre-existing warnings.
+## Build
+- From the repo root: `.\build.cmd release`. Must exit 0 and produce a `gitc-uplift.addon64` newer than the edits; shaders build in the same run. Also `debug`, `release-x86`.
+- `.hpp`/`.hlsli`-only changes: touch a `.cpp` in the same target first, since localized `/showIncludes` hides them from Ninja.
 
-## Build verification
-
-- From the repository root, run `.\build.cmd release` in PowerShell 7. It must exit with code 0 and produce a `gitc-uplift.addon64` newer than the edits. Shaders build in the same run. `debug` and `release-x86` are also available.
-- For `.hpp`- or `.hlsli`-only changes, touch a `.cpp` in the same target before building; localized `/showIncludes` prevents Ninja from tracking these dependencies.
-
-## XMX compatibility
-
-Preserve the inputs to `libxess_fg.dll` 1.3.1.78:
-
-- In `src/xmx/vendor/`, only `#include` lines may differ from upstream.
-- In `src/xmx/generator.hpp`, keep `InitParams`, `Input`, `FrameData`, and `ExecuteParams` byte-identical, including comments. Do not change their `static_assert`s or the `k*Rva`/`kKnownTimestamp` constants.
-- Keep upstream's `init.*`, `execute.*`, and `data.*` assignments before `kInitRva`/`kExecuteRva` unchanged. Optimize around the calls: lifetime, barriers, copies, and `src/xmx/hook.cpp`.
+## XMX (`libxess_fg.dll` 1.3.1.78 ABI)
+- `src/xmx/vendor/`: only `#include` lines may differ from upstream.
+- `src/xmx/generator.hpp`: `InitParams`, `Input`, `FrameData`, `ExecuteParams` byte-identical (comments too); do not touch their `static_assert`s or `k*Rva`/`kKnownTimestamp`.
+- Keep upstream `init.*`/`execute.*`/`data.*` assignments before `kInitRva`/`kExecuteRva` unchanged; optimize lifetime, barriers, copies, and `src/xmx/hook.cpp` around the calls.
 
 ## References
-
-- [XMX upstream port log](docs/xmx-upstream-port.md)
-- [XeFG input sizes](docs/xefg-input-sizes.md): read before changing input sizes or frame-generation eligibility.
+- `docs/xmx-upstream-port.md` — XMX upstream port log.
+- `docs/xefg-input-sizes.md` — read before changing input sizes or frame-generation eligibility.

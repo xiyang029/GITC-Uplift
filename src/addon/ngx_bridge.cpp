@@ -12,9 +12,15 @@
 #include "nvsdk_ngx_defs_dlssg.h"
 #include "text/hudless_messages.hpp"
 #include "nr/d3d11_handles.hpp"
+#include "nr/keys.hpp"
 #include "nr/log.hpp"
 
 namespace uplift::addon {
+
+// Diagnostic entry point implemented beside the command-list state tracker. Kept forward-declared
+// here so the NGX core target does not depend on ReShade/ImGui headers.
+void LogNativeNrBarrierTrace(ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* output,
+                             ID3D12Resource* depth, ID3D12Resource* motion, std::string_view phase);
 namespace {
 
 // HUD-less (design §6): DLSS-G's images in its evaluate block. UI alpha is read before UI colour, as the tags are.
@@ -214,6 +220,25 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
       }
     }
   }
+  // First step toward native-NR routing: observe the game's actual DLSSNR parameter contract without
+  // changing its evaluate. Keep this D3D12-only: Uplift's NR feature/runtime currently records D3D12 work.
+  if (call->api == ngx_hooks::NgxApi::D3D12 && call->parameters != nullptr && call->handle != nullptr) {
+    if (const std::optional<ngx_hooks::FeatureRecord> native_nr = registry_.Find(call->handle);
+        native_nr && ngx_hooks::KindOf(native_nr->feature) == ngx_hooks::FeatureKind::NEURAL_RENDERING) {
+      ProbeNativeNr(call, *native_nr);
+      call->native_nr_controls = routing_.NativeNrParameterOverrides();
+      if (routing_.NativeNrReplacementEnabled()) {
+        const void* const device = routing_.DeviceOf(call->list);
+        if (device != nullptr) {
+          const ngx_hooks::DlssFrame frame = ngx_hooks::CaptureNativeNrFrame(*call->parameters, call->handle, *native_nr);
+          if (routing_.TryReplaceNativeNrEvaluate(device, call->list, frame)) {
+            call->skip_original = true;
+            return;  // Uplift recorded a complete replacement; otherwise the native evaluate remains untouched.
+          }
+        }
+      }
+    }
+  }
   // The live DLSS preset swap (addon/dlss_swap.hpp): the panel's DLSSPreset<Mode> choices, applied by
   // evaluating Uplift's own feature instead of the game's. Runs whatever pre-upscaling does -- it needs
   // no watching context -- and only on the game's main upscaler handle, like the capture below: any
@@ -259,6 +284,35 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
   call->color = routing_.BeforeMainEvaluate(device, call->list, ngx_hooks::CaptureDlssFrame(*call->parameters, call->handle, *record));
 }
 
+void NgxBridge::ProbeNativeNr(ngx_hooks::EvaluateCall* call, const ngx_hooks::FeatureRecord& record) {
+  if (native_nr_probe_logged_.exchange(true, std::memory_order_relaxed)) return;
+  const NVSDK_NGX_Parameter& p = *call->parameters;
+  const auto resource = [&p](const char* key) {
+    ID3D12Resource* const value = ngx_hooks::ReadResource(p, key);
+    if (value == nullptr) return std::string("none");
+    const D3D12_RESOURCE_DESC desc = value->GetDesc();
+    return std::format("{}x{} fmt {} flags {:#x} ptr {}", desc.Width, desc.Height, static_cast<uint32_t>(desc.Format),
+                       static_cast<uint32_t>(desc.Flags), static_cast<const void*>(value));
+  };
+  const auto number = [&p](const char* key) { return ngx_hooks::ReadUint(p, key).value_or(UINT32_MAX); };
+  const auto integer = [&p](const char* key) { return ngx_hooks::ReadInt(p, key).value_or(INT32_MIN); };
+  const auto scalar = [&p](const char* key) { return ngx_hooks::ReadFloat(p, key).value_or(-9999.f); };
+  nr::Logf(nr::LogLevel::INFO,
+           "Native DLSS-NR evaluate probe (pre-override): handle {}, serial {}, device {}, list {}, declared {}x{}, input [size/format/flags/resource {}], output [size/format/flags/resource {}], depth {}, motion {}, control mask {}, backbuffer {}, UI {}, UI alpha {}; preset {}, enabled {}, UI correction {}, reset {}, depth inverted {}, style {}, intensity {}, local tone {}, local structure {}, skin structure {}, motion scale {}x{} (missing unsigned/signed values are max/min, missing floats=-9999)",
+           static_cast<const void*>(call->handle), record.serial, record.device, static_cast<const void*>(call->list),
+           number(nr::keys::WIDTH), number(nr::keys::HEIGHT), resource(nr::keys::COLOR.resource), resource(nr::keys::OUTPUT.resource),
+           resource(nr::keys::DEPTH.resource), resource(nr::keys::MVEC.resource), resource(nr::keys::CONTROL_MASK.resource),
+           resource(nr::keys::BACKBUFFER.resource), resource(nr::keys::UI.resource), resource(nr::keys::UI_ALPHA.resource),
+           number(nr::keys::PRESET), integer(nr::keys::ENABLED), integer(nr::keys::UI_CORRECTION), integer(nr::keys::RESET),
+           integer(nr::keys::DEPTH_INVERTED), number(nr::keys::STYLE), scalar(nr::keys::INTENSITY), scalar(nr::keys::LOCAL_TONE),
+           scalar(nr::keys::LOCAL_STRUCTURE), scalar(nr::keys::SKIN_STRUCTURE), scalar(nr::keys::MVEC_SCALE_X),
+           scalar(nr::keys::MVEC_SCALE_Y));
+  LogNativeNrBarrierTrace(call->list, ngx_hooks::ReadResource(p, nr::keys::COLOR.resource),
+                          ngx_hooks::ReadResource(p, nr::keys::OUTPUT.resource),
+                          ngx_hooks::ReadResource(p, nr::keys::DEPTH.resource),
+                          ngx_hooks::ReadResource(p, nr::keys::MVEC.resource), "before native evaluate");
+}
+
 void NgxBridge::OnColorSwapRejected(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* /*handle*/) {
   // BeforeEvaluate already gated this call's handle on the main SuperSampling (or allowed Ray Reconstruction) handle before it ever set
   // call->color, so EvaluateSwaps only reaches here for that same handle: no need to re-check the registry.
@@ -294,6 +348,14 @@ void NgxBridge::AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* 
     const std::optional<ngx_hooks::FeatureRecord> record = registry_.Find(handle);
     if (!record) {
       NoteD3D12Evaluate(D3D12Route::UNKNOWN_HANDLE, list, handle, result, nullptr, nullptr, nullptr);
+      return;
+    }
+    if (ngx_hooks::KindOf(record->feature) == ngx_hooks::FeatureKind::NEURAL_RENDERING) {
+      NoteD3D12Evaluate(D3D12Route::NOT_UPSCALER, list, handle, result, &*record, nullptr, nullptr);
+      if (parameters == nullptr || !routing_.NativeNrFollowupEnabled()) return;
+      const void* const device = routing_.DeviceOf(list);
+      if (device == nullptr) return;
+      routing_.OnNativeNrEvaluate(device, list, ngx_hooks::CaptureNativeNrFrame(*parameters, handle, *record));
       return;
     }
     if (ngx_hooks::KindOf(record->feature) != ngx_hooks::FeatureKind::UPSCALER) {

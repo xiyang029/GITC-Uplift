@@ -297,6 +297,9 @@ struct Settings {
   StateRestore state_restore = StateRestore::FULL;
   NgxHooksMode ngx_hooks = NgxHooksMode::AUTO;
   ForeignNrMode foreign_nr = ForeignNrMode::YIELD;
+  bool override_native_nr_parameters = false;  // apply the panel NR controls to the game-owned DLSS-NR evaluate
+  bool uplift_after_native_nr = false;          // exclusive Uplift stage after the game-owned DLSS-NR evaluate
+  bool replace_native_nr = false;               // run Uplift at the native DLSS-NR call site and skip it on success
   VulkanNrMode vulkan_nr = VulkanNrMode::NATIVE;  // Plan 19
   ResolutionMode resolution_mode = ResolutionMode::FULL;  // user ruling: Full by default
   float resolution_scale = 100.f;                         // Custom: % of the output's width, 25-100

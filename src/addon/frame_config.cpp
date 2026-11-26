@@ -79,6 +79,8 @@ FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::Controls
       .foveation_edge_x = settings.foveation_edge_x,
       .foveation_edge_y = settings.foveation_edge_y,
       .pre_upscale = settings.pre_upscale,
+      .uplift_after_native_nr = settings.uplift_after_native_nr,
+      .replace_native_nr = settings.replace_native_nr,
       .look = LookConfigFrom(settings, coalescer->LaterPasses(settings, inputs.drag.pass_slider, now)),
       .launchpad_motion = (settings.motion_vectors == ui::MotionVectorSource::AUTO || settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD
                            || settings.motion_vectors == ui::MotionVectorSource::LUMENITE),

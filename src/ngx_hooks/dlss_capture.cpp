@@ -5,6 +5,7 @@
 
 #include "ngx_hooks/ngx_parameters.hpp"
 #include "nr/d3d11_handles.hpp"
+#include "nr/keys.hpp"
 
 namespace uplift::ngx_hooks {
 
@@ -56,6 +57,39 @@ DlssFrame CaptureWith(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Han
 
 DlssFrame CaptureDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record) {
   return CaptureWith(parameters, handle, record, &ReadResource);
+}
+
+DlssFrame CaptureNativeNrFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record) {
+  const auto resource = [&parameters](const char* key) { return ReadResource(parameters, key); };
+  const auto base = [&parameters](const char* key) { return ReadUint(parameters, key).value_or(0u); };
+  const auto region = [&](const nr::keys::Resource& key, ID3D12Resource* image) {
+    uint32_t width = base(key.subrect.width), height = base(key.subrect.height);
+    if ((width == 0u || height == 0u) && image != nullptr) {
+      const D3D12_RESOURCE_DESC desc = image->GetDesc();
+      if (width == 0u) width = static_cast<uint32_t>(desc.Width);
+      if (height == 0u) height = desc.Height;
+    }
+    return nr::Rect{base(key.subrect.base_x), base(key.subrect.base_y), width, height};
+  };
+  const auto scale = [&parameters](const char* key) {
+    const std::optional<float> value = ReadFloat(parameters, key);
+    return value && std::isfinite(*value) && *value != 0.f ? *value : 1.f;
+  };
+  ID3D12Resource* const color = resource(nr::keys::COLOR.resource);
+  ID3D12Resource* const output = resource(nr::keys::OUTPUT.resource);
+  ID3D12Resource* const motion = resource(nr::keys::MVEC.resource);
+  ID3D12Resource* const depth = resource(nr::keys::DEPTH.resource);
+  DlssFrame frame = {
+      .handle = handle, .feature = record.feature, .snapshot = record.snapshot, .serial = record.serial,
+      .color = color, .output = output, .motion_vectors = motion, .depth = depth,
+      .mv_scale_x = scale(nr::keys::MVEC_SCALE_X), .mv_scale_y = scale(nr::keys::MVEC_SCALE_Y),
+      .reset = (ReadInt(parameters, nr::keys::RESET).value_or(0) != 0),
+      .render = record.snapshot.render,
+      .color_region = region(nr::keys::COLOR, color), .motion_region = region(nr::keys::MVEC, motion),
+      .depth_region = region(nr::keys::DEPTH, depth), .output_region = region(nr::keys::OUTPUT, output),
+  };
+  if (frame.render.Empty()) frame.render = {frame.color_region.width, frame.color_region.height};
+  return frame;
 }
 
 DlssFrame CaptureD3D11DlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle, const FeatureRecord& record) {

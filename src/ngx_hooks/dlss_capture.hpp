@@ -37,6 +37,9 @@ struct DlssFrame {
 
 [[nodiscard]] DlssFrame CaptureDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle,
                                          const FeatureRecord& record);
+// Capture a D3D12 game-owned DLSS-NR evaluate from its DLSSNR.* resource namespace.
+[[nodiscard]] DlssFrame CaptureNativeNrFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle,
+                                              const FeatureRecord& record);
 
 // CaptureDlssFrame for a Direct3D 11 block, whose resources NGX_D3D11_EVALUATE_DLSS_EXT sets as ID3D11Resource*: each is read as one
 // (else as a void*) and carried punned (nr/d3d11_handles.hpp), never dereferenced. Regions the block leaves unset stay at the create-time sizes; the
