@@ -174,10 +174,11 @@ struct LayoutTarget {
 // The time since a group's last recording (none for its first), which the stabiliser and the governor take as their frame time; `last` becomes `now`.
 [[nodiscard]] inline std::optional<float> FrameSecondsSince(std::optional<std::chrono::steady_clock::time_point>& last,
                                                             std::chrono::steady_clock::time_point now) {
-  std::optional<float> seconds;
-  if (last) {
-    seconds = std::chrono::duration<float>(now - *last).count();  // the pipeline clamps it
+  if (!last) {
+    last = now;
+    return std::nullopt;
   }
+  const float seconds = std::chrono::duration<float>(now - *last).count();  // the pipeline clamps it
   last = now;
   return seconds;
 }

@@ -12,6 +12,7 @@
 #include <vector>
 #include "color/color_pipeline.hpp"
 #include "look/look_math.hpp"
+#include "nr/foveation.hpp"
 #include "nr/timeline.hpp"
 #include "sources/after_dlss_source.hpp"
 #include "sources/present_motion_ring.hpp"
@@ -21,6 +22,14 @@ using Microsoft::WRL::ComPtr;
 using namespace uplift;
 void Check(bool yes, const char* why) { if (!yes) throw std::runtime_error(why); }
 void Hr(HRESULT r) { if (FAILED(r)) throw std::runtime_error("D3D12 operation failed: " + std::to_string(r)); }
+
+void FoveationPercentOverflowRegression() {
+  const uint32_t largest = UINT32_MAX;
+  const nr::foveation::Params params = nr::foveation::FromPercent(100u, 100u, 100u, 100u, 100u, 100u, largest, largest);
+  Check(params.center_width == largest && params.center_height == largest && params.falloff_x == largest && params.falloff_y == largest,
+        "100% foveation shares overflowed at the largest dimension");
+  std::cout << "PASS foveation percentages remain valid at the largest dimension\n";
+}
 
 void EdgeAwareDensityRegression() {
   using color::EffectiveEdgeAwareBaseGain;
@@ -519,6 +528,6 @@ void Pixels() {
 }
 
 int main() {
-  try { EdgeAwareDensityRegression(); SceneCutRegression(); PresentMotionWriteSlots(); Lifetime(); ProducerProofs(); RecordingBatches(); ColorHistory(); Pixels(); LookHistory(); LookSceneCutGpu(); DepthCopies(); Timings(); return 0; }
+  try { FoveationPercentOverflowRegression(); EdgeAwareDensityRegression(); SceneCutRegression(); PresentMotionWriteSlots(); Lifetime(); ProducerProofs(); RecordingBatches(); ColorHistory(); Pixels(); LookHistory(); LookSceneCutGpu(); DepthCopies(); Timings(); return 0; }
   catch (const std::exception& e) { std::cerr << "FAIL " << e.what() << '\n'; return 1; }
 }

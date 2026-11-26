@@ -67,7 +67,7 @@ struct Params {
 inline Params FromPercent(uint32_t width_pct, uint32_t height_pct, uint32_t falloff_x_pct, uint32_t falloff_y_pct,
                           uint32_t edge_x_pct, uint32_t edge_y_pct, uint32_t out_width, uint32_t out_height) {
   const auto pixels = [](uint32_t pct, uint32_t full) {
-    return (std::clamp(pct, 0u, 100u) * full + 50u) / 100u;  // rounded to the nearest pixel
+    return static_cast<uint32_t>((uint64_t{std::clamp(pct, 0u, 100u)} * full + 50u) / 100u);  // rounded to the nearest pixel
   };
   return {pixels(width_pct, out_width), pixels(height_pct, out_height), pixels(falloff_x_pct, out_height),
           pixels(falloff_y_pct, out_height), static_cast<float>(edge_x_pct) * 0.01f,
@@ -78,13 +78,11 @@ inline Params FromPercent(uint32_t width_pct, uint32_t height_pct, uint32_t fall
 inline Params MapToWork(const Params& params, uint32_t out_width, uint32_t out_height, uint32_t work_width, uint32_t work_height) {
   const double sx = (out_width == 0u ? 1.0 : static_cast<double>(work_width) / static_cast<double>(out_width));
   const double sy = (out_height == 0u ? 1.0 : static_cast<double>(work_height) / static_cast<double>(out_height));
-  Params work = params;
-  work.center_width = static_cast<uint32_t>(std::lround(params.center_width * sx));
-  work.center_height = static_cast<uint32_t>(std::lround(params.center_height * sy));
   // Each axis carries its own fall-off, so a shorter vertical one is not dragged back to the horizontal's length.
-  work.falloff_x = static_cast<uint32_t>(std::lround(params.falloff_x * sx));
-  work.falloff_y = static_cast<uint32_t>(std::lround(params.falloff_y * sy));
-  return work;
+  return {static_cast<uint32_t>(std::lround(params.center_width * sx)),
+          static_cast<uint32_t>(std::lround(params.center_height * sy)),
+          static_cast<uint32_t>(std::lround(params.falloff_x * sx)),
+          static_cast<uint32_t>(std::lround(params.falloff_y * sy)), params.edge_x, params.edge_y};
 }
 
 // The exact values the shaders decode from one axis dword.
