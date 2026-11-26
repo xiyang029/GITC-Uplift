@@ -79,12 +79,12 @@ bool Failed();                              // a pair failed half-way since the 
 // first expand). SkipPair: the runtime's next feed-forward pair was left out; the pair after it is the next block's.
 void RuntimeLaunches(ID3D12GraphicsCommandList* commands, unsigned launches, unsigned sourceTokens = 0);
 // The numbered set of the evaluations recorded from now on (a pass-in-one model: 2..7): its own pairs, when the asset
-// folder has <model folder>/ffn_v2_set<n>.bin (the layout of ffn_v2.bin). kDefaultSet, or a set without that file:
-// the first set or the trained one, as Options::trained says.
+// folder has <model folder>/ffn_v2_set<n>.bin (the layout of ffn_v2.bin). kDefaultSet selects the first or trained
+// records, as Options::trained says. A missing requested set is refused before the pair's first kernel.
 constexpr unsigned kDefaultSet = ~0u;
 void UseSet(unsigned set);
 // Are this set's weight files all there? Reports the missing file relative to the asset directory.
-bool SetComplete(unsigned set, std::string* missing);
+bool SetComplete(unsigned set, std::string* missing, bool modelB = false);
 struct Work { unsigned long long pairs, faults; };
 Work CompletedWork();  // pairs replaced and pairs left to the runtime or run with another set's weights
 void SkipPair(ID3D12GraphicsCommandList* commands);

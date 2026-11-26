@@ -24,6 +24,8 @@ struct OverlayView {
   std::string dlss_live_line;       // the mode, its preset, and a driver override that wins over it
   std::string rr_live_line;         // Ray Reconstruction's preset, when the game runs RR
   std::string fg_live_line;         // the frame-generation model preset, and whether it landed live
+  std::string fg_hud_inputs_line;
+  std::string fg_hud_tags_line;
   std::string fg_multiplier_line;   // the accepted count, or Dynamic MFG's ownership of it
   std::string dynamic_mfg_line;     // in force, or which gate holds it back
   std::string reflex_live_line;     // the mode and cap the driver accepted

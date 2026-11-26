@@ -375,8 +375,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::MASK,
         .label = "UI correction",
-        .tooltip = "Before Framegen only. On: NR runs on the game's HUD-less image, so the HUD is not changed; needs a game that "
-                   "gives frame generation that image and the HUD's opacity. Auto, Off: it is hidden instead",
+        .tooltip = "Direct3D 12 Present or Before Framegen. On: NR runs on the game's HUD-less image, so the HUD is not changed; needs HUD-less "
+                   "and HUD opacity tags, even with frame generation off. Auto, Off: the HUD-less image is hidden from frame generation instead",
         .choices = UI_CORRECTION_MODES,
         .get = [](const Settings& s) { return Index(s.ui_correction); },
         .set = [](Settings& s, double v) { s.ui_correction = FromIndex<UiCorrection>(v); },
@@ -1085,6 +1085,15 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .choices = FG_MULTIPLIERS,
         .get = [](const Settings& s) { return static_cast<double>(s.fg_multiplier); },
         .set = [](Settings& s, double v) { s.fg_multiplier = FromIndex<FgMultiplierOverride>(v); },
+    },
+    {
+        .key = "FGHudInputsOnly",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::DLSS_REFLEX,
+        .label = "HUD inputs only (experimental)",
+        .tooltip = "Keep frame generation enabled in the game's menu. Uplift submits real Off to the Streamline backend while continuing to collect HUD-less and UI opacity tags. The game may stop providing them when the backend is off. Overrides multiplier, Dynamic MFG and XMX; disabling restores the game's latest request. UI correction On uses valid tagged inputs at Present.",
+        .get = [](const Settings& s) { return Flag(s.fg_hud_inputs_only); },
+        .set = [](Settings& s, double v) { s.fg_hud_inputs_only = v != 0.0; },
     },
     // NVIDIA Dynamic MFG (2026-10-25, addon/sl_fg_hooks.hpp): submit DLSSGMode::eDynamic and let
     // NVIDIA's provider own the multiplier. Only the release-supported Streamline/DLSS-G pairs

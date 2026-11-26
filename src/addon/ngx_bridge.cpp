@@ -11,6 +11,7 @@
 #include "ngx_hooks/ngx_parameters.hpp"
 #include "nvsdk_ngx_defs_dlssg.h"
 #include "text/hudless_messages.hpp"
+#include "addon/sl_fg_hooks.hpp"
 #include "nr/d3d11_handles.hpp"
 #include "nr/keys.hpp"
 #include "nr/log.hpp"
@@ -204,6 +205,10 @@ void NgxBridge::DecideHudless(ngx_hooks::EvaluateCall* call) {
 }
 
 void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
+  if (slfg::HudInputsOnlyWanted() || slfg::HudInputsOnlyActive()) {
+    const auto feature = registry_.Find(call->handle);
+    if (feature && ngx_hooks::KindOf(feature->feature) == ngx_hooks::FeatureKind::FRAME_GENERATION) slfg::NoteFgEvaluate();
+  }
   // The XMX mode (src/xmx/): the game's own DLSS-G, which Streamline drives through this core's
   // Feature_FrameGeneration, is replaced by XeFG's context. Here rather than on a separate
   // nvngx_dlssg.dll hook because a Streamline game never maps that module -- the field log showed

@@ -5,12 +5,16 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <dxgi.h>
+#include <nvapi.h>
 
+#include "NrEvaluation.h"
 #include "NrFfnV2.h"
 #include "NrFp8.h"
 #include "NrNet4.h"
 #include "NrSwin4.h"
 
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <exception>
@@ -23,6 +27,22 @@ namespace
 // Evaluations in a row that may fail to run our kernels before it is called a failure: the layers recognise the model
 // from the runtime's own launches, which takes the first evaluations after they are switched on.
 constexpr unsigned kStarting = 30;
+
+using LaunchFn = decltype(&NvAPI_D3D12_LaunchCuKernelChain);
+std::atomic<LaunchFn> gLaunch{nullptr};
+NvAPI_Status __cdecl LaunchEvaluation(ID3D12GraphicsCommandList* commands, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count)
+{
+    auto* evaluation = nvfp4::EvaluationScope::For(commands);
+    if (evaluation && evaluation->failed) return NVAPI_ERROR;
+    const auto launch = gLaunch.load(std::memory_order_acquire);
+    if (!launch) {
+        if (evaluation) evaluation->Reject("the NVAPI launch hook is unavailable");
+        return NVAPI_ERROR;
+    }
+    const auto result = launch(commands, kernels, count);
+    if (evaluation && result != NVAPI_OK) evaluation->Reject("an NR kernel launch failed");
+    return result;
+}
 
 struct Work
 {
@@ -145,11 +165,16 @@ void SetLog(void (*log)(const char* line))
 
 void* WrapNvapi(unsigned id, void* original)
 {
-    if (!original)
+    if (!original || original == reinterpret_cast<void*>(&LaunchEvaluation))
         return original;
     // FP8 and NrNet4 inspect the original launch sequence; NrSwin4 replaces launches one for one
     // so NrFfnV2 can still count them.
-    return NrFp8::WrapNvapi(id, NrNet4::WrapNvapi(id, NrSwin4::WrapNvapi(id, NrFfnV2::WrapNvapi(id, original))));
+    void* wrapped = NrFp8::WrapNvapi(id, NrNet4::WrapNvapi(id, NrSwin4::WrapNvapi(id, NrFfnV2::WrapNvapi(id, original))));
+    if (id == 0x24973538u) { // LaunchCuKernelChain: latch failure across all layers until this evaluation ends.
+        gLaunch.store(reinterpret_cast<LaunchFn>(wrapped), std::memory_order_release);
+        return reinterpret_cast<void*>(&LaunchEvaluation);
+    }
+    return wrapped;
 }
 
 namespace
@@ -268,7 +293,7 @@ std::string Fp8SetupProblem(unsigned preset)
     return {};
 }
 
-void BeginEvaluation(unsigned requestedPreset)
+bool BeginEvaluation(unsigned requestedPreset)
 {
     std::lock_guard guard(gMutex);
     gModelB = IsModelB(requestedPreset);
@@ -286,10 +311,11 @@ void BeginEvaluation(unsigned requestedPreset)
             if (!NrFp8::SetComplete(set, &file))
                 gSetMissing = "FP8 model unavailable: " + file;
         }
-        NrFp8::UseSet(gSetMissing.empty() && gFp8Problem.empty() ? set : 0);
+        const bool ready = gOn && gSetMissing.empty() && gFp8Problem.empty();
+        NrFp8::UseSet(ready ? set : 0);
         gFp8Faults = NrFp8::Faults();
         gFp8Completed = NrFp8::Completed();
-        return;
+        return ready;
     }
     NrFp8::UseSet(0);
     gSetMissing.clear();
@@ -297,13 +323,17 @@ void BeginEvaluation(unsigned requestedPreset)
         NrSwin4::Pause(true);
         NrNet4::Pause(true);
         NrFfnV2::UseSet(NrFfnV2::kDefaultSet);
-        NrFfnV2::Pause(!gOn, true);
-        if (gOn) gBefore.ffn = NrFfnV2::CompletedWork();
-        return;
+        std::string file;
+        if (gOn && !NrFfnV2::SetComplete(NrFfnV2::kDefaultSet, &file, true))
+            gSetMissing = "the 4-bit feed-forward is unavailable: " + file;
+        const bool ready = gOn && gSetMissing.empty();
+        NrFfnV2::Pause(!ready, true);
+        if (ready) gBefore.ffn = NrFfnV2::CompletedWork();
+        return ready;
     }
     if (!gOurs) {
         PauseForEvaluation(true);
-        return;
+        return true;
     }
     // A pass-in-one model is the same kernels with its own set of weights. The set must be chosen first: each
     // family checks the files of the set it will actually use.
@@ -321,9 +351,11 @@ void BeginEvaluation(unsigned requestedPreset)
         if (!complete)
             gSetMissing = "a weight file of this model is missing or incomplete (nvfp4/" + file + ")";
     }
-    PauseForEvaluation(!gOn || !gSetMissing.empty() || !gEnableProblem.empty());
-    if (gOn && gSetMissing.empty() && gEnableProblem.empty())
+    const bool ready = gOn && gSetMissing.empty() && gEnableProblem.empty();
+    PauseForEvaluation(!ready);
+    if (ready)
         gBefore = Read();
+    return ready;
 }
 
 void EndEvaluation(ID3D12GraphicsCommandList* list)
@@ -361,6 +393,8 @@ bool OursRan(bool whole)
         const auto now = NrFfnV2::CompletedWork();
         if (!gOn)
             why = "the 4-bit feed-forward was not loaded";
+        else if (!gSetMissing.empty())
+            why = gSetMissing;
         else if (now.pairs <= gBefore.ffn.pairs)
             why = "feed-forward: " + NrFfnV2::Status(false);
         else if (now.faults > gBefore.ffn.faults)

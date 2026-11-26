@@ -44,7 +44,7 @@ enum class FgPresentPath {
   return allowed ? FgPresentPath::ALL_PRESENTS : FgPresentPath::NORMAL;
 }
 
-// HUD-less: whether NR may run on the game's HUD-less image before frame generation. Only UICorrection On uses it.
+// HUD-less: whether NR may run on the game's HUD-less image at Present. Only UICorrection On uses it.
 enum class HudlessUse : uint8_t { NEVER, USE };
 
 // The settings one frame runs with on its route: BuildFrameSettings's output (the user's settings, the drag and the controls'
@@ -125,6 +125,7 @@ struct FrameFacts {
   bool marker_rendered_early = false;
   nr::Size early_motion_extent{};
   bool effects_on = false;  // ReShade's effects are on, so NR before effects may wait for their begin-effects event (set by the add-on only)
+  bool hudless_present = false;  // NR targets the composer's N: record and compose in this Present, before ReShade's effects
   // ReShade's RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN is set: the game's camera images, DLSS's among them, are upside down against the back buffer
   // (Unity, for one), so DLSS's motion vectors are flipped for the Present path (set by the add-on only).
   bool dlss_motion_upside_down = false;

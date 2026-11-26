@@ -25,10 +25,9 @@ void Describe(TaggedImage& image) {
 
 }  // namespace
 
-HudBegun BeginHudD3D12(const HudPresentD3D12& present, ID3D12GraphicsCommandList* list, ID3D12Resource* back_buffer, uint64_t present_number,
-                       std::chrono::steady_clock::time_point now) {
+HudBegun BeginHudD3D12(const HudPresentD3D12& present, ID3D12GraphicsCommandList* list, ID3D12Resource* back_buffer, uint64_t present_number) {
   HudBegun begun;
-  if (present.tags == nullptr || present.input == nullptr || present.settle == nullptr || present.composer == nullptr || back_buffer == nullptr) return begun;
+  if (present.tags == nullptr || present.settle == nullptr || present.composer == nullptr || back_buffer == nullptr) return begun;
   TakeResult taken = present.tags->Take();
   if (taken.frame) {
     Describe(taken.frame->hudless);
@@ -37,8 +36,8 @@ HudBegun BeginHudD3D12(const HudPresentD3D12& present, ID3D12GraphicsCommandList
   const D3D12_RESOURCE_DESC target = back_buffer->GetDesc();
   const HudFrameFacts facts = {.width = static_cast<uint32_t>(target.Width), .height = target.Height, .format = static_cast<uint32_t>(target.Format),
                                .api = TagApi::D3D12, .early = present.early, .effects_on = present.effects_on,
-                               .technique_expected = present.technique_expected};
-  begun.reason = DecideHudFrame(present.use_wanted, present.input->FrameGenerationReads(now), taken, facts);
+                               .technique_expected = present.technique_expected, .frame_generation_active = present.frame_generation_active};
+  begun.reason = DecideHudFrame(present.use_wanted, taken, facts);
   NoteHudFormats(begun.reason, taken, facts);
   const bool admitted = present.settle->Admit(begun.reason);
   if (begun.reason == HudReason::USABLE && !admitted) begun.reason = HudReason::SETTLING;

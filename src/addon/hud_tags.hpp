@@ -18,7 +18,6 @@ enum class TagApi : uint8_t { UNKNOWN, D3D12, VULKAN };
 enum class HudReason : uint8_t {
   USABLE,
   CORRECTION_OFF,
-  NOT_READ,
   SETTLING,
   NOT_TAGGED,
   MORE_THAN_ONE_FRAME,
@@ -69,7 +68,7 @@ class HudTags {
   ~HudTags();
 
   void SetApi(TagApi api) noexcept;
-  // Off clears and releases: nothing is stored unless DLSS-G reads Uplift's output and UICorrection is On.
+  // Off clears and releases. UICorrection On stores tags even when frame generation is off.
   void SetStoring(bool storing) noexcept;
   // slSetTag: no frame token. `viewport` is an sl::ViewportHandle*, `tags` an sl::ResourceTag array.
   void Record(const void* viewport, const void* tags, uint32_t count) noexcept;
@@ -82,6 +81,7 @@ class HudTags {
 
   struct Counts {
     uint64_t hudless = 0, empty_hudless = 0, opacity = 0, ui_colour = 0, frames_waiting_max = 0;
+    uint64_t last_hudless_ms = 0, last_opacity_ms = 0;  // non-empty submissions; Clear invalidates freshness
   };
   Counts Totals() const noexcept;
 
@@ -95,7 +95,7 @@ class HudTags {
   };
   void RecordLocked(uintptr_t key, const void* viewport, const void* tags, uint32_t count);
   void ReleaseLocked(TaggedImage& image) noexcept;
-  void ClearLocked() noexcept;
+  void ClearLocked(bool invalidate_freshness = true) noexcept;
 
   mutable std::mutex mutex_;
   TagApi api_ = TagApi::UNKNOWN;

@@ -313,6 +313,19 @@ void ColorHistory() {
     frame(color::Primaries::AP1, false, true);
     frame(color::Primaries::AP1, true, true); frame(color::Primaries::AP1, true, true);
     frame(color::Primaries::AP1, false, false);
+    host.fail_next_evaluate = true;
+    const auto failed = pipeline.RecordUav(gpu.list.Get(), {.resource = target.Get(), .encoding = color::Encoding::LINEAR_BT709},
+                                            {.reset_hint = false}, nr::Controls{});
+    Check(!failed.nr_applied, "injected failed evaluation was reported as applied");
+    gpu.Submit();
+    const auto recovered = pipeline.RecordUav(gpu.list.Get(), {.resource = target.Get(), .encoding = color::Encoding::LINEAR_BT709},
+                                               {.reset_hint = false}, nr::Controls{});
+    Check(recovered.nr_applied && host.resets.back(), "failed evaluation history was not reset on recovery");
+    gpu.Submit();
+    const auto after_recovery = pipeline.RecordUav(gpu.list.Get(), {.resource = target.Get(), .encoding = color::Encoding::LINEAR_BT709},
+                                                    {.reset_hint = false}, nr::Controls{});
+    Check(after_recovery.nr_applied && !host.resets.back(), "recovery reset repeated after a successful frame");
+    gpu.Submit();
     pipeline.ReleaseIntermediates(); timeline.Flush(std::chrono::milliseconds(0));
   }
   session.OnDeviceDestroyed();

@@ -276,6 +276,14 @@ struct StatusView {
 [[nodiscard]] std::string FormatRrLive(const std::string& preset_name);
 [[nodiscard]] std::string FormatFgPresetLive(const std::string& preset_name, bool live_switch, bool pending_drain);
 [[nodiscard]] std::string FormatMultiplierLive(bool dynamic, uint32_t multiplier, bool panel_multiplier, uint32_t panel_choice);
+struct HudInputsFacts {
+  bool wanted = false, streamline = false, off_applied = false, refused = false, unsupported = false;
+  bool hudless_recent = false, opacity_recent = false;
+  uint64_t hudless_tags = 0u, opacity_tags = 0u, fg_evaluates = 0u;
+  uint32_t presented_batch = 0u;
+};
+[[nodiscard]] std::string FormatHudInputsLive(const HudInputsFacts& facts);
+[[nodiscard]] std::string FormatHudInputsTags(const HudInputsFacts& facts);
 [[nodiscard]] std::string FormatReflexLive(bool known, uint32_t mode, uint32_t fps_cap);
 // The XMX mode's own line (src/xmx/): whether Intel's generator is the one producing frames, and
 // why it is not when the mode is on. Empty when the mode is off (the caller does not draw it).

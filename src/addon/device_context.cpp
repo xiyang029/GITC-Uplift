@@ -258,7 +258,9 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
       if (*present_group == 0u) status_.NoteSkip(nr::SkipReason::FRAME_TOO_SMALL, RecordingStatus::Reset::ALL);
     }
   }
-  return trigger_.OnPresent(marker_expected, facts.effects_on, facts.marker_rendered_early);
+  // N belongs to the composer's current Present scope. Never defer NR into ReShade's effects/technique,
+  // whose host targets the real back buffer after the composer has already closed N.
+  return trigger_.OnPresent(marker_expected && !facts.hudless_present, facts.effects_on && !facts.hudless_present, facts.marker_rendered_early);
 }
 
 nr::SkipReason DeviceContext::PresentWorkSkip() const {
@@ -448,6 +450,7 @@ sources::PipelineResult DeviceContext::OnNativeNrEvaluate(const ngx_hooks::DlssF
   config.part.slice.first = 0u;
   config.part.slice.count = nr::MAX_PASSES;
   const sources::PipelineResult result = after_dlss_->Run(host, frame, frame.reset || native_nr_reset_owed_, config);
+  ran_since_present_ = true;  // Preserve this evaluate's result (including a skip) until the overlay reads it at Present.
   NoteResult(Stage::AFTER_DLSS, 0u, result);
   if (result.recorded) {
     native_nr_reset_owed_ = false;
@@ -646,7 +649,10 @@ void DeviceContext::UpdateChain() {
     present_cause = (frame_generation_on ? FRAME_GEN_QUEUE_REASON : OTHER_QUEUE_REASON);
   }
   facts.cannot[static_cast<size_t>(Stage::PRESENT)] = LaterPresentCause(facts_.fg_present_path, present_cause);
-  ChainPlan chain = DecideChain(facts);
+  // Native NR is the exclusive execution point for all passes, independent of stored Source/pass-stage choices.
+  ChainPlan chain = (settings_.replace_native_nr || settings_.uplift_after_native_nr)
+                        ? DecideChain({.pass1 = Placement::AFTER_DLSS, .passes = settings_.session.pass_count})
+                        : DecideChain(facts);
 
   LogChainChange(chain, chain_);
   const std::array<bool, STAGE_COUNT> reset = StagesToReset(chain, chain_);

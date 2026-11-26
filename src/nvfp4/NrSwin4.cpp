@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "NrSwin4.h"
+#include "NrEvaluation.h"
 #include "Nvfp4Support.h"    // the asset reader, buffer allocation and error checks every loader shares
 
 #pragma comment(lib, "bcrypt.lib")
@@ -961,8 +962,10 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
             }
         } catch (const std::exception& error) {
             Notice(s, std::string("the input / output block kept the runtime's weights: ") + error.what());
+            if (nvfp4::EvaluationScope::For(commands)) return NVAPI_ERROR;
             if(list && list->thinPreUsed) return NVAPI_ERROR;
         } catch (...) {
+            if (nvfp4::EvaluationScope::For(commands)) return NVAPI_ERROR;
         }
         if(list && list->thinPreUsed && kind.post) { Notice(s,"Thin4 POST missing after Thin4 PRE; evaluation refused"); return NVAPI_ERROR; }
         if (s.enabled && !s.paused) ++s.ioPassed;
@@ -1051,6 +1054,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         if (!RuntimeMatches(s)) {
             Notice(s, "off: no NR runtime is loaded");
             ++s.passed;
+            if (nvfp4::EvaluationScope::For(commands)) return NVAPI_ERROR;
             return runtimes();
         }
         Replace(s, commands, target->device, *k, kind, unsigned(number));
@@ -1064,6 +1068,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         return NVAPI_OK;
     } catch (const std::exception& error) {
         // Nothing of ours was recorded for this launch: the runtime's own kernel runs.
+        if (nvfp4::EvaluationScope::For(commands)) { ++s.passed; return NVAPI_ERROR; }
         Notice(s, std::string("a block was left to the runtime: ") + error.what());
         const auto status = FlushLevel(s, commands, list);
         if (status != NVAPI_OK) return status;
@@ -1071,6 +1076,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         return runtimes();
     } catch (...) {
         Notice(s, "a block was left to the runtime: unknown error");
+        if (nvfp4::EvaluationScope::For(commands)) { ++s.passed; return NVAPI_ERROR; }
         const auto status = FlushLevel(s, commands, list);
         if (status != NVAPI_OK) return status;
         ++s.passed;
@@ -1158,7 +1164,7 @@ bool SetComplete(unsigned set, std::string* missing) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
     const unsigned n = set == kDefaultSet ? s.options.set : set;
-    bool complete = s.manifest.loaded && n < kMaxSets;
+    bool complete = s.enabled && s.manifest.loaded && n < kMaxSets;
     if (complete && n) {
         const auto& chosen = s.manifest.sets[n];
         complete = chosen.present && !chosen.fp8.empty() && (!chosen.blob.empty() || (n == 1 && s.manifest.trainedIsFirst));
@@ -1189,8 +1195,15 @@ void EndEvaluation(ID3D12GraphicsCommandList* commands) noexcept {
         std::lock_guard guard(s.mutex);
         const auto found = s.lists.find(commands);
         if (found == s.lists.end()) return;
-        if (FlushLevel(s, commands, &found->second) != NVAPI_OK) Notice(s, "Level4 incomplete prefix replay failed");
-        Learn(s, found->second);
+        auto* evaluation = nvfp4::EvaluationScope::For(commands);
+        if (!evaluation || !evaluation->failed) {
+            if (FlushLevel(s, commands, &found->second) != NVAPI_OK) {
+                if (evaluation) evaluation->Reject("Level4 incomplete prefix replay failed");
+                Notice(s, "Level4 incomplete prefix replay failed");
+            } else {
+                Learn(s, found->second);
+            }
+        }
         s.lists.erase(found);
         s.wideOpen.erase(commands);
     } catch (...) {

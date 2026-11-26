@@ -189,7 +189,7 @@ struct DeviceEntry {
   std::unique_ptr<color::HudComposerD3D12> hud_composer;
   addon::HudSettle hud_settle;
   bool hud_used = false;
-  std::string hud_note;  // UI correction's note while it is On and frame generation reads Uplift's output
+  std::string hud_note;  // UI correction's note while it is On at Present
   color::ColorSpace output_space = color::ColorSpace::UNKNOWN;
   std::string message;                                   // why this device has no context
   bool rejected = false;                                 // not NVIDIA, or the context failed to start: decided once
@@ -430,7 +430,7 @@ struct AddonState {
   AddonRouting routing;
   // HUD-less (design §1): the images this add-on's NR changed before frame generation, read by the bridge at DLSS-G's evaluate.
   addon::FgInput fg_input;
-  // HUD-less (design §2): Streamline's HUD-less and opacity tags, stored only while UICorrection On and DLSS-G reads Uplift's output.
+  // HUD-less (design §2): Streamline's HUD-less and opacity tags, stored while UICorrection On, including with FG off.
   addon::HudTags hud_tags;
   // The last Present's reason when the HUD-less image was not used, for the DiagnosticBeforeFG trace (design §9).
   std::atomic<addon::HudReason> last_hud_reason{addon::HudReason::CORRECTION_OFF};
@@ -523,7 +523,7 @@ void ApplyProcessSettings(const ui::Settings& settings) {
   // Safe mode (1.8.3, upstream 7dbb337) is an override, not a setting: the ini keeps what the user
   // chose, and the panel's switch keeps working -- it just cannot turn XMX back on this session.
   const bool safe_mode = g_state != nullptr && g_state->safe_mode;
-  uplift::xmx::SetEnabled(settings.xmx_generator && !safe_mode);
+  uplift::xmx::SetEnabled(settings.xmx_generator && !settings.fg_hud_inputs_only && !safe_mode);
   if (safe_mode && settings.xmx_generator) {
     nr::Logf(nr::LogLevel::WARN, "safe mode: XMX stayed off after three unclean exits; it is back on the next start");
   }
@@ -547,7 +547,8 @@ uint32_t FgMultiplierChoice(ui::FgMultiplierOverride choice) {
 // each is a live switch -- the atomics take the choice and the game's next relevant call applies it.
 void PushFgRuntimeChoices(const ui::Settings& settings) {
   const uint32_t multiplier = FgMultiplierChoice(settings.fg_multiplier);
-  addon::slfg::SetXmxMode(settings.xmx_generator);
+  addon::slfg::SetHudInputsOnly(settings.fg_hud_inputs_only);
+  addon::slfg::SetXmxMode(settings.xmx_generator && !settings.fg_hud_inputs_only);
   // Upstream 1.8.6 (e4d4aad): XmxJitter=0 under [Uplift] restores the pre-1.8.6 behaviour (the
   // multi-frame model is asked with the jittered-motion flag it refuses and Intel's 2x model runs
   // instead). Read once per process: the choice applies at game start, like upstream's
@@ -1234,9 +1235,6 @@ std::optional<addon::HudPresentD3D12> HudPresentFor(AddonState& state, DeviceEnt
     }
     entry.hud_composer = std::move(composer);
   }
-  // DLSS-G not reading Uplift's output: nothing will be used, so no VRAM is kept for it (anti-goal: more VRAM while frame generation
-  // does not read Uplift's output).
-  if (!state.fg_input.FrameGenerationReads(std::chrono::steady_clock::now())) entry.hud_composer->Release(state.fg_input.Presents());
   entry.hud_composer->Retire(state.fg_input.Presents());
   return addon::HudPresentD3D12{.composer = entry.hud_composer.get(), .tags = &state.hud_tags, .input = &state.fg_input, .settle = &entry.hud_settle,
                                 .use_wanted = true};
@@ -1244,7 +1242,7 @@ std::optional<addon::HudPresentD3D12> HudPresentFor(AddonState& state, DeviceEnt
 
 // After a Present that decided: NR's history restarts when use starts or stops (design §3), and UI correction's note says what happened.
 void NoteHudPresent(DeviceEntry& entry, bool wanted, addon::HudReason reason, bool used) {
-  if (wanted && !used) {
+  if (wanted && !used && reason != addon::HudReason::USABLE) {
     g_state->last_hud_reason.store(reason, std::memory_order_relaxed);
     g_state->hud_reasons[static_cast<size_t>(reason)].fetch_add(1u, std::memory_order_relaxed);
   }
@@ -1254,10 +1252,12 @@ void NoteHudPresent(DeviceEntry& entry, bool wanted, addon::HudReason reason, bo
   }
   entry.hud_used = used;
   const std::string_view why = addon::HudReasonText(reason);
-  if (!wanted || (!used && reason == addon::HudReason::NOT_READ)) {
-    entry.hud_note.clear();  // not Before FG: the placement's own note stands
+  if (!wanted) {
+    entry.hud_note.clear();
   } else if (used) {
     entry.hud_note = uplift::text::HUDLESS_UI_CORRECTION_USED;
+  } else if (reason == addon::HudReason::USABLE) {
+    entry.hud_note = uplift::text::HUDLESS_UI_CORRECTION_IDLE;
   } else {
     entry.hud_note = std::vformat(uplift::text::HUDLESS_UI_CORRECTION_UNUSABLE, std::make_format_args(why));
   }
@@ -2070,14 +2070,13 @@ void BeforeFgVk(VkQueue queue, const VkPresentInfoKHR* info, addon::streamline::
           const bool native = entry.vk_dlss && entry.before_fg.outer_config && entry.before_fg.outer_config->facts.vk_native_present;
           // HUD-less (design §5): with UICorrection On the route records into N; FinishHud always follows it.
           const addon::BeforeFgVk::HudPresentVk hud = {.tags = &g_state->hud_tags, .input = &g_state->fg_input, .settle = &entry.hud_settle,
-                                                       .use_wanted = (g_state->settings.ui_correction == ui::UiCorrection::ON),
-                                                       .now = std::chrono::steady_clock::now()};
+                                                       .use_wanted = (g_state->settings.ui_correction == ui::UiCorrection::ON)};
           const auto result = native
               ? g_state->before_fg_vk.Record(queue, game_queue, *info, *entry.vk_dlss, entry.before_fg.outer_config->settings, entry.before_fg.outer_config->facts, entry.before_fg.outer_holds_nr, forwarded->native_tick, std::chrono::steady_clock::now(), &hud)
               : RecordOuterVulkanBridge(entry, device, game_queue, queue, *info, *forwarded, &hud);
           const addon::BeforeFgVk::HudOutcome hud_outcome =
               g_state->before_fg_vk.FinishHud(result.passes != 0u && forwarded->failure == VK_SUCCESS, forwarded->failure != VK_SUCCESS);
-          if (!hud.use_wanted || !g_state->fg_input.FrameGenerationReads(hud.now)) g_state->before_fg_vk.ReleaseHud(g_state->fg_input.Presents());
+          if (!hud.use_wanted) g_state->before_fg_vk.ReleaseHud(g_state->fg_input.Presents());
           NoteHudPresent(entry, hud_outcome.wanted, hud_outcome.reason, hud_outcome.replacement.owner != nullptr);
           if (forwarded->failure != VK_SUCCESS) {
             entry.before_fg.note = {BeforeFgNote::VK_RELAY_FAILED};
@@ -2887,10 +2886,10 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     AddonState& state = *g_state;
 
     addon::host::PollEnabled(state, now);
-    // HUD-less (design §2): before any route returns. Tags are stored only while use is wanted and DLSS-G reads Uplift's output (Auto never
-    // uses: nothing stored); the evaluate hides by the same setting on every route.
+    // HUD-less (design §2): before any route returns. Present can use the tags even with FG off, provided the game still supplies them.
+    // Auto never uses them; the evaluate hides by the same setting on every route.
     state.bridge.SetHideHudless(state.settings.hide_hudless);
-    state.hud_tags.SetStoring(state.settings.ui_correction == ui::UiCorrection::ON && state.fg_input.FrameGenerationReads(now));
+    state.hud_tags.SetStoring(state.settings.ui_correction == ui::UiCorrection::ON || state.settings.fg_hud_inputs_only);
 
     DeviceEntry& entry = state.devices[device];
     if (state.settings.ui_correction != ui::UiCorrection::ON) entry.hud_note = {};  // HUD-less: no stale "On" note after leaving On
@@ -2906,6 +2905,14 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       addon::host::CountVulkanPresent(entry, device);
     }
     if (!entry.selector.OnPresent(swapchain, now)) return;
+    if (addon::slfg::HudInputsOnlyWanted() || addon::slfg::HudInputsOnlyActive()) {
+      const auto tags = state.hud_tags.Totals();
+      const uint64_t tick = GetTickCount64();
+      addon::slfg::TraceHudInputs(tags.hudless, tags.opacity + tags.ui_colour,
+                                  tags.last_hudless_ms != 0u && tick - tags.last_hudless_ms <= 2000u,
+                                  tags.last_opacity_ms != 0u && tick - tags.last_opacity_ms <= 2000u,
+                                  entry.hud_note.empty() ? std::string_view{"not evaluated on this route"} : std::string_view{entry.hud_note});
+    }
     const bool outer_ticked = entry.before_fg.TakeOuterTick();
     if (addon::streamline::Installed() && (device_api == api::device_api::d3d12 || vulkan)) {
       ++entry.before_fg.activity.reshade;
@@ -3393,22 +3400,33 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       addon::ApplyBeforeFgDx12(entry.before_fg, frame_settings, frame_facts, decision, before_fg_facts.outer_matches_primary);
       if (decision.state == addon::BeforeFgState::ARM_OUTER) entry.context->NoteDisplayedPresent(now, frame_facts.ngx_frame_generation);
     }
-    // HUD-less (design §5): ReShade before frame generation on Direct3D 12 records NR into N at the present point only, on ReShade's
-    // immediate list, and never while ReShade's effects or an Uplift technique would change the frame after NR.
+    // HUD-less (design §5): use ReShade's Present with FG off too. With FG on this still needs the confirmed pre-FG route: tags taken
+    // after FG may belong to another frame. Both routes record only at Present, before any ReShade effects or Uplift technique.
     std::optional<addon::HudPresentD3D12> early_hud;
     addon::HudBegun early_begun;
     ID3D12GraphicsCommandList* early_list = nullptr;
-    if (device_api == api::device_api::d3d12 && !Bridged(entry) && !entry.before_fg.outer_owns_frame && entry.before_fg.early_confirmed) {
-      early_hud = HudPresentFor(state, entry, reinterpret_cast<ID3D12Device*>(device->get_native()), frame_settings.hudless_use == addon::HudlessUse::USE);
+    if (device_api == api::device_api::d3d12 && !Bridged(entry) && !entry.before_fg.outer_owns_frame) {
+      const bool frame_generation_active = addon::streamline::FrameGenerationActive(
+          fg_mode, before_fg_facts.ngx_live != 0u || entry.context->HasFrameGenerationCadence());
+      const bool ordered = entry.before_fg.early_confirmed || !frame_generation_active;
+      early_hud = HudPresentFor(state, entry, reinterpret_cast<ID3D12Device*>(device->get_native()),
+                                ordered && frame_settings.hudless_use == addon::HudlessUse::USE);
       api::command_list* const immediate = (early_hud ? queue->get_immediate_command_list() : nullptr);
       if (immediate != nullptr) {
         early_hud->early = true;
         early_hud->effects_on = frame_facts.effects_on;
         early_hud->technique_expected = (entry.marker.handle != 0u);
+        early_hud->frame_generation_active = frame_generation_active;
         early_list = reinterpret_cast<ID3D12GraphicsCommandList*>(immediate->get_native());
-        early_begun = addon::BeginHudD3D12(*early_hud, early_list, reinterpret_cast<ID3D12Resource*>(entry.back_buffer.handle), state.fg_input.Presents(), now);
-        if (early_begun.n) target.resource = early_begun.n;
+        early_begun = addon::BeginHudD3D12(*early_hud, early_list, reinterpret_cast<ID3D12Resource*>(entry.back_buffer.handle), state.fg_input.Presents());
+        if (early_begun.n) {
+          target.resource = early_begun.n;
+          frame_facts.hudless_present = true;
+          // Run flushes pending work before NR. Mark the native copy now so that flush submits it before reading N.
+          immediate->barrier(api::resource{0u}, api::resource_usage::unordered_access, api::resource_usage::unordered_access);
+        }
       }
+      if (!early_hud) NoteHudPresent(entry, false, addon::HudReason::CORRECTION_OFF, false);
     }
     const addon::TriggerPoint point = entry.before_fg.outer_owns_frame ? addon::TriggerPoint::NONE
         : entry.context->BeginFrame(frame_queue, frame_settings, frame_facts, target, entry.marker.handle != 0u, now);
@@ -3441,6 +3459,8 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
       const uint32_t passes = RunOrWarnOnce(&state, entry, &host, D3D12_RESOURCE_STATE_PRESENT, point, reinterpret_cast<ID3D12Resource*>(early_motion.handle),
                                             std::move(replacement), early_begun.inputs);
       if (early_begun.n) {
+        // Run's flush may rotate ReShade's native list. Compose and close on the current one, on this same presenting queue.
+        early_list = reinterpret_cast<ID3D12GraphicsCommandList*>(queue->get_immediate_command_list()->get_native());
         if (passes != 0u) entry.hud_composer->End(early_list);
         entry.hud_composer->Close(early_list);
         // The composer recorded natively; ReShade submits its immediate list only once an API call marks it. A global UAV barrier marks
@@ -4026,22 +4046,34 @@ void OnReshadeOverlay(api::effect_runtime* runtime) {
         facts.chain_note = chain_note;
         view.mask_note = entry.mask_note;
         view.ui_correction_note = status.ui_correction_note;
-        // HUD-less: while frame generation reads Uplift's output (Before FG), the note says what UI correction does there.
+        // HUD-less: a Present note also applies when the game supplies tags with FG off.
         if (!entry.hud_note.empty()) {
           view.ui_correction_note = entry.hud_note;
         } else if (state.settings.ui_correction != ui::UiCorrection::ON && state.fg_input.FrameGenerationReads(now)) {
           view.ui_correction_note = std::string(uplift::text::HUDLESS_UI_CORRECTION_NOT_ON);
         }
         view.keep_faces_unavailable = std::string(ui::KeepFacesUnavailable({.gpu_ready = status.keep_faces_supported}));
+        view.frame_generation_active = addon::streamline::FrameGenerationActive(addon::streamline::Mode(), status.frame_generation.active);
         view.frame_generation_value =
-            ui::FormatFrameGenerationValue(status.frame_generation.active, status.frame_generation.multiplier);
-        view.frame_generation_active = status.frame_generation.active;
+            ui::FormatFrameGenerationValue(view.frame_generation_active, status.frame_generation.multiplier);
         const addon::framerate::Snapshot rate = addon::framerate::Read();
         view.frame_rate_line =
             ui::FormatFrameRateLine(rate.real_milli, rate.output_milli, rate.output_estimated, rate.age_ms);
         {
           // The card's live block: what the runtime actually holds, gathered at the bottom of the card.
           const addon::slfg::LiveState fg = addon::slfg::ReadLiveState();
+          const auto hud_tags = state.hud_tags.Totals();
+          const uint64_t hud_tick = GetTickCount64();
+          const ui::HudInputsFacts hud_inputs = {
+              .wanted = fg.hud_inputs_only, .streamline = fg.streamline, .off_applied = fg.hud_inputs_active,
+              .refused = fg.hud_inputs_refused, .unsupported = fg.hud_inputs_unsupported,
+              .hudless_recent = hud_tags.last_hudless_ms != 0u && hud_tick - hud_tags.last_hudless_ms <= 2000u,
+              .opacity_recent = hud_tags.last_opacity_ms != 0u && hud_tick - hud_tags.last_opacity_ms <= 2000u,
+              .hudless_tags = hud_tags.hudless, .opacity_tags = hud_tags.opacity + hud_tags.ui_colour,
+              .fg_evaluates = fg.fg_evaluates, .presented_batch = fg.presented_batch,
+          };
+          view.fg_hud_inputs_line = ui::FormatHudInputsLive(hud_inputs);
+          view.fg_hud_tags_line = ui::FormatHudInputsTags(hud_inputs);
           static constexpr std::array<std::string_view, 4> FG_NAMES = {"", "A", "B", "C"};
           static constexpr std::array<std::string_view, 4> SR_NAMES = {"", "J", "K", "L"};
           static constexpr std::array<std::string_view, 4> RR_NAMES = {"", "D", "E", "F"};
@@ -4062,7 +4094,7 @@ void OnReshadeOverlay(api::effect_runtime* runtime) {
           view.fg_multiplier_line = ui::FormatMultiplierLive(fg.dynamic, fg.multiplier, fg.panel_multiplier,
                                                             FgMultiplierChoice(state.settings.fg_multiplier));
           view.dynamic_mfg_line = ui::FormatDynamicMfgLive({
-              .wanted = fg.dynamic_wanted,
+              .wanted = fg.dynamic_wanted && !fg.hud_inputs_only,
               .in_force = fg.dynamic,
               .ready = fg.dynamic_ready,
               .support_known = fg.dynamic_support_known,
@@ -4074,7 +4106,7 @@ void OnReshadeOverlay(api::effect_runtime* runtime) {
           });
           const addon::reflex::LiveState reflex = addon::reflex::ReadLiveState();
           view.reflex_live_line = ui::FormatReflexLive(reflex.known, reflex.mode, reflex.fps_cap);
-          if (state.settings.xmx_generator) {
+          if (state.settings.xmx_generator && !state.settings.fg_hud_inputs_only) {
             const uplift::xmx::Status xmx = uplift::xmx::Snapshot();
             view.xmx_live_line = ui::FormatXmxLive({.generation = xmx.generating,
                                                     .hooked = xmx.hooked,

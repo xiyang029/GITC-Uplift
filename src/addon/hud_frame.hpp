@@ -18,14 +18,15 @@ struct HudFrameFacts {
   uint32_t height = 0;
   uint32_t format = 0;  // the backbuffer's DXGI_FORMAT or VkFormat
   TagApi api = TagApi::UNKNOWN;
-  bool early = false;               // ReShade sits before frame generation
+  bool early = false;               // NR records before ReShade's effects
   bool effects_on = false;          // frame_facts.effects_on, read before BeginFrame
   bool technique_expected = false;  // an Uplift technique is expected this frame
+  bool frame_generation_active = true;  // effects must also reach N only when FG can read N
 };
 
 // USABLE when every condition holds, else the first that fails. `use_wanted`: UICorrection On.
-// `frame_generation_reads`: FgInput::FrameGenerationReads.
-[[nodiscard]] HudReason DecideHudFrame(bool use_wanted, bool frame_generation_reads, const TakeResult& taken, const HudFrameFacts& back_buffer);
+// Tagged HUD-less/opacity inputs are useful at Present even when frame generation is off.
+[[nodiscard]] HudReason DecideHudFrame(bool use_wanted, const TakeResult& taken, const HudFrameFacts& back_buffer);
 
 // The reason's English (text/hudless_messages.hpp), for Details and the log.
 [[nodiscard]] std::string_view HudReasonText(HudReason reason);

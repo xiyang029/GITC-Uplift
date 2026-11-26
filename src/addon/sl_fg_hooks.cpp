@@ -31,6 +31,13 @@ using GetFeatureFunctionFn = PFun_slGetFeatureFunction*;
 // ---- The panel's choices ----
 
 std::atomic<uint32_t> g_force_multiplier{0u};   // 0 = follow the game; 2..kMaxMultiplier = force
+std::atomic<bool> g_hud_inputs_only{false};
+std::atomic<bool> g_hud_inputs_active{false};
+enum class HudInputsResult { WAITING, ACCEPTED, REFUSED, UNSUPPORTED };
+std::atomic<HudInputsResult> g_hud_inputs_result{HudInputsResult::WAITING};
+std::atomic<uint64_t> g_hud_fg_evaluates{0u};
+std::atomic<uint32_t> g_hud_presented_batch{0u};
+std::atomic<uint64_t> g_hud_trace_at{0u};
 // The provider reports numFramesToGenerateMax 5 (6x) on this stack; the panel offers up to 6x.
 constexpr uint32_t kMaxMultiplier = 6u;
 std::atomic<bool> g_dynamic_enabled{false};
@@ -183,6 +190,17 @@ std::atomic<GetStateFn> g_real_get_state{nullptr};
 std::atomic<void*> g_real_get_feature_function{nullptr};
 std::atomic<bool> g_override_applied_logged{false};
 
+sl::Result SubmitSetOptions(SetOptionsFn real, const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options,
+                            bool hud_inputs_only = false) {
+  const sl::Result result = real(viewport, options);
+  if (result == sl::Result::eOk) {
+    g_hud_inputs_active.store(hud_inputs_only, std::memory_order_release);
+  } else if (!hud_inputs_only && g_hud_inputs_active.load(std::memory_order_acquire)) {
+    g_hud_inputs_result.store(HudInputsResult::REFUSED, std::memory_order_release);
+  }
+  return result;
+}
+
 // What the runtime last accepted, for the panel's live row (addon/sl_fg_hooks.hpp's LiveState):
 // presented frames per real frame, whether the panel's multiplier is the one in force, and whether
 // Dynamic MFG owns the choice instead.
@@ -197,7 +215,7 @@ void RecordAccepted(uint32_t generated_frames, bool panel_chosen) {
 
 // ---- The live replay ----
 // A panel change would otherwise wait for the game's own next slDLSSGSetOptions call, which many
-// games only make from their settings menu. The last accepted enabled submission is cached and
+// games only make from their settings menu. The latest replayable game request is cached and
 // re-submitted from the add-on's Present poll (the game's present thread), once per change; a
 // refused replay fails safe back to waiting for the game's own next call.
 SRWLOCK g_replay_lock = SRWLOCK_INIT;
@@ -224,11 +242,11 @@ bool Draining() {
   return g_drain.load(std::memory_order_acquire) != 0u;
 }
 
-// The last accepted enabled submission, for the switch's own submissions: false when the game has not
-// made one (nothing to drain from, nothing to resume).
+// A latest request that still asks for FG, for the preset switch: a later game-side Off
+// means nothing may drain or resume an older enabled request.
 bool LastEnabledRequest(sl::ViewportHandle& viewport, sl::DLSSGOptions& options) {
   AcquireSRWLockShared(&g_replay_lock);
-  const bool valid = g_replay_valid;
+  const bool valid = g_replay_valid && g_replay_options.mode != sl::DLSSGMode::eOff;
   if (valid) {
     viewport = g_replay_viewport;
     options = g_replay_options;
@@ -247,7 +265,7 @@ bool SubmitDrainOff() {
   options.mode = sl::DLSSGMode::eOff;
   constexpr auto kRetain = static_cast<uint32_t>(sl::DLSSGFlags::eRetainResourcesWhenOff);
   options.flags = static_cast<sl::DLSSGFlags>(static_cast<uint32_t>(options.flags) & ~kRetain);
-  const sl::Result result = real(viewport, options);
+  const sl::Result result = SubmitSetOptions(real, viewport, options);
   LogSlResult("submitted Off for the FG preset switch (resources not retained)", result);
   return result == sl::Result::eOk;
 }
@@ -266,18 +284,24 @@ void ResumeGameRequest() {
 }
 
 void CacheReplaySubmission(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options) {
-  if (options.mode == sl::DLSSGMode::eOff) return;
+  sl::DLSSGOptions copy{};
+  const bool valid = BuildForwardedOptions(options, copy, 0u, false, false, 0.f) && options.next == nullptr;
   AcquireSRWLockExclusive(&g_replay_lock);
+  g_replay_valid = valid;  // Never replay an older request or retain a caller-owned extension chain.
+  if (!valid) {
+    ReleaseSRWLockExclusive(&g_replay_lock);
+    return;
+  }
   g_replay_viewport = viewport;
-  g_replay_options = options;
-  g_replay_valid = true;
+  // Cache Off too: disabling the experiment must never revive an older enabled game request.
+  g_replay_options = copy;
   ReleaseSRWLockExclusive(&g_replay_lock);
 }
 
 bool DynamicReady(bool game_enabled) {
   // XMX: NVIDIA's Dynamic MFG asks the provider to own the multiplier, but in this mode XeFG owns
   // the generation and its count comes from the ported model, so the row stands down.
-  if (g_xmx_blocked.load(std::memory_order_relaxed)) return false;
+  if (g_xmx_blocked.load(std::memory_order_relaxed) || g_hud_inputs_only.load(std::memory_order_relaxed)) return false;
   return game_enabled && g_dynamic_enabled.load(std::memory_order_relaxed) && g_dynamic_d3d12.load(std::memory_order_relaxed)
          && g_streamline_owner_seen.load(std::memory_order_acquire) && g_dynamic_support_seen.load(std::memory_order_acquire)
          && g_dynamic_supported.load(std::memory_order_relaxed)
@@ -287,9 +311,9 @@ bool DynamicReady(bool game_enabled) {
 // Forwards the game's own request unchanged, keeping the panel's live row honest: the panel's own
 // count is not in force here, so the row must not keep showing a number nothing applied.
 sl::Result ForwardGameRequest(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options, SetOptionsFn real) {
-  const sl::Result result = real(viewport, options);
+  const sl::Result result = SubmitSetOptions(real, viewport, options);
   if (result == sl::Result::eOk) {
-    RecordAccepted(options.numFramesToGenerate, false);
+    RecordAccepted(options.mode == sl::DLSSGMode::eOff ? 0u : options.numFramesToGenerate, false);
     g_live_dynamic.store(false, std::memory_order_relaxed);
   }
   return result;
@@ -306,7 +330,7 @@ sl::Result CallSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
   const bool game_enabled = options.mode != sl::DLSSGMode::eOff;
   const bool dynamic = DynamicReady(game_enabled);
 
-  if (!dynamic && !override_generated) return real(viewport, options);
+  if (!dynamic && !override_generated) return SubmitSetOptions(real, viewport, options);
 
   const float target = static_cast<float>(g_dynamic_target_fps.load(std::memory_order_relaxed));
   sl::DLSSGOptions forwarded{};
@@ -324,10 +348,10 @@ sl::Result CallSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
         nr::Logf(nr::LogLevel::WARN, "Dynamic MFG was not submitted: the game supplied an unknown DLSSGOptions ABI; fixed mode remains active");
       }
     }
-    return real(viewport, options);
+    return SubmitSetOptions(real, viewport, options);
   }
 
-  const sl::Result result = real(viewport, forwarded);
+  const sl::Result result = SubmitSetOptions(real, viewport, forwarded);
   if (dynamic) LogSlResult("dynamic submission (eDynamic)", result);
   if (result == sl::Result::eOk) {
     // What is in force now, for the panel's row: the accepted count, whether it is the panel's own, and
@@ -350,7 +374,7 @@ sl::Result CallSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
     // game's own request, not eDynamic.
     sl::DLSSGOptions plain{};
     if (BuildForwardedOptions(options, plain, generated_frames, override_generated, false, 0.0f)) {
-      const sl::Result retry = real(viewport, plain);
+      const sl::Result retry = SubmitSetOptions(real, viewport, plain);
       if (retry == sl::Result::eOk) {
         if (!g_dynamic_fell_back.exchange(true, std::memory_order_relaxed)) {
           nr::Logf(nr::LogLevel::WARN, "NVIDIA Dynamic MFG was rejected with sl result {}; fixed mode was restored and accepted",
@@ -380,6 +404,29 @@ sl::Result CallSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOpt
 sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options) {
   const auto real = g_real_set_options.load(std::memory_order_acquire);
   if (real == nullptr) return sl::Result::eErrorNotInitialized;
+  CacheReplaySubmission(viewport, options);
+  // This wins over Dynamic MFG, forced multipliers and a preset drain. Never fall back to an
+  // enabled request on rejection: that would silently start generating frames against this choice.
+  if (g_hud_inputs_only.load(std::memory_order_acquire)) {
+    g_drain.store(0u, std::memory_order_release);
+    sl::DLSSGOptions off{};
+    if (!BuildForwardedOptions(options, off, 0u, false, false, 0.f)) {
+      g_hud_inputs_result.store(HudInputsResult::UNSUPPORTED, std::memory_order_release);
+      LogSlResult("HUD inputs only: unsupported options ABI; no request submitted", sl::Result::eErrorUnsupportedInterface);
+      return sl::Result::eErrorUnsupportedInterface;
+    }
+    off.mode = sl::DLSSGMode::eOff;
+    off.flags = static_cast<sl::DLSSGFlags>(static_cast<uint32_t>(off.flags)
+        & ~static_cast<uint32_t>(sl::DLSSGFlags::eRetainResourcesWhenOff));
+    const sl::Result result = SubmitSetOptions(real, viewport, off, true);
+    g_hud_inputs_result.store(result == sl::Result::eOk ? HudInputsResult::ACCEPTED : HudInputsResult::REFUSED, std::memory_order_release);
+    if (result == sl::Result::eOk) {
+      RecordAccepted(0u, false);
+      g_live_dynamic.store(false, std::memory_order_relaxed);
+    }
+    LogSlResult("HUD inputs only: submitted backend Off without resource retention", result);
+    return result;
+  }
 
   const bool game_enabled = options.mode != sl::DLSSGMode::eOff;
   // A game that submits frame generation on every frame cannot be allowed to cancel the drain by
@@ -391,7 +438,6 @@ sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
   if (game_enabled && Draining()) {
     // Cached first: the resume after the drain re-submits the game's newest shape, not the one that
     // happened to be current when the drain began.
-    CacheReplaySubmission(viewport, options);
     nr::Logf(nr::LogLevel::TRACE, "sl-fg: the game's enabled submission is held for the running FG preset drain");
     return sl::Result::eOk;
   }
@@ -404,7 +450,6 @@ sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
   const bool dynamic_ready = DynamicReady(game_enabled);
   const uint32_t multiplier = g_force_multiplier.load(std::memory_order_relaxed);
   const uint32_t requested = options.numFramesToGenerate;
-  if (game_enabled) CacheReplaySubmission(viewport, options);
   // The request line is an edge log too: The Witcher 3 submits the same off shape every frame, and a
   // line per frame buried a session in 21k copies of it. Every field the line prints is in the key.
   const uint64_t shape = (static_cast<uint64_t>(static_cast<uint32_t>(options.mode) & 0xffu))
@@ -450,7 +495,7 @@ sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
   // Fixed-multiplier force policy (force_policy.hpp): Off is never rewritten; Dynamic owns the
   // selection while it is eligible; otherwise 2..6 replaces the game's count with multiplier-1.
   if (!game_enabled || dynamic_ready) {
-    const sl::Result result = !game_enabled ? real(viewport, options) : CallSetOptions(viewport, options);
+    const sl::Result result = !game_enabled ? ForwardGameRequest(viewport, options, real) : CallSetOptions(viewport, options);
     LogSlResult(!game_enabled ? "forwarded the game's Off request unchanged" : "dynamic-priority passthrough", result);
     return result;
   }
@@ -473,7 +518,7 @@ sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
     if (!warned.exchange(true, std::memory_order_relaxed)) {
       nr::Logf(nr::LogLevel::WARN, "the FG multiplier override refuses an unknown DLSSGOptions ABI; forwarding the game's request unchanged");
     }
-    const sl::Result result = real(viewport, options);
+    const sl::Result result = SubmitSetOptions(real, viewport, options);
     LogSlResult("unknown DLSSGOptions ABI; forwarded unchanged", result);
     return result;
   }
@@ -496,7 +541,7 @@ sl::Result HookedSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGO
                  desired, static_cast<uint32_t>(result), static_cast<uint32_t>(retry), requested);
       }
       // Never leave the player without FG: put the game's own request through.
-      const sl::Result fallback = real(viewport, options);
+      const sl::Result fallback = SubmitSetOptions(real, viewport, options);
       LogSlResult("fallback to the game's own request after a refused override", fallback);
       return fallback;
     }
@@ -582,6 +627,7 @@ sl::Result HookedGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& st
   // winning (several GetState calls read the same batch).
   if (result == sl::Result::eOk && observed->structVersion >= sl::kStructVersion1) {
     framerate::OnPresentedBatch(observed->numFramesActuallyPresented);
+    g_hud_presented_batch.store(observed->numFramesActuallyPresented, std::memory_order_relaxed);
   }
   if (result == sl::Result::eOk) {
     if (observed->structVersion >= sl::kStructVersion4
@@ -737,6 +783,40 @@ void SetForceMultiplier(uint32_t multiplier) {
   g_replay_pending.store(true, std::memory_order_release);  // the Present poll re-submits it live
 }
 
+void SetHudInputsOnly(bool enabled) {
+  if (g_hud_inputs_only.exchange(enabled, std::memory_order_acq_rel) == enabled) return;
+  g_hud_inputs_result.store(HudInputsResult::WAITING, std::memory_order_release);
+  if (enabled) {
+    g_hud_fg_evaluates.store(0u, std::memory_order_relaxed);
+    g_hud_presented_batch.store(0u, std::memory_order_relaxed);
+  }
+  g_hud_trace_at.store(0u, std::memory_order_relaxed);
+  g_replay_pending.store(true, std::memory_order_release);
+  nr::Logf(nr::LogLevel::INFO, "sl-fg: HUD inputs only {}; {}", enabled ? "on" : "off",
+           enabled ? "submitting real backend Off; the game must still provide HUD-less/opacity tags"
+                   : "restoring the game's latest request");
+}
+
+bool HudInputsOnlyWanted() { return g_hud_inputs_only.load(std::memory_order_acquire); }
+bool HudInputsOnlyActive() { return g_hud_inputs_active.load(std::memory_order_acquire); }
+
+void NoteFgEvaluate() {
+  if (HudInputsOnlyWanted() || HudInputsOnlyActive()) g_hud_fg_evaluates.fetch_add(1u, std::memory_order_relaxed);
+}
+
+void TraceHudInputs(uint64_t hudless, uint64_t opacity, bool recent_hudless, bool recent_opacity, std::string_view correction) {
+  if (!HudInputsOnlyWanted() && !HudInputsOnlyActive()) return;
+  const uint64_t now = GetTickCount64();
+  uint64_t previous = g_hud_trace_at.load(std::memory_order_relaxed);
+  if (previous != 0u && now - previous < 5000u) return;
+  if (!g_hud_trace_at.compare_exchange_strong(previous, now, std::memory_order_relaxed)) return;
+  nr::Logf(nr::LogLevel::INFO,
+           "sl-fg: HUD inputs only trace: wanted={} backend_off_accepted={} result={} HUD-less tags={} opacity tags={} recent={}/{} NGX FG evaluate calls={} last presented batch={}; previous UI correction: {}",
+           HudInputsOnlyWanted(), HudInputsOnlyActive(), static_cast<uint32_t>(g_hud_inputs_result.load(std::memory_order_acquire)),
+           hudless, opacity, recent_hudless, recent_opacity, g_hud_fg_evaluates.load(std::memory_order_relaxed),
+           g_hud_presented_batch.load(std::memory_order_relaxed), correction);
+}
+
 void SetDynamicMfg(bool enabled, uint32_t target_fps) {
   const uint32_t clamped_target = target_fps > 600u ? 0u : target_fps;
   const bool was = g_dynamic_enabled.exchange(enabled, std::memory_order_relaxed);
@@ -775,6 +855,10 @@ void NotifyDynamicD3D12(bool d3d12) {
 // panel's FG preset differs from what the provider last served, and ends it once the provider's cache
 // was reset (the next create rebuilds the model) or the deadline passes.
 void FgPresetTick() {
+  if (HudInputsOnlyWanted()) {
+    g_drain.store(0u, std::memory_order_release);
+    return;
+  }
   const auto real = g_real_set_options.load(std::memory_order_acquire);
   if (real == nullptr) return;  // no Streamline: the FG preset lands at the next start, as before
   const uint64_t now = GetTickCount64();
@@ -813,6 +897,12 @@ LiveState ReadLiveState() {
       .dynamic = g_live_dynamic.load(std::memory_order_relaxed),
       .streamline = (g_real_set_options.load(std::memory_order_acquire) != nullptr),
       .switching = Draining(),
+      .hud_inputs_only = HudInputsOnlyWanted(),
+      .hud_inputs_active = HudInputsOnlyActive(),
+      .hud_inputs_refused = g_hud_inputs_result.load(std::memory_order_acquire) == HudInputsResult::REFUSED,
+      .hud_inputs_unsupported = g_hud_inputs_result.load(std::memory_order_acquire) == HudInputsResult::UNSUPPORTED,
+      .fg_evaluates = g_hud_fg_evaluates.load(std::memory_order_relaxed),
+      .presented_batch = g_hud_presented_batch.load(std::memory_order_relaxed),
       .dynamic_wanted = g_dynamic_enabled.load(std::memory_order_relaxed),
       .dynamic_ready = DynamicReady(true),
       .dynamic_supported = g_dynamic_supported.load(std::memory_order_relaxed),
@@ -836,7 +926,7 @@ void EnsureSlFgHooks() {
   }).detach();
 }
 
-// Re-submits the cached enabled submission through the full wrapper logic so a panel change lands
+// Re-submits the latest cached game request through the full wrapper logic so a panel change lands
 // without the game's own next call. Called from the add-on's Present poll (the game's present
 // thread). A refusal inside the wrapper fails safe exactly as a game-side call would.
 void RefreshFromPanel() {
@@ -851,14 +941,15 @@ void RefreshFromPanel() {
     valid = true;
   }
   ReleaseSRWLockShared(&g_replay_lock);
-  if (!valid) return;  // no enabled SetOptions yet: the change applies when the game makes one
+  if (!valid) return;  // no replayable request: the change applies at the game's next call
   const bool dynamic = g_dynamic_enabled.load(std::memory_order_relaxed);
   // Replaying also on the way back to Game: the wrapper forwards the game's own cached request
   // unchanged, which is what restores its multiplier after a forced value stood in.
-  if (dynamic && !g_dynamic_support_seen.load(std::memory_order_acquire)) {
+  if (dynamic && !HudInputsOnlyWanted() && !g_dynamic_support_seen.load(std::memory_order_acquire)) {
     ProbeDynamicSupport(viewport);  // the game's own GetState may predate FG being enabled
   }
-  HookedSetOptions(viewport, options);
+  const sl::Result result = HookedSetOptions(viewport, options);
+  LogSlResult(HudInputsOnlyWanted() ? "HUD inputs only: live Off replay" : "live game-request replay", result);
 }
 
 }  // namespace uplift::addon::slfg

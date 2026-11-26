@@ -35,7 +35,6 @@ class BeforeFgVk {
     FgInput* input = nullptr;
     HudSettle* settle = nullptr;
     bool use_wanted = false;
-    std::chrono::steady_clock::time_point now;
   };
   struct HudOutcome {
     bool wanted = false;
@@ -57,7 +56,7 @@ class BeforeFgVk {
   // `forwarding_failed`: the relay may have consumed the present's semaphores without signalling them again, so the composer's last
   // submission waits on none of them.
   HudOutcome FinishHud(bool applied, bool forwarding_failed = false);
-  // No longer wanted (UICorrection left On, or DLSS-G stopped reading): every composer's ring retires.
+  // No longer wanted (UICorrection left On): every composer's ring retires.
   void ReleaseHud(uint64_t present_number);
   // The reason is owned by this device's queue entry, until its next attempt or destruction.
   struct HostResult { vk::PresentRelayHost* host = nullptr; std::string_view reason; };

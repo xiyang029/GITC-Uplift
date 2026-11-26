@@ -4,6 +4,7 @@
 
 #include "nr/keys.hpp"
 #include "nr/log.hpp"
+#include "nvfp4/NrEvaluation.h"
 #include "nvfp4/NrNvfp4.h"
 
 namespace uplift::nr {
@@ -104,10 +105,17 @@ NVSDK_NGX_Result Feature::Evaluate(ID3D12GraphicsCommandList* list, const Evalua
   parameters_->Set(keys::UI_CORRECTION, inputs.ui_correction ? 1 : 0);
   parameters_->Set(keys::DEPTH_INVERTED, inputs.depth_inverted);
   // Bracket each evaluation so the NvAPI layers can verify the requested model ran.
-  DlssNr::Nvfp4::BeginEvaluation(requested_preset_);
-  const NVSDK_NGX_Result result = snippet_.EvaluateFeature(list, handle_, parameters_);
+  nvfp4::EvaluationScope evaluation(list, DlssNr::Nvfp4::IsNvfp4(requested_preset_));
+  const bool ready = DlssNr::Nvfp4::BeginEvaluation(requested_preset_);
+  if (!ready) evaluation.Reject("the selected NR model is unavailable");
+  const NVSDK_NGX_Result result = ready ? snippet_.EvaluateFeature(list, handle_, parameters_)
+                                       : NVSDK_NGX_Result_FAIL_PlatformError;
+  if (ready && DlssNr::Nvfp4::IsNvfp4(requested_preset_) && NVSDK_NGX_FAILED(result))
+    evaluation.Reject("NVIDIA NR evaluation failed");
   DlssNr::Nvfp4::EndEvaluation(list);
-  if (DlssNr::Nvfp4::IsNvfp4(requested_preset_) && !DlssNr::Nvfp4::OursRan(true)) {
+  const bool rejected = DlssNr::Nvfp4::IsNvfp4(requested_preset_) && !DlssNr::Nvfp4::OursRan(true);
+  if (rejected || evaluation.failed) {
+    if (evaluation.failed && !rejected && !evaluation.failure.empty()) DlssNr::Nvfp4::Refuse(evaluation.failure.c_str());
     // Use the session failure path rather than showing the runtime model as a fallback.
     Logf(LogLevel::ERR, "NR model {} did not run as requested ({}); refusing this pass, no fallback",
          requested_preset_, DlssNr::Nvfp4::Problem());

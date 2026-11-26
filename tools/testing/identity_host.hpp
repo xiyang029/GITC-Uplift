@@ -13,10 +13,11 @@ class IdentityHost final : public nr::Host {
   }
   class IdentityFeature final : public nr::FeatureInterface {
    public:
-    explicit IdentityFeature(std::vector<bool>& resets) : resets_(resets) {}
+    IdentityFeature(std::vector<bool>& resets, bool& fail_next) : resets_(resets), fail_next_(fail_next) {}
     NVSDK_NGX_Result Create(ID3D12GraphicsCommandList*, const nr::CreateInfo& info) override { size_ = info.capacity; return NVSDK_NGX_Result_Success; }
     NVSDK_NGX_Result Evaluate(ID3D12GraphicsCommandList* list, const nr::EvaluateInputs& inputs, const nr::Controls&) override {
       resets_.push_back(inputs.reset);
+      if (fail_next_) { fail_next_ = false; return NVSDK_NGX_Result_FAIL_PlatformError; }
       Barrier(list, inputs.color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
       Barrier(list, inputs.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
       list->CopyResource(inputs.output, inputs.color);
@@ -30,13 +31,15 @@ class IdentityHost final : public nr::Host {
     nr::Size Capacity() const override { return size_; }
    private:
     std::vector<bool>& resets_;
+    bool& fail_next_;
     nr::Size size_;
   };
   NVSDK_NGX_Result LoadRuntime() override { return NVSDK_NGX_Result_Success; }
   void UnloadRuntime() override {}
   void AbandonRuntime() override {}
-  std::unique_ptr<nr::FeatureInterface> NewFeature() override { return std::make_unique<IdentityFeature>(resets); }
+  std::unique_ptr<nr::FeatureInterface> NewFeature() override { return std::make_unique<IdentityFeature>(resets, fail_next_evaluate); }
   std::vector<bool> resets;
+  bool fail_next_evaluate = false;
   nr::MemoryInfo QueryMemory() override { return {.budget = uint64_t{16} << 30, .usage = 0u}; }
   std::optional<uint64_t> QueryRuntimeBytes() override { return 0u; }
   std::chrono::steady_clock::time_point Now() override { return std::chrono::steady_clock::now(); }

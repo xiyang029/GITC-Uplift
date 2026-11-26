@@ -166,7 +166,7 @@ void BeforeFgVk::BeginHud(const HudPresentVk& hud, VkQueue queue, const VkPresen
   if (hud.input == nullptr || hud.settle == nullptr) return;
   const HudFrameFacts facts = {.width = chain.size.width, .height = chain.size.height, .format = static_cast<uint32_t>(chain.vk_format),
                                .api = TagApi::VULKAN};
-  hud_.reason = DecideHudFrame(true, hud.input->FrameGenerationReads(hud.now), taken, facts);
+  hud_.reason = DecideHudFrame(true, taken, facts);
   NoteHudFormats(hud_.reason, taken, facts);
   const bool admitted = hud.settle->Admit(hud_.reason);
   if (hud_.reason == HudReason::USABLE && !admitted) hud_.reason = HudReason::SETTLING;

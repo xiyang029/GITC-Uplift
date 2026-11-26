@@ -71,6 +71,9 @@ bool Installed();
 // resolved Streamline export finds it, and for good in a game without Streamline (the overlay greys Before FG with why).
 bool StreamlineLoaded();
 enum class FgMode { UNKNOWN, OFF, ON, AUTO };
+[[nodiscard]] constexpr FgMode EffectiveMode(FgMode observed, bool hud_inputs_off_accepted) {
+  return hud_inputs_off_accepted ? FgMode::OFF : observed;
+}
 FgMode Mode();
 // The mode's name for the DiagnosticBeforeFG trace.
 std::string_view ModeName(FgMode mode);

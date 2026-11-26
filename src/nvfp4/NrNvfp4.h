@@ -73,8 +73,9 @@ void Configure(bool wanted, const std::filesystem::path& assets);
 void Retry();
 // Check a signed-kernel FP8 preset before creating its NVIDIA carrier feature. Empty when the weights are ready.
 std::string Fp8SetupProblem(unsigned preset);
-// Around every evaluation of the NR model recorded on `list`, whatever the pass's model is.
-void BeginEvaluation(unsigned requestedPreset);
+// Around every evaluation, whatever the model is. False: the selected model is unavailable; skip Evaluate,
+// still call EndEvaluation, then OursRan to report the reason. Never run the runtime's model in its place.
+bool BeginEvaluation(unsigned requestedPreset);
 void EndEvaluation(ID3D12GraphicsCommandList* list);
 // After EndEvaluation() of an evaluation the runtime really made: false when the pass asked for a 4-bit model and our
 // kernels did not run it, so its output is the runtime's own model and must not be shown. `whole`: no part of the

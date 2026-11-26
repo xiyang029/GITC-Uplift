@@ -129,7 +129,7 @@ BeforeFgDx12::Result BeforeFgDx12::Record(IDXGISwapChain* chain, ID3D12Device* d
   if (hud && hud->use_wanted) {
     list = (queue.ring ? queue.ring->BeginList() : nullptr);
     if (list) {
-      hud_begun = BeginHudD3D12(*hud, list, native.Get(), hud->input->Presents(), now);
+      hud_begun = BeginHudD3D12(*hud, list, native.Get(), hud->input->Presents());
     } else if (hud->tags) {
       static_cast<void>(hud->tags->Take());
       hud_begun.reason = HudReason::NO_FREE_IMAGE;

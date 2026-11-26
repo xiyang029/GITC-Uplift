@@ -543,6 +543,28 @@ std::string FormatMultiplierLive(bool dynamic, uint32_t multiplier, bool panel_m
   return std::format("Frame generation: {}x (the game's own)", multiplier);
 }
 
+std::string FormatHudInputsLive(const HudInputsFacts& facts) {
+  if (!facts.wanted) {
+    if (!facts.off_applied) return {};
+    return facts.refused ? "HUD inputs only: restoring the game's FG request was refused; toggle game FG to retry"
+                         : "HUD inputs only: waiting to restore the game's FG request";
+  }
+  if (!facts.streamline) return "HUD inputs only: waiting for Streamline DLSS-G";
+  if (facts.unsupported) return "HUD inputs only: unsupported options ABI; no request submitted";
+  if (facts.refused) return "HUD inputs only: backend refused Off; check the log";
+  if (!facts.off_applied) return "HUD inputs only: waiting for the game's FG request";
+  return "HUD inputs only: backend accepted Off; HUD inputs depend on the game";
+}
+
+std::string FormatHudInputsTags(const HudInputsFacts& facts) {
+  if (!facts.wanted && !facts.off_applied) return {};
+  // Recent means a non-empty tag arrived within two seconds, not a validated same-frame pair.
+  // The existing UI-correction note still explains whether the pair can actually be used.
+  return std::format("HUD inputs: HUD-less {}, opacity {}; recent tags {}/{}; FG evaluate calls {}; last presented batch {}",
+                     facts.hudless_tags, facts.opacity_tags, facts.hudless_recent ? 1 : 0, facts.opacity_recent ? 1 : 0,
+                     facts.fg_evaluates, facts.presented_batch);
+}
+
 std::string FormatFrameRateLine(uint32_t real_milli, uint32_t output_milli, bool output_estimated, uint64_t age_ms) {
   // A window older than two seconds is not "now" any more (a paused or minimized game): say nothing
   // rather than a stale number.

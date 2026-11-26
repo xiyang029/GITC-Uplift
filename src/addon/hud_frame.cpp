@@ -74,9 +74,8 @@ bool SingleSampledLayer(const TaggedImage& image) {
 
 }  // namespace
 
-HudReason DecideHudFrame(bool use_wanted, bool frame_generation_reads, const TakeResult& taken, const HudFrameFacts& back_buffer) {
+HudReason DecideHudFrame(bool use_wanted, const TakeResult& taken, const HudFrameFacts& back_buffer) {
   if (!use_wanted) return HudReason::CORRECTION_OFF;
-  if (!frame_generation_reads) return HudReason::NOT_READ;
   if (!taken.frame) return (taken.reason == HudReason::USABLE ? HudReason::NOT_TAGGED : taken.reason);
   const TaggedImage& hudless = taken.frame->hudless;
   const TaggedImage& opacity = taken.frame->opacity;
@@ -96,7 +95,11 @@ HudReason DecideHudFrame(bool use_wanted, bool frame_generation_reads, const Tak
   } else if (hudless.denies_shader_reads || opacity.denies_shader_reads) {
     return HudReason::USAGE;
   }
-  if (back_buffer.early && (back_buffer.effects_on || back_buffer.technique_expected)) return HudReason::EFFECTS_ON;
+  // With FG running, N may be handed to its evaluate and must include the same effects as the displayed frame.
+  // With FG off, compose N into the real frame here; ReShade then applies its effects to that composed frame.
+  if (back_buffer.early && back_buffer.frame_generation_active && (back_buffer.effects_on || back_buffer.technique_expected)) {
+    return HudReason::EFFECTS_ON;
+  }
   return HudReason::USABLE;
 }
 

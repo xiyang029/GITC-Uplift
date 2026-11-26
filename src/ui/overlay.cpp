@@ -681,7 +681,8 @@ bool DrawDlssReflexTab(const OverlayView& view, Settings* settings, OverlayState
   }
   // What actually runs, gathered in one place at the bottom: a row says what was asked for, these say what the
   // runtime is doing with it.
-  const std::array<const std::string*, 8> live = {&view.dlss_live_line,     &view.rr_live_line,     &view.fg_live_line,
+  const std::array<const std::string*, 10> live = {&view.dlss_live_line,     &view.rr_live_line,     &view.fg_live_line,
+                                                  &view.fg_hud_inputs_line, &view.fg_hud_tags_line,
                                                   &view.fg_multiplier_line, &view.dynamic_mfg_line, &view.frame_rate_line,
                                                   &view.reflex_live_line,   &view.xmx_live_line};
   if (std::ranges::any_of(live, [](const std::string* line) { return !line->empty(); })) {

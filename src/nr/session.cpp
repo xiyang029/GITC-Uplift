@@ -797,6 +797,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
       }
     }
     if (NVSDK_NGX_FAILED(result)) {
+      stage.reset_pending = true;  // A partial evaluation must not become the next frame's history.
       ++consecutive_failures_;
       message_ = std::format("NR evaluate failed: {:#010x}", static_cast<uint32_t>(result));
       Log(LogLevel::WARN, message_);

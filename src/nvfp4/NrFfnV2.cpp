@@ -34,6 +34,7 @@
 #include "Nvfp4Support.h"             // the asset reader, buffer allocation and error checks every loader shares
 
 #include "NrFfnV2.h"
+#include "NrEvaluation.h"
 
 #pragma comment(lib, "bcrypt.lib")
 
@@ -448,12 +449,16 @@ unsigned SharedBytes(unsigned groups, unsigned halves) {
     return 64 + o.stages * o.stepsPerStage * (groups * kAqUnit + halves * kWqHalf);
 }
 
-// The set of weights this pair will use. There is no numbered set file for the requested one, or trained weights
-// were asked for but there is no such file: record a fault and fall back to the first set.
+// Select the requested records before recording any kernel of the pair.
 uint64_t SetAt(State& s, const ModelWeights& weights, const Options& opt, int model) {
     if (model == 1) return 0;   // Model B uses only the base set from its own folder.
-    if (s.passSet < weights.setAt.size() && weights.setAt[s.passSet]) return weights.setAt[s.passSet];
-    if (s.passSet < weights.setAt.size() || (opt.trained && !weights.trained && !weights.trainedIsFirst)) ++s.faults;
+    if (s.passSet != kDefaultSet) {
+        if (s.passSet >= weights.setAt.size() || !weights.setAt[s.passSet])
+            throw std::runtime_error("missing ffn_v2_set" + std::to_string(s.passSet) + ".bin");
+        return weights.setAt[s.passSet];
+    }
+    if (opt.trained && !weights.trained && !weights.trainedIsFirst)
+        throw std::runtime_error("missing ffn_v2_trained.bin");
     return opt.trained ? weights.trained : 0;
 }
 
@@ -472,7 +477,8 @@ int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, cons
     auto& buffers = session.blocks[block];
     const auto& w = weights.blocks[block];
     const auto& opt = s.options;
-    // Allocate before the first launch so allocation failure can safely keep the FP8 pair.
+    const uint64_t set = SetAt(s, weights, opt, int(model));
+    // Validate the records and reserve scratch before submitting the pair's first kernel.
     if (SmallContract(weights, tokens, opt) && weights.smallSplit) {
         const uint64_t bytes = uint64_t(weights.smallSplit) * (8 * tiles) * 256 * 64 * sizeof(float);
         if (!buffers.partial.resource) buffers.partial = Allocate(device, bytes);
@@ -486,7 +492,6 @@ int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, cons
                           tokens, w.tx, generation};
     LaunchKernel(commands, d.pack, &pack, sizeof pack, tiles * 8, 16, 0);
     if ((opt.barriers & 2) || !chained) Barrier(commands);
-    const uint64_t set = SetAt(s, weights, opt, int(model));
     const ExpandParams expand{buffers.xq.Address(), weights.weights.Address() + set + w.w1, buffers.hq.Address(), session.FlagAddress(block, tiles, true),
                               chained ? session.FlagAddress(block, tiles, false) : 0, tokens, w.out1, w.th,
                               opt.expandGroups, opt.expandHalves, generation};
@@ -581,6 +586,15 @@ int ChooseModel(State& s, const ListState& list) {
 // reported, so that a failure to report cannot change what happens to the launch.
 NvAPI_Status Fail(State& s, ListState& list, ID3D12GraphicsCommandList* commands, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count,
                   const char* what) noexcept {
+    if (auto* evaluation = nvfp4::EvaluationScope::For(commands)) {
+        evaluation->Reject(what);
+        ++s.faults;
+        list.model = -1;
+        list.pending.active = false;
+        list.dropping = true;
+        Say(s, "evaluation refused: ", what);
+        return NVAPI_ERROR;
+    }
     const bool half = list.pending.active;
     ++s.faults;
     s.enabled = false;
@@ -830,9 +844,18 @@ void UseSet(unsigned set) {
     s.passSet = set;
 }
 
-bool SetComplete(unsigned set, std::string* missing) {
+bool SetComplete(unsigned set, std::string* missing, bool modelB) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
+    if (!s.enabled || s.broken || s.failed) {
+        if (missing) *missing = s.broken || s.failed ? "feed-forward failed; reload NR before retrying" : "feed-forward kernels are off";
+        return false;
+    }
+    if (s.options.modelFolders && !s.modelFiles[modelB ? 1 : 0]) {
+        if (missing) *missing = modelB ? "modelB/ffn_v2.txt" : "modelA/ffn_v2.txt";
+        return false;
+    }
+    if (modelB) return true; // Model B uses the base records of its own model folder.
     const bool numbered = set != kDefaultSet;
     const bool complete = numbered ? set < s.setFile.size() && s.setFile[set]
                                    : !s.options.trained || s.trainedFile;

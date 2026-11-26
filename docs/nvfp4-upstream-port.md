@@ -117,3 +117,10 @@ Two small FP8 fixes from the v0.10.0 line of `wilsjo2/OptiScaler-DLSSNR-PreSR-Mu
 - `7f01938d6c30c9acb4438fbfacf4fb71b25956ab`: `NrFp8::SetComplete(unsigned, std::string*)` now names the set that is off, absent or incomplete. `DlssNr::Nvfp4::Fp8SetupProblem()` reports load failure or a missing set before an NGX feature is created, and `src/nr/feature.cpp::Feature::Create` refuses an FP8 preset with that reason before allocating parameters. `BeginEvaluation` reuses the same detail for its no-fallback report.
 
 Not taken from the v0.10.0 sweep: INT8 presets 25-28 (no weights shipped), the independent Vulkan host (local `VkFeature` still refuses custom presets), the calibrator (no held-frame readback locally) and the NR menu redesign (local overlay is independently maintained).
+
+## Selective failure hardening: `9a1f3419` and `13328dc8`
+
+- FP8 manifests are now validated per set. A malformed optional package reports its own parser error without preventing another valid set from loading; retrying the same asset path can repair failed sets while preserving already-loaded manifests.
+- A requested custom model that is unavailable is rejected before NGX evaluation. During a selected custom evaluation, kernel/weight errors latch on its command-list scope; the outer NvAPI launch hook refuses subsequent launches, layer cleanup does not replay deferred kernels, and the frame is rejected. Failed frames mark NR history for reset on recovery. Requested FFN records are resolved before the first replacement launch instead of silently substituting another set.
+- D3D12 bridge allocator reuse now treats `GetCompletedValue() == UINT64_MAX` as device removal, even though the ordinary bridge watchdog already detects removal at present time.
+- The native pass-host rewrite, Vulkan FP8 path, INT8 models, menu redesign and calibrator remain out of scope. The failure path is exercised by `uplift_nvfp4_failure_regression`; session history recovery is covered by `uplift_nr_regression`.

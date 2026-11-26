@@ -12,12 +12,13 @@ inline constexpr std::string_view HUDLESS_USED = "used: NR ran on it too";
 inline constexpr char HUDLESS_HIDDEN[] = "hidden from frame generation ({})";
 inline constexpr char HUDLESS_LEFT[] = "left as the game made it ({})";
 inline constexpr std::string_view HUDLESS_HOOKS_OFF = "cannot be changed: NGX hooks are off";
-// The notes under UI correction while frame generation reads Uplift's output (Before FG): NR runs on the game's HUD-less image, the setting is
+// The notes under UI correction at Present: NR runs on the game's HUD-less image, the setting is
 // not On, or it is On and the game's image cannot be used (with the Present's reason).
 inline constexpr std::string_view HUDLESS_UI_CORRECTION_USED = "On: NR runs on the game's HUD-less image; the HUD is not changed";
+inline constexpr std::string_view HUDLESS_UI_CORRECTION_IDLE = "On: HUD-less inputs are usable, but NR did not run on this frame";
 inline constexpr std::string_view HUDLESS_UI_CORRECTION_NOT_ON =
     "Auto and Off: NR runs on the frame with its HUD. On uses the game's HUD-less image instead";
-inline constexpr char HUDLESS_UI_CORRECTION_UNUSABLE[] = "On, but the game's HUD-less image cannot be used: {}. NR runs on the frame with its HUD";
+inline constexpr char HUDLESS_UI_CORRECTION_UNUSABLE[] = "On, but the game's HUD-less image cannot be used: {}";
 
 // The evaluate's reasons (addon::FgInput::Decide).
 inline constexpr std::string_view HUDLESS_NO_IMAGE = "no HUD-less image";
@@ -32,7 +33,6 @@ inline constexpr auto HUDLESS_EVALUATE_REASONS =
 inline constexpr auto HUD_REASON_TEXTS = std::to_array<std::string_view>({
     "usable",                                          // USABLE
     "UI correction is not On",                         // CORRECTION_OFF
-    "frame generation does not read Uplift's output",  // NOT_READ
     "waiting for steady tags",                         // SETTLING
     "no tags seen",                                    // NOT_TAGGED
     "more than one frame tagged",                      // MORE_THAN_ONE_FRAME

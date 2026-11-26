@@ -276,6 +276,7 @@ struct Settings {
   // The FG multiplier and Dynamic MFG (addon/sl_fg_hooks.hpp) and the Reflex override
   // (addon/reflex_override.hpp); each applies live on the game's next relevant call.
   FgMultiplierOverride fg_multiplier = FgMultiplierOverride::GAME;
+  bool fg_hud_inputs_only = false;  // submit real backend Off, retaining the game's request/tags
   bool dynamic_mfg = false;
   uint32_t dynamic_mfg_target_fps = 0u;  // 0 = the display's refresh rate
   // The XMX mode (src/xmx/): let XeFG's own context generate inside DLSS-G's EvaluateFeature,

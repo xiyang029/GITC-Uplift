@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "NrNet4.h"
+#include "NrEvaluation.h"
 #include "NrFfnV2.h"
 #include "Nvfp4Support.h"    // the asset reader, buffer allocation and error checks every loader shares
 
@@ -608,8 +609,13 @@ void Replace(State& s, ID3D12GraphicsCommandList* commands, ID3D12Device* device
                 if (theirsAt) memcpy(ours + c.dst + (kBlendParam - c.src), &own, 8);
             }
     uint64_t records = s.options.family[family].trained ? d.weights[family].trained : 0;
-    if (s.passSet < kMaxSets && s.sets[s.passSet].present && d.weights[family].setAt[s.passSet]) records = d.weights[family].setAt[s.passSet];
-    else if (family != PrePost && (s.passSet < kMaxSets || (s.options.family[family].trained && !records && !s.manifest[family].trainedIsFirst))) ++s.substituted;
+    if (s.passSet != kDefaultSet && family != PrePost) {
+        if (s.passSet >= kMaxSets || !s.sets[s.passSet].present || !d.weights[family].setAt[s.passSet])
+            throw std::runtime_error(std::string(kFamilyName[family]) + "4_set" + std::to_string(s.passSet) + ".bin is missing");
+        records = d.weights[family].setAt[s.passSet];
+    } else if (family != PrePost && s.options.family[family].trained && !records && !s.manifest[family].trainedIsFirst) {
+        throw std::runtime_error(std::string(kFamilyName[family]) + "4_trained.bin is missing");
+    }
     const uint64_t record = d.weights[family].buffer.Address() + records + slot.offset;
     memcpy(ours + slot.w, &record, 8);
     memcpy(ours + slot.options, &options, 4);
@@ -924,6 +930,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
             if (action==1) kernels=&pooled;
         } catch (const std::exception& error) {
             Notice(s,std::string("pool failure: ")+error.what());
+            if (nvfp4::EvaluationScope::For(commands)) return NVAPI_ERROR;
             // Never fall back to full-token launches after a pooled stream started.
             if (list->pool.active) return NVAPI_ERROR;
         }
@@ -1017,6 +1024,11 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         }
         return NVAPI_OK;
     } catch (const std::exception& error) {
+        if (nvfp4::EvaluationScope::For(commands)) {
+            ++s.passed[f];
+            Notice(s, std::string(kFamilyName[f]) + ": evaluation refused: " + error.what());
+            return NVAPI_ERROR;
+        }
         // Nothing of ours was recorded for this launch: the runtime's own kernel runs.
         if(list && list->side.active) { Notice(s,std::string("Side4 failed after suppression: ")+error.what());return NVAPI_ERROR; }
         if (list && number >= 0) list->family[f].state[number] = 1;
@@ -1025,6 +1037,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         ++s.passed[f];
         return s.launch(commands, kernels, count);
     } catch (...) {
+        if (nvfp4::EvaluationScope::For(commands)) { ++s.passed[f]; return NVAPI_ERROR; }
         if(list && list->side.active)return NVAPI_ERROR;
         if (list && number >= 0) list->family[f].state[number] = 1;
         Notice(s, std::string(kFamilyName[f]) + ": a launch was left to the runtime: unknown error");
@@ -1134,7 +1147,7 @@ bool SetComplete(unsigned set, std::string* missing) {
         if (f == PrePost || !s.options.family[f].groups) continue;
         const auto& m = s.manifest[f];
         const std::string stem = std::string(kFamilyName[f]) + "4";
-        bool complete = m.loaded;
+        bool complete = s.enabled && m.loaded;
         std::string file = stem + ".txt";
         if (complete && set == kDefaultSet) {
             complete = !s.options.family[f].trained || !m.trained.empty() || m.trainedIsFirst;
@@ -1172,7 +1185,8 @@ void EndEvaluation(ID3D12GraphicsCommandList* commands) noexcept {
         std::lock_guard guard(s.mutex);
         const auto found = s.lists.find(commands);
         if (found == s.lists.end()) return;
-        Learn(s, found->second);
+        const auto* evaluation = nvfp4::EvaluationScope::For(commands);
+        if (!evaluation || !evaluation->failed) Learn(s, found->second);
         s.lists.erase(found);
     } catch (...) {
     }

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <format>
+#include <limits>
 #include <utility>
 
 #include "addon/dred.hpp"
@@ -236,7 +237,8 @@ bool D3D12Side::GrowRing(size_t slots) {
 }
 
 bool D3D12Side::SlotFree() const {
-  return progress_->GetCompletedValue() >= ring_[next_slot_].done;
+  const uint64_t completed = progress_->GetCompletedValue();
+  return completed != std::numeric_limits<uint64_t>::max() && completed >= ring_[next_slot_].done;
 }
 
 ID3D12GraphicsCommandList* D3D12Side::BeginList() {

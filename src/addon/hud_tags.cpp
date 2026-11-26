@@ -106,6 +106,8 @@ void HudTags::RecordLocked(uintptr_t key, const void* viewport, const void* tags
     if (slot == SLOT_HUDLESS) ++counts_.hudless;
     if (slot == SLOT_ALPHA) ++counts_.opacity;
     if (slot == SLOT_COLOUR) ++counts_.ui_colour;
+    if (slot == SLOT_HUDLESS) counts_.last_hudless_ms = GetTickCount64();
+    if (slot == SLOT_ALPHA || slot == SLOT_COLOUR) counts_.last_opacity_ms = GetTickCount64();
   }
   // Keep the newest HUD_FRAMES frames of each viewport.
   const auto in_viewport = [&](const Frame& f) { return f.viewport == viewport_id; };
@@ -124,7 +126,8 @@ void HudTags::ReleaseLocked(TaggedImage& image) noexcept {
   image = {};
 }
 
-void HudTags::ClearLocked() noexcept {
+void HudTags::ClearLocked(bool invalidate_freshness) noexcept {
+  if (invalidate_freshness) counts_.last_hudless_ms = counts_.last_opacity_ms = 0u;
   for (Frame& frame : frames_) {
     for (TaggedImage& image : frame.images) ReleaseLocked(image);
   }
@@ -165,7 +168,7 @@ TakeResult HudTags::Take() noexcept {
   } else if (result.waiting > 1u) {
     result.reason = HudReason::MORE_THAN_ONE_FRAME;
   }
-  ClearLocked();
+  ClearLocked(false);  // Consumption does not invalidate the last non-empty submission's arrival time.
   return result;
 }
 

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "NrFp8.h"
+#include "NrEvaluation.h"
 #include "Nvfp4Support.h"    // the asset reader and the error check the loaders share
 
 namespace NrFp8 {
@@ -38,6 +39,7 @@ struct Entry {
     uint32_t blend = 0;                                     // offset of the history blend weight pointer (0: none)
 };
 struct Set {
+    std::string failure;
     bool present = false;
     unsigned weighted = 0;
     std::vector<Entry> launches;                            // one per launch of an evaluation
@@ -286,7 +288,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
     ListState& l = found->second;
     const unsigned first = l.index;
     l.index += kernels ? count : 1;
-    if (l.failed) return s.launch(commands, kernels, count);
+    if (l.failed) return NVAPI_ERROR;
     const Set& set = s.sets[l.set];
     try {
         if (!kernels || count == 0) throw std::runtime_error("launch " + std::to_string(first) + " has no kernel");
@@ -336,10 +338,10 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         ++s.replaced;
         return status;
     } catch (const std::exception& error) {
-        // Keep the launch so later kernels do not hang waiting for it. Finish() rejects the evaluation.
         l.failed = true;
         l.reason = error.what();
-        return s.launch(commands, kernels, count);
+        // The outer launch wrapper latches this returned failure for the whole evaluation.
+        return NVAPI_ERROR;
     }
 }
 }   // namespace
@@ -365,19 +367,22 @@ void SetLog(void (*log)(const char*)) {
 void Enable(const fs::path& assets) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
-    if (s.enabled && assets == s.assets) return;
-    for (auto& [device, d] : s.devices)
-        for (const Weights& w : d.sets)
-            if (w.ready) throw std::runtime_error("the FP8 asset folder cannot change while a device holds its weights");
-    std::array<Set, kMaxSets> sets;
+    const bool sameAssets = s.enabled && assets == s.assets;
+    if (!sameAssets)
+        for (auto& [device, d] : s.devices)
+            for (const Weights& w : d.sets)
+                if (w.ready) throw std::runtime_error("the FP8 asset folder cannot change while a device holds its weights");
+    // A retry may repair failed sets, but must not change manifests whose uploaded records are still referenced.
+    std::array<Set, kMaxSets> sets = sameAssets ? s.sets : std::array<Set, kMaxSets>{};
     unsigned found = 0;
     for (unsigned n = 1; n < kMaxSets; ++n) {
+        if (sets[n].present) { ++found; continue; }
+        sets[n] = {};
         std::error_code missing;
         if (!fs::exists(assets / ("fp8_set" + std::to_string(n) + ".txt"), missing)) continue;
-        sets[n] = ReadSet(assets, n);           // throws: a set that is there must be readable
-        ++found;
+        try { sets[n] = ReadSet(assets, n); ++found; }
+        catch (const std::exception& error) { sets[n].failure = error.what(); }
     }
-    if (!found) throw std::runtime_error("no FP8 model in " + assets.string() + " (fp8_set<n>.txt / .bin)");
     s.sets = std::move(sets);
     s.assets = assets;
     for (auto& [device, d] : s.devices)
@@ -401,7 +406,7 @@ bool SetComplete(unsigned set, std::string* missing) {
     if (!s.enabled) { tell("the FP8 models are off"); return false; }
     if (set == 0 || set >= kMaxSets) { tell("FP8 set " + std::to_string(set) + " does not exist"); return false; }
     if (!s.sets[set].present) {
-        tell("nvfp4/fp8/fp8_set" + std::to_string(set) + ".txt / .bin");
+        tell(s.sets[set].failure.empty() ? "nvfp4/fp8/fp8_set" + std::to_string(set) + ".txt / .bin" : s.sets[set].failure);
         return false;
     }
     return true;
@@ -431,6 +436,10 @@ void EndEvaluation(ID3D12GraphicsCommandList* commands) noexcept {
         std::lock_guard guard(s.mutex);
         const auto found = s.lists.find(commands);
         if (found == s.lists.end()) return;
+        if (const auto* evaluation = nvfp4::EvaluationScope::For(commands); evaluation && evaluation->failed && !found->second.failed) {
+            found->second.failed = true;
+            found->second.reason = evaluation->failure;
+        }
         Finish(s, found->second);
         s.lists.erase(found);
     } catch (...) {

@@ -1,4 +1,5 @@
 #include "addon/streamline_present.hpp"
+#include "addon/sl_fg_hooks.hpp"
 
 #include <MinHook.h>
 #include <array>
@@ -1354,7 +1355,7 @@ bool WatchGameFacing(IDXGISwapChain* chain, bool trace_method) {
 bool InsideOuterPresent() { return inside_present; }
 bool Installed() { return enabled.load(std::memory_order_acquire); }
 bool StreamlineLoaded() { return interposer.load(std::memory_order_acquire) != nullptr; }
-FgMode Mode() { return mode.load(std::memory_order_acquire); }
+FgMode Mode() { return EffectiveMode(mode.load(std::memory_order_acquire), slfg::HudInputsOnlyActive()); }
 std::string_view ModeName(FgMode value) { return FG_MODE_NAMES[static_cast<size_t>(value)]; }
 
 }  // namespace uplift::addon::streamline
