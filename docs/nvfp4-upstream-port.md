@@ -100,10 +100,20 @@ not claim a fixed peak-VRAM saving while game command lists still reference old 
 Selective port of `fca8f4c19307d32983b71d703b416ee4294ced55` from `codex/standalone-current`.
 
 - `NrFp8` wraps NvAPI outside the 4-bit layers to see the original launch sequence. It uses NVIDIA's FP8 CUDA-on-D3D12 kernels (RTX 40/50) with weights from `nvfp4/fp8/fp8_set<n>.txt` / `.bin`. Assets are runtime-only. Missing assets or a launch mismatch refuse the pass without falling back or disabling the 4-bit models.
-- Local presets **18-21** select FP8 sets 1-4 (2x, 3x, 2x v2, 3x v2) on runtime Model A. Upstream uses 17-20; local preset IDs remain unchanged for saved configurations, and **17** is retired. FP8 has no Vulkan path.
-- `uplift_nr` builds `NrFp8.cpp` with the existing libraries. The settings schema exposes all four FP8 choices.
+- At this sweep, local presets **18-21** selected FP8 sets 1-4 (2x, 3x, 2x v2, 3x v2) on runtime Model A, while upstream used 17-20; local preset IDs were kept stable for saved configurations, with **17** retired. FP8 has no Vulkan path.
+- **Current mapping (since local commit `7ff8660`, 2026-11-23):** one version of each pass-in-one model remains. Only presets **18 (FP8 2x)** and **19 (FP8 3x)** are active, now using `fp8_set5` / `fp8_set6`; **17, 20 and 21** are retired (`src/nvfp4/NrNvfp4.h:29-46`).
+- `uplift_nr` builds `NrFp8.cpp` with the existing libraries. The settings schema now exposes the two current FP8 choices (2x and 3x in one).
 
 Not ported from `e468b65dd68051fa896738d8874688c770e41703`:
 
 - The slider calibrator needs held-frame trials and NR-output readback; comparing successive game frames would not measure the same input.
 - Named presets need a local settings snapshot and UI. Upstream's `Config` has fields with no local equivalent.
+
+## Sweep 2026-11-26: `e58d15b6` (FP8 output-block form) and `7f01938` (setup validation)
+
+Two small FP8 fixes from the v0.10.0 line of `wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass` were ported. No INT8, no Vulkan host, no menu or calibrator work. Both are confined to the custom FP8 pass-in-one path (presets 18 and 19), which uses NVIDIA's FP8 kernels with our weight records. They do not touch the NVFP4 presets (4, 15, 16, 22) or the runtime's own FP8 presets (1 Legacy / original FP8, 2 Small FP8 / optimized FP8): those built-in networks never enter these checks.
+
+- `e58d15b6198e60925936605a71c1e529f43a573e`: Standard style with an intensity other than 1 makes the runtime launch `<kernel>_simple_blend_full_rect`, the output block with 128 bytes more. `src/nvfp4/NrFp8.cpp` previously required an exact kernel name and parameter size and refused the whole FP8 pass. It now accepts that form when the entry has a blend pointer, matching `paramSize == size + 128`. A `kMaxParams` (512) bound was added before copying the block, because local manifests allow a 512-byte base size.
+- `7f01938d6c30c9acb4438fbfacf4fb71b25956ab`: `NrFp8::SetComplete(unsigned, std::string*)` now names the set that is off, absent or incomplete. `DlssNr::Nvfp4::Fp8SetupProblem()` reports load failure or a missing set before an NGX feature is created, and `src/nr/feature.cpp::Feature::Create` refuses an FP8 preset with that reason before allocating parameters. `BeginEvaluation` reuses the same detail for its no-fallback report.
+
+Not taken from the v0.10.0 sweep: INT8 presets 25-28 (no weights shipped), the independent Vulkan host (local `VkFeature` still refuses custom presets), the calibrator (no held-frame readback locally) and the NR menu redesign (local overlay is independently maintained).

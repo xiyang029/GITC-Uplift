@@ -71,6 +71,8 @@ void Configure(bool wanted, const std::filesystem::path& assets);
 // After a drained session reloads its runtime, retry layer setup at the existing asset path.
 // Keeps loaded GPU allocations and the feed-forward layer's unrecoverable-failure guard.
 void Retry();
+// Check a signed-kernel FP8 preset before creating its NVIDIA carrier feature. Empty when the weights are ready.
+std::string Fp8SetupProblem(unsigned preset);
 // Around every evaluation of the NR model recorded on `list`, whatever the pass's model is.
 void BeginEvaluation(unsigned requestedPreset);
 void EndEvaluation(ID3D12GraphicsCommandList* list);

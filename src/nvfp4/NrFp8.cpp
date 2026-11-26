@@ -301,10 +301,17 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         const Entry& e = set.launches[first];
         if (!e.present) return s.launch(commands, kernels, count);         // a launch that reads no weight record
         const std::string name = function ? function->name : "an unknown kernel";
-        if (name != e.name) throw std::runtime_error("launch " + std::to_string(first) + " is " + name + ", Model A's is " + e.name);
+        // The output block has a second form: Standard style with an intensity other than 1 makes the runtime launch
+        // <kernel>_simple_blend_full_rect, with the same record and blend offsets followed by 128 more bytes.
+        const bool blendForm = e.blend && name == e.name + "_simple_blend_full_rect";
+        if (name != e.name && !blendForm)
+            throw std::runtime_error("launch " + std::to_string(first) + " is " + name + ", Model A's is " + e.name);
         uint32_t at = 0;
-        for (const auto& [size, record] : e.layouts) if (kernels->paramSize == size) at = record;
+        for (const auto& [size, record] : e.layouts)
+            if (kernels->paramSize == size + (blendForm ? 128u : 0u)) at = record;
         if (!at || !kernels->pParams)
+            throw std::runtime_error("launch " + std::to_string(first) + " (" + name + ") has a " + std::to_string(kernels->paramSize) + "-byte parameter block");
+        if (kernels->paramSize > kMaxParams)
             throw std::runtime_error("launch " + std::to_string(first) + " (" + name + ") has a " + std::to_string(kernels->paramSize) + "-byte parameter block");
         const Weights& w = LoadWeights(s, s.devices[l.device], l.device, l.set);
         unsigned char edited[kMaxParams];
@@ -387,10 +394,17 @@ void UseSet(unsigned set) {
     if (set >= kMaxSets) { ++s.faults; s.problem = "FP8 set " + std::to_string(set) + " does not exist"; }
 }
 
-bool SetComplete(unsigned set) {
+bool SetComplete(unsigned set, std::string* missing) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
-    return s.enabled && set > 0 && set < kMaxSets && s.sets[set].present;
+    const auto tell = [&](const std::string& why) { if (missing) *missing = why; };
+    if (!s.enabled) { tell("the FP8 models are off"); return false; }
+    if (set == 0 || set >= kMaxSets) { tell("FP8 set " + std::to_string(set) + " does not exist"); return false; }
+    if (!s.sets[set].present) {
+        tell("nvfp4/fp8/fp8_set" + std::to_string(set) + ".txt / .bin");
+        return false;
+    }
+    return true;
 }
 
 unsigned long long Faults() {

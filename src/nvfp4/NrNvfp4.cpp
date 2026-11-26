@@ -253,6 +253,21 @@ void Retry()
         ConfigureLayers(gAssets);
 }
 
+std::string Fp8SetupProblem(unsigned preset)
+{
+    if (!IsFp8(preset))
+        return {};
+    std::lock_guard guard(gMutex);
+    if (!gOn)
+        return "the FP8 models were not loaded";
+    if (!gFp8Problem.empty())
+        return gFp8Problem;
+    std::string missing;
+    if (!NrFp8::SetComplete(Fp8Set(preset), &missing))
+        return "FP8 model unavailable: " + missing;
+    return {};
+}
+
 void BeginEvaluation(unsigned requestedPreset)
 {
     std::lock_guard guard(gMutex);
@@ -265,8 +280,12 @@ void BeginEvaluation(unsigned requestedPreset)
         PauseForEvaluation(true);
         gSetMissing.clear();
         const unsigned set = Fp8Set(requestedPreset);
-        if (gOn && gFp8Problem.empty() && !NrFp8::SetComplete(set))
-            gSetMissing = "missing FP8 weights (nvfp4/fp8/fp8_set" + std::to_string(set) + ".txt / .bin)";
+        if (gOn && gFp8Problem.empty())
+        {
+            std::string file;
+            if (!NrFp8::SetComplete(set, &file))
+                gSetMissing = "FP8 model unavailable: " + file;
+        }
         NrFp8::UseSet(gSetMissing.empty() && gFp8Problem.empty() ? set : 0);
         gFp8Faults = NrFp8::Faults();
         gFp8Completed = NrFp8::Completed();

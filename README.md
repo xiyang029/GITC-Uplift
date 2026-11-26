@@ -48,7 +48,7 @@ The status card tells you whether Uplift is working and what to do if something 
   the game's frame, before the HUD. **Before upscaling** is experimental.
 - **Motion vectors:** Auto picks for you. The others are DLSS (the game's own), Launchpad (iMMERSE Launchpad's), Lumenite
   (LumeniteFX's Kernel) and None.
-- **Network preset:** A: Legacy or B: Small FP8 with NR 310.9.16.
+- **Network preset:** A: Legacy (the original FP8 network) or B: Small FP8 (the smaller FP8 network) with NR 310.9.16.
 - **Resolution:** Full looks best. Lower settings are faster and use less memory.
 
 **NR stage** and **Resolution** are independent. After DLSS reads the game's upscaled output. **Full** runs NR at that output resolution; **Quality**, **Balanced** and **Performance** process a smaller copy and apply the result across the complete output image.
@@ -62,13 +62,14 @@ In most games, if you turn DLSS off in the game, NR moves to Present by itself a
 
 The **Look** section below lets you tune the result to taste. When you switch NR off, it frees its memory after a few seconds.
 
-With **NR 310.9.16**, **Setup → Network preset** selects **Legacy** or **Small FP8**; **Runtime default** selects Small FP8 in that
-build. Legacy remains Uplift's default. Changing the network recreates NR and resets its history. NR 310.8 always uses its legacy network.
+With **NR 310.9.16**, **Setup → Network preset** selects **Legacy** (the original FP8 network, reported as `honest_tench`) or
+**Small FP8** (the smaller FP8 network, `hnet-crazy-cuckoo-small-fp8`); **Runtime default** selects Small FP8 in that build.
+Legacy remains Uplift's default. Changing the network recreates NR and resets its history. NR 310.8 always uses its legacy network.
 Once Uplift identifies a loaded 310.8 runtime, the network row is greyed out with an explanation and shows Legacy. Saved network choices
 are preserved for a newer runtime. Changing Runtime path applies on the next game start.
 
-Preset **A (1)** is Legacy and **B (2)** is Small FP8. Presets C-G have no weights in the supplied DLL. **Look → Style** selects the separate
-processing styles A/B/C (0/1/2), also available for independent later passes.
+Preset **A (1)** is Legacy (original FP8) and **B (2)** is Small FP8 (optimized FP8). Presets C-G have no weights in the supplied DLL.
+**Look → Style** selects the separate processing styles A/B/C (0/1/2), also available for independent later passes.
 
 **Details** reports each created, requested pass's network name from NVIDIA's successful feature-creation message, its number of enabled evaluation calls recorded,
 and its last successful call's style. It reports an unconfirmed network when the runtime's logging layout or message is

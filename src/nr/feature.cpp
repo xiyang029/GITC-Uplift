@@ -32,6 +32,16 @@ Feature::~Feature() {
 
 NVSDK_NGX_Result Feature::Create(ID3D12GraphicsCommandList* list, const CreateInfo& info) {
   if (handle_ != nullptr || list == nullptr || info.capacity.Empty()) return NVSDK_NGX_Result_FAIL_InvalidParameter;
+  // An FP8 pass needs its weight records before its NGX carrier feature exists. Otherwise a missing set is only
+  // discovered at evaluation, after a feature has already been created and history has started.
+  if (DlssNr::Nvfp4::IsFp8(info.preset)) {
+    const std::string problem = DlssNr::Nvfp4::Fp8SetupProblem(info.preset);
+    if (!problem.empty()) {
+      DlssNr::Nvfp4::Refuse(problem.c_str());
+      Logf(LogLevel::ERR, "NR feature creation refused for FP8 preset {}: {}", info.preset, problem);
+      return NVSDK_NGX_Result_FAIL_PlatformError;
+    }
+  }
   if (parameters_ == nullptr) {
     parameters_ = snippet_.AllocateParameters();
   }

@@ -15,7 +15,7 @@ void* WrapNvapi(unsigned id, void* original);
 // Validate the manifests now; upload a set's weights on its first evaluation.
 void Enable(const std::filesystem::path& assets);
 void UseSet(unsigned set);  // between evaluations only; 0 leaves the runtime's records alone
-bool SetComplete(unsigned set);
+bool SetComplete(unsigned set, std::string* missing = nullptr);
 unsigned long long Faults();
 std::string Problem();
 unsigned long long Completed();
