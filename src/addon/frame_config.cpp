@@ -81,6 +81,7 @@ FrameSettings BuildFrameSettings(const FrameSettingsInputs& inputs, ui::Controls
       .pre_upscale = settings.pre_upscale,
       .uplift_after_native_nr = settings.uplift_after_native_nr,
       .replace_native_nr = settings.replace_native_nr,
+      .native_nr_handle_mode = settings.native_nr_handle_mode || settings.override_native_nr_parameters,
       .look = LookConfigFrom(settings, coalescer->LaterPasses(settings, inputs.drag.pass_slider, now)),
       .launchpad_motion = (settings.motion_vectors == ui::MotionVectorSource::AUTO || settings.motion_vectors == ui::MotionVectorSource::LAUNCHPAD
                            || settings.motion_vectors == ui::MotionVectorSource::LUMENITE),

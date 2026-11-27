@@ -90,6 +90,7 @@ struct FrameSettings {
   bool pre_upscale = false;  // NR before DLSS-SR upscales
   bool uplift_after_native_nr = false;  // exclusive stage after game-owned DLSS-NR
   bool replace_native_nr = false;       // replace game-owned DLSS-NR when its inputs are safe to take over
+  bool native_nr_handle_mode = false;   // merged native-parameter override: preprocess inputs when safe, run game NR, then upscale
   sources::LookConfig look;  // the look stage, the colour fixes, Mask, UI correction, passes 2..10
   bool launchpad_motion = true;       // MotionVectors Auto, Launchpad or Lumenite: the Present path may bind UPLIFT_MV
   uint64_t settings_generation = 0u;  // changes with every saved settings change; restarts the retry backoff

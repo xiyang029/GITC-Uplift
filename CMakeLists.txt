@@ -233,7 +233,7 @@ endif()
 set(UPLIFT_SHADER_OUTPUT "${CMAKE_BINARY_DIR}/generated/shaders")
 file(MAKE_DIRECTORY "${UPLIFT_SHADER_OUTPUT}")
 set(UPLIFT_SHADER_HEADERS)
-foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0" "decode_cs|cs_6_0" "decode_in_place_cs|cs_6_0" "motion_cs|cs_6_0" "depth_cs|cs_6_0"
+foreach(shader IN ITEMS "encode_cs|cs_6_0" "decode_vs|vs_6_0" "decode_ps|ps_6_0" "decode_cs|cs_6_0" "decode_in_place_cs|cs_6_0" "motion_cs|cs_6_0" "depth_cs|cs_6_0" "native_input_cs|cs_6_0" "native_composite_cs|cs_6_0"
                         "look_pyramid_cs|cs_6_0" "look_stabilize_cs|cs_6_0" "look_shape_cs|cs_6_0"
                         "meter_cs|cs_6_0" "faces_cs|cs_6_0" "change_stabilize_cs|cs_6_0"
                         "hud_compose_ps|ps_6_0")
@@ -568,6 +568,12 @@ if(UPLIFT_ARCH STREQUAL "x64")
 set(UPLIFT_HELPER_SOURCES src/helper/main.cpp src/helper/helper.cpp src/helper/transports.cpp)
 add_executable(uplift_nr_regression EXCLUDE_FROM_ALL tools/nr_regression.cpp)
 target_link_libraries(uplift_nr_regression PRIVATE uplift_sources)
+add_executable(uplift_native_nr_regression EXCLUDE_FROM_ALL tools/native_nr_regression.cpp src/addon/command_list_tracker.cpp)
+target_include_directories(uplift_native_nr_regression SYSTEM PRIVATE "${UPLIFT_RESHADE_INCLUDE}" "${UPLIFT_IMGUI_INCLUDE}")
+target_compile_definitions(uplift_native_nr_regression PRIVATE ImTextureID=ImU64 IMGUI_DISABLE_OBSOLETE_FUNCTIONS VK_USE_PLATFORM_WIN32_KHR)
+target_link_libraries(uplift_native_nr_regression PRIVATE uplift_addon_core uplift_minhook uplift_minhook_once version)
+add_executable(uplift_native_nr_handle_probe EXCLUDE_FROM_ALL tools/native_nr_handle_probe.cpp)
+target_link_libraries(uplift_native_nr_handle_probe PRIVATE uplift_sources uplift_minhook uplift_minhook_once version)
 add_executable(uplift_cleanup_regression EXCLUDE_FROM_ALL tools/cleanup_regression.cpp)
 target_include_directories(uplift_cleanup_regression SYSTEM PRIVATE "${UPLIFT_NVAPI_INCLUDE}")
 target_link_libraries(uplift_cleanup_regression PRIVATE uplift_sources uplift_ui uplift_ipc)

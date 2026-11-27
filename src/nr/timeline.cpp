@@ -33,10 +33,13 @@ class D3D12QueueFences final : public QueueFences {
 
   bool Signal(ID3D12CommandQueue* queue, uint64_t value) override {
     auto& fence = fences_[queue];
-    if (!fence && FAILED(device_->CreateFence(0u, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) {
-      fences_.erase(queue);
-      Log(LogLevel::WARN, "could not create a completion-token fence");
-      return false;
+    if (!fence) {
+      const HRESULT result = device_->CreateFence(0u, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+      if (FAILED(result)) {
+        fences_.erase(queue);
+        Logf(LogLevel::WARN, "could not create a completion-token fence (HRESULT {:#010x})", static_cast<uint32_t>(result));
+        return false;
+      }
     }
     const HRESULT result = queue->Signal(fence.Get(), value);
     if (FAILED(result)) {

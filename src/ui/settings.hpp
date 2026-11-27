@@ -298,9 +298,10 @@ struct Settings {
   StateRestore state_restore = StateRestore::FULL;
   NgxHooksMode ngx_hooks = NgxHooksMode::AUTO;
   ForeignNrMode foreign_nr = ForeignNrMode::YIELD;
-  bool override_native_nr_parameters = false;  // apply the panel NR controls to the game-owned DLSS-NR evaluate
+  bool override_native_nr_parameters = false;  // use panel NR controls and safely resize the game's own NR handle
   bool uplift_after_native_nr = false;          // exclusive Uplift stage after the game-owned DLSS-NR evaluate
   bool replace_native_nr = false;               // run Uplift at the native DLSS-NR call site and skip it on success
+  bool native_nr_handle_mode = false;            // legacy config alias for override_native_nr_parameters
   VulkanNrMode vulkan_nr = VulkanNrMode::NATIVE;  // Plan 19
   ResolutionMode resolution_mode = ResolutionMode::FULL;  // user ruling: Full by default
   float resolution_scale = 100.f;                         // Custom: % of the output's width, 25-100
@@ -427,6 +428,7 @@ void MigrateSettings(Settings* settings);
 // code returns to its default.
 [[nodiscard]] Settings Sanitized(Settings settings);
 [[nodiscard]] nr::Controls ToControls(const Settings& settings);
+[[nodiscard]] std::optional<nr::Controls> NativeNrParameterOverrides(const Settings& settings);
 [[nodiscard]] SessionOptions ToSessionOptions(const Settings& settings);
 
 // Re-reads `Enabled` at most once per period, so a tool that writes [Uplift] Enabled through

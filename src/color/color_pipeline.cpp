@@ -22,6 +22,8 @@
 #include "look_stabilize_cs.h"
 #include "meter_cs.h"
 #include "motion_cs.h"
+#include "native_input_cs.h"
+#include "native_composite_cs.h"
 #include "nr/log.hpp"
 
 namespace uplift::color {
@@ -56,7 +58,10 @@ constexpr uint32_t FACES_DESPIKE_FIRST_TABLE = 16u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_TABLE = 17u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_SWAPPED_TABLE = 18u * TABLE_SIZE;
 constexpr uint32_t CHANGE_STABILIZE_TABLE = 19u * TABLE_SIZE;
-constexpr uint32_t DESCRIPTORS_PER_SLOT = 20u * TABLE_SIZE;
+constexpr uint32_t NATIVE_INPUT_TABLE = 20u * TABLE_SIZE;  // native Color/guides and the two preserved Color images
+constexpr uint32_t NATIVE_INPUT_TABLES = 8u;  // Color, five guides, preserved work baseline and original-resolution Color
+constexpr uint32_t NATIVE_COMPOSITE_TABLE = (20u + NATIVE_INPUT_TABLES) * TABLE_SIZE;
+constexpr uint32_t DESCRIPTORS_PER_SLOT = (21u + NATIVE_INPUT_TABLES) * TABLE_SIZE;
 constexpr uint32_t STABILIZE_CUT = 0u;  // look_stabilize_cs.hlsl's modes and flags
 constexpr uint32_t STABILIZE_LEVELS = 1u;
 constexpr uint32_t STABILIZE_DETAIL = 2u;
@@ -201,6 +206,17 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
       .CS = {.pShaderBytecode = g_depth_cs, .BytecodeLength = sizeof(g_depth_cs)},
   };
   if (FAILED(device->CreateComputePipelineState(&depth, IID_PPV_ARGS(&depth_pipeline_)))) depth_pipeline_.Reset();
+  const D3D12_COMPUTE_PIPELINE_STATE_DESC native_input = {
+      .pRootSignature = root_signature_.Get(),
+      .CS = {.pShaderBytecode = g_native_input_cs, .BytecodeLength = sizeof(g_native_input_cs)},
+  };
+  // An unavailable optional-input pipeline must not prevent the primary colour/motion path from starting.
+  if (FAILED(device->CreateComputePipelineState(&native_input, IID_PPV_ARGS(&native_input_pipeline_)))) native_input_pipeline_.Reset();
+  const D3D12_COMPUTE_PIPELINE_STATE_DESC native_composite = {
+      .pRootSignature = root_signature_.Get(),
+      .CS = {.pShaderBytecode = g_native_composite_cs, .BytecodeLength = sizeof(g_native_composite_cs)},
+  };
+  if (FAILED(device->CreateComputePipelineState(&native_composite, IID_PPV_ARGS(&native_composite_pipeline_)))) native_composite_pipeline_.Reset();
   // Plan 5: the look and meter pipelines.
   const auto build_compute = [&](const void* bytecode, size_t length, Microsoft::WRL::ComPtr<ID3D12PipelineState>* pipeline,
                                  const char* name) {
@@ -380,6 +396,35 @@ bool ColorPipeline::RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot,
       pass.foveation.x.packed, pass.foveation.y.packed, Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax),
   };
   DispatchCompute(list, motion_pipeline_.Get(), constants, base, pass.canvas.width, pass.canvas.height);
+  return true;
+}
+
+bool ColorPipeline::RecordNativeInput(ID3D12GraphicsCommandList* list, uint32_t slot, uint32_t input, nr::BoundResource source,
+                                     DXGI_FORMAT source_format, ID3D12Resource* target, DXGI_FORMAT target_format, nr::Size size,
+                                     const nr::foveation::Grid& foveation, bool bilinear, bool warp_source,
+                                     uint32_t target_x, uint32_t target_y) {
+  if (!native_input_pipeline_ || input >= NATIVE_INPUT_TABLES || !SlotInRange(slot, "RecordNativeInput")) return false;
+  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + NATIVE_INPUT_TABLE + input * TABLE_SIZE;
+  WriteTable(base, {{source.resource, source_format}}, {{target, target_format}});
+  const std::array<uint32_t, 14> constants = {
+      source.rect.x, source.rect.y, source.rect.width, source.rect.height, size.width, size.height,
+      foveation.x.packed, foveation.y.packed, Bits(foveation.x.gmax), Bits(foveation.y.gmax),
+      (bilinear ? 1u : 0u), (warp_source ? 1u : 0u), target_x, target_y};
+  DispatchCompute(list, native_input_pipeline_.Get(), constants, base, size.width, size.height);
+  return true;
+}
+
+bool ColorPipeline::RecordNativeComposite(ID3D12GraphicsCommandList* list, uint32_t slot, const NativeCompositePass& pass) {
+  if (!native_composite_pipeline_ || !SlotInRange(slot, "RecordNativeComposite")) return false;
+  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + NATIVE_COMPOSITE_TABLE;
+  WriteTable(base, {{pass.original, pass.original_view_format}, {pass.baseline, pass.baseline_view_format},
+                    {pass.nr_output, pass.nr_output_view_format}},
+             {{pass.target, pass.target_uav_format}});
+  const std::array<uint32_t, 10> constants = {
+      pass.output_size.width, pass.output_size.height, pass.work_size.width, pass.work_size.height,
+      pass.origin_x, pass.origin_y, pass.foveation.x.packed, pass.foveation.y.packed,
+      Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax)};
+  DispatchCompute(list, native_composite_pipeline_.Get(), constants, base, pass.output_size.width, pass.output_size.height);
   return true;
 }
 

@@ -4,6 +4,8 @@
 
 namespace uplift::sources {
 
+// The original game handle's before/after resource staging uses the same device-owned pipeline object,
+// while the NR feature itself remains the game's NGX handle.
 AfterDlssSource::AfterDlssSource(NrPipeline& pipeline, nr::Timeline& timeline) : pipeline_(pipeline), timeline_(timeline) {}
 
 color::Encoding AfterDlssSource::ResolveEncoding(color::Encoding setting, bool is_hdr) {
@@ -46,6 +48,20 @@ GameFrame ReadGameFrame(const ngx_hooks::DlssFrame& frame, ID3D12Resource* resou
   }
   if (frame.depth != nullptr) {
     game.inputs.depth = {.resource = frame.depth, .rect = frame.depth_region};
+  }
+  if (config.replace_native_nr && frame.native_nr) {
+    const auto& native = *frame.native_nr;
+    game.target.source = {frame.color, frame.color_region};
+    game.target.source_state = native.color_state;
+    game.inputs.control_mask = native.control_mask;
+    game.inputs.backbuffer = native.backbuffer;
+    game.inputs.ui = native.ui;
+    game.inputs.ui_alpha = native.ui_alpha;
+    game.inputs.ui_correction = native.ui_correction;
+    game.inputs.native_nr = true;
+    game.inputs.native_input_status = native.input_status;
+    if (!config.motion_vectors) game.inputs.native_input_status[1] = nr::NativeInputStatus::DISABLED;
+    if (!config.depth_inverted && native.depth_inverted) game.inputs.depth_inverted = *native.depth_inverted ? 1 : 0;
   }
   return game;
 }

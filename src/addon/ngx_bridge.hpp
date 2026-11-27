@@ -21,6 +21,7 @@
 #include "ngx_hooks/feature_registry.hpp"
 #include "ngx_hooks/hook_installer.hpp"
 #include "nr/types.hpp"
+#include "sources/nr_pipeline.hpp"
 #include "ui/settings.hpp"
 
 namespace uplift::addon {
@@ -39,10 +40,15 @@ class NgxRouting {
   // The hidden DLSS-SR create overrides (DLSSQualityMode / DLSSAutoExposure): always empty (see
   // addon::ToSrOverrides), so the game's own choices stand; kept as the create-side seam.
   [[nodiscard]] virtual ngx_hooks::SrOverrides SrCreateOverrides() = 0;
-  // Native DLSS-NR controls are opt-in and independent from post-evaluate Uplift NR.
+  // Native DLSS-NR parameter-only mode is gated by Enabled and excludes extra Uplift NR.
   [[nodiscard]] virtual std::optional<nr::Controls> NativeNrParameterOverrides() = 0;
   [[nodiscard]] virtual bool NativeNrFollowupEnabled() = 0;
   [[nodiscard]] virtual bool NativeNrReplacementEnabled() = 0;
+  [[nodiscard]] virtual bool NativeNrHandleModeEnabled() = 0;
+  [[nodiscard]] virtual std::optional<sources::NativeNrHandleWork> PrepareNativeNrHandle(
+      const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) = 0;
+  virtual void CompleteNativeNrHandle(const void* device, ID3D12GraphicsCommandList* list,
+                                      const sources::NativeNrHandleWork& work, bool native_succeeded) = 0;
   virtual bool TryReplaceNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list,
                                           const ngx_hooks::DlssFrame& frame) = 0;
   virtual void OnNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) = 0;
@@ -119,6 +125,7 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   void BeforeCreate(ngx_hooks::CreateCall* call) override;  // also an early EnsureFgPresetHook install point
   void AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle* handle, NVSDK_NGX_Result result) override;
   void BeforeEvaluate(ngx_hooks::EvaluateCall* call) override;
+  void AfterOriginalEvaluate(ngx_hooks::EvaluateCall* call, NVSDK_NGX_Result result) override;
   void OnColorSwapRejected(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle) override;
   void AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle,
                      const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Result result) override;

@@ -1,5 +1,7 @@
 #include "ngx_hooks/hook_installer.hpp"
 
+#include "nr/keys.hpp"
+
 #include <intrin.h>
 #include <psapi.h>
 #include <winternl.h>
@@ -293,6 +295,18 @@ void NotifyEvaluate(NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX
   }
 }
 
+void NotifyOriginalEvaluate(EvaluateCall* call, NVSDK_NGX_Result result) noexcept {
+  NgxObserver* const observer = g_observer.load(std::memory_order_acquire);
+  if (observer == nullptr) return;
+  try {
+    observer->AfterOriginalEvaluate(call, result);
+  } catch (const std::exception& e) {
+    LogObserverFailure(ObserverCall::EVALUATE, e.what());
+  } catch (...) {
+    LogObserverFailure(ObserverCall::EVALUATE, nullptr);
+  }
+}
+
 // Changes one HUD-less resource parameter temporarily, restoring it with the type used by NGX.
 class ResourceSwap {
  public:
@@ -315,13 +329,16 @@ class ResourceSwap {
     block_ = block;
     key_ = key;
   }
-  ~ResourceSwap() {
+  ~ResourceSwap() { Restore(); }
+  void Restore() noexcept {
     if (block_ == nullptr) return;
     if (kind_ == Kind::D3D12) {
       block_->Set(key_, game_resource_);
     } else {
       block_->Set(key_, game_pointer_);
     }
+    block_ = nullptr;
+    key_ = nullptr;
   }
 
  private:
@@ -352,6 +369,10 @@ class EvaluateSwaps {
       if (call->api == NgxApi::D3D12 && call->native_nr_controls) {
         native_block_ = block;
         ApplyNativeNrControls(block, *call->native_nr_controls);
+      }
+      if (call->api == NgxApi::D3D12 && call->native_nr_handle) {
+        native_handle_block_ = block;
+        ApplyNativeNrHandle(block, *call->native_nr_handle);
       }
       if (call->hudless_action != HUDLESS_LEAVE && (call->api == NgxApi::D3D12 || call->api == NgxApi::VULKAN)) {
         hudless_owner_ = std::move(call->hudless_owner);
@@ -390,6 +411,7 @@ class EvaluateSwaps {
     }
   }
   ~EvaluateSwaps() {
+    RestoreNativeNrHandle();
     RestoreNativeNrControls();
     if (block_ != nullptr) {
       switch (kind_) {
@@ -406,34 +428,35 @@ class EvaluateSwaps {
   EvaluateSwaps& operator=(const EvaluateSwaps&) = delete;
 
  private:
-  enum class NativeValueKind : uint8_t { FLOAT, UINT, INT };
+  enum class NativeValueKind : uint8_t { FLOAT, UINT, INT, UINT64 };
   struct NativeRestore {
     const char* key = nullptr;
     NativeValueKind kind = NativeValueKind::FLOAT;
     float f = 0.f;
     uint32_t u = 0u;
     int32_t i = 0;
+    unsigned long long u64 = 0u;
   };
   void ApplyNativeNrControls(NVSDK_NGX_Parameter* block, const nr::Controls& controls) {
     const auto swap_float = [&](const char* key, float value) {
       float old = 0.f;
       if (NVSDK_NGX_SUCCEED(block->Get(key, &old))) {
         block->Set(key, value);
-        native_restore_[native_restore_count_++] = {.key = key, .kind = NativeValueKind::FLOAT, .f = old};
+        native_control_restore_[native_control_restore_count_++] = {.key = key, .kind = NativeValueKind::FLOAT, .f = old};
       }
     };
     const auto swap_uint = [&](const char* key, uint32_t value) {
       uint32_t old = 0u;
       if (NVSDK_NGX_SUCCEED(block->Get(key, &old))) {
         block->Set(key, value);
-        native_restore_[native_restore_count_++] = {.key = key, .kind = NativeValueKind::UINT, .u = old};
+        native_control_restore_[native_control_restore_count_++] = {.key = key, .kind = NativeValueKind::UINT, .u = old};
       }
     };
     const auto swap_int = [&](const char* key, int32_t value) {
       int32_t old = 0;
       if (NVSDK_NGX_SUCCEED(block->Get(key, &old))) {
         block->Set(key, value);
-        native_restore_[native_restore_count_++] = {.key = key, .kind = NativeValueKind::INT, .i = old};
+        native_control_restore_[native_control_restore_count_++] = {.key = key, .kind = NativeValueKind::INT, .i = old};
       }
     };
     swap_float(nr::keys::INTENSITY, controls.intensity);
@@ -446,16 +469,92 @@ class EvaluateSwaps {
     if (NVSDK_NGX_SUCCEED(block->Get(nr::keys::USE_AUTO_MASK, &auto_mask))) swap_int(nr::keys::USE_AUTO_MASK, controls.auto_mask ? 1 : 0);
     else swap_uint(nr::keys::USE_AUTO_MASK, controls.auto_mask ? 1u : 0u);
   }
+  void ApplyNativeNrHandle(NVSDK_NGX_Parameter* block, const EvaluateCall::NativeNrHandleOverrides& work) {
+    const std::array<const nr::keys::Resource*, 8> keys = {&nr::keys::COLOR, &nr::keys::OUTPUT, &nr::keys::DEPTH,
+        &nr::keys::MVEC, &nr::keys::CONTROL_MASK, &nr::keys::BACKBUFFER, &nr::keys::UI, &nr::keys::UI_ALPHA};
+    const auto swap_float = [&](const char* key, float value) {
+      float old = 0.f;
+      if (NVSDK_NGX_SUCCEED(block->Get(key, &old))) {
+        block->Set(key, value);
+        native_handle_restore_[native_handle_restore_count_++] = {.key = key, .kind = NativeValueKind::FLOAT, .f = old};
+      }
+    };
+    const auto swap_uint = [&](const char* key, uint32_t value) {
+      uint32_t old = 0u;
+      if (NVSDK_NGX_SUCCEED(block->Get(key, &old))) {
+        block->Set(key, value);
+        native_handle_restore_[native_handle_restore_count_++] = {.key = key, .kind = NativeValueKind::UINT, .u = old};
+      }
+    };
+    const auto swap_int = [&](const char* key, int32_t value) {
+      int32_t old = 0;
+      if (NVSDK_NGX_SUCCEED(block->Get(key, &old))) {
+        block->Set(key, value);
+        native_handle_restore_[native_handle_restore_count_++] = {.key = key, .kind = NativeValueKind::INT, .i = old};
+      } else {
+        swap_uint(key, static_cast<uint32_t>(value));
+      }
+    };
+    const auto swap_dimension = [&](const char* key, uint32_t value) {
+      int32_t old_int = 0;
+      if (NVSDK_NGX_SUCCEED(block->Get(key, &old_int))) {
+        block->Set(key, static_cast<int32_t>(value));
+        native_handle_restore_[native_handle_restore_count_++] = {.key = key, .kind = NativeValueKind::INT, .i = old_int};
+        return;
+      }
+      uint32_t old_uint = 0u;
+      if (NVSDK_NGX_SUCCEED(block->Get(key, &old_uint))) {
+        block->Set(key, value);
+        native_handle_restore_[native_handle_restore_count_++] = {.key = key, .kind = NativeValueKind::UINT, .u = old_uint};
+        return;
+      }
+      unsigned long long old_u64 = 0u;
+      if (NVSDK_NGX_SUCCEED(block->Get(key, &old_u64))) {
+        block->Set(key, static_cast<unsigned long long>(value));
+        native_handle_restore_[native_handle_restore_count_++] = {.key = key, .kind = NativeValueKind::UINT64, .u64 = old_u64};
+      }
+    };
+    for (size_t i = 0u; i < keys.size(); ++i) {
+      native_handle_resources_[i].Apply(NgxApi::D3D12, block, keys[i]->resource,
+          work.resources[i] == nullptr, work.resources[i]);
+      swap_dimension(keys[i]->subrect.base_x, 0u);
+      swap_dimension(keys[i]->subrect.base_y, 0u);
+      swap_dimension(keys[i]->subrect.width, work.width);
+      swap_dimension(keys[i]->subrect.height, work.height);
+    }
+    swap_dimension(nr::keys::WIDTH, work.width);
+    swap_dimension(nr::keys::HEIGHT, work.height);
+    if (work.motion_rescaled) {
+      swap_float(nr::keys::MVEC_SCALE_X, 1.f);
+      swap_float(nr::keys::MVEC_SCALE_Y, 1.f);
+    }
+    swap_int(nr::keys::UI_CORRECTION, work.ui_correction ? 1 : 0);
+  }
   void RestoreNativeNrControls() noexcept {
     if (native_block_ == nullptr) return;
-    while (native_restore_count_ > 0u) {
-      const NativeRestore& restore = native_restore_[--native_restore_count_];
+    while (native_control_restore_count_ > 0u) {
+      const NativeRestore& restore = native_control_restore_[--native_control_restore_count_];
       switch (restore.kind) {
         case NativeValueKind::FLOAT: native_block_->Set(restore.key, restore.f); break;
         case NativeValueKind::UINT: native_block_->Set(restore.key, restore.u); break;
         case NativeValueKind::INT: native_block_->Set(restore.key, restore.i); break;
+        case NativeValueKind::UINT64: native_block_->Set(restore.key, restore.u64); break;
       }
     }
+  }
+  void RestoreNativeNrHandle() noexcept {
+    if (native_handle_block_ == nullptr) return;
+    while (native_handle_restore_count_ > 0u) {
+      const NativeRestore& restore = native_handle_restore_[--native_handle_restore_count_];
+      switch (restore.kind) {
+        case NativeValueKind::FLOAT: native_handle_block_->Set(restore.key, restore.f); break;
+        case NativeValueKind::UINT: native_handle_block_->Set(restore.key, restore.u); break;
+        case NativeValueKind::INT: native_handle_block_->Set(restore.key, restore.i); break;
+        case NativeValueKind::UINT64: native_handle_block_->Set(restore.key, restore.u64); break;
+      }
+    }
+    for (auto& resource : native_handle_resources_) resource.Restore();
+    native_handle_block_ = nullptr;
   }
   enum class Kind : uint8_t { D3D12, D3D11, POINTER };  // the type the game's Color was read with, and is put back with
   NVSDK_NGX_Parameter* block_ = nullptr;
@@ -465,8 +564,12 @@ class EvaluateSwaps {
   ID3D11Resource* swapped11_ = nullptr;     // the bridge's texture DLSS reads, referenced until the swap ends (either branch)
   void* game_pointer_ = nullptr;
   NVSDK_NGX_Parameter* native_block_ = nullptr;
-  std::array<NativeRestore, 6> native_restore_{};
-  size_t native_restore_count_ = 0u;
+  NVSDK_NGX_Parameter* native_handle_block_ = nullptr;
+  std::array<ResourceSwap, 8> native_handle_resources_{};
+  std::array<NativeRestore, 8> native_control_restore_{};
+  size_t native_control_restore_count_ = 0u;
+  std::array<NativeRestore, 48> native_handle_restore_{};
+  size_t native_handle_restore_count_ = 0u;
   // Members are destroyed in reverse order: restore the game's image before releasing Uplift's.
   std::shared_ptr<const void> hudless_owner_;
   ResourceSwap hudless_;
@@ -496,6 +599,7 @@ NVSDK_NGX_Result RunEvaluate(size_t slot, NgxApi api, ID3D12GraphicsCommandList*
       t_vulkan_evaluate = false;
     }
   }  // the game's Color and HUD-less image are back before AfterEvaluate reads the block
+  NotifyOriginalEvaluate(&call, result);
   NotifyEvaluate(api, list, handle, parameters, result);
   return result;
 }

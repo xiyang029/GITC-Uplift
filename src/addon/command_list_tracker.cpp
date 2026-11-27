@@ -300,57 +300,71 @@ void LogNativeNrBarrierTrace(ID3D12GraphicsCommandList* list, ID3D12Resource* co
            state->barrier_trace_count, state->barrier_trace.size(), state->barrier_trace_total, matches);
 }
 
-bool NativeNrReplaceInputsReady(const ListState* tracked, ID3D12Resource* color, ID3D12Resource* output,
-                                ID3D12Resource* depth, ID3D12Resource* motion, std::string* reason) {
+bool NativeNrReplaceInputsReady(const ListState* tracked, ngx_hooks::DlssFrame* frame, std::string* reason) {
   const auto refuse = [reason](const char* why) {
     if (reason != nullptr) *reason = why;
     return false;
   };
-  if (color == nullptr || output == nullptr) return refuse("Color or Output is missing");
-  if (color != output) return refuse("Color and Output do not alias; replacement path requires in-place output");
-  const D3D12_RESOURCE_DESC desc = output->GetDesc();
-  if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0u) return refuse("aliased Color/Output lacks UAV capability");
-  if (tracked == nullptr) return refuse("command list is not tracked");
-  const auto last_state = [tracked](ID3D12Resource* resource, uint32_t* after) {
-    if (resource == nullptr) return true;
-    const uint64_t handle = reinterpret_cast<uint64_t>(resource);
-    const uint32_t start = (tracked->barrier_trace_count == tracked->barrier_trace.size() ? tracked->barrier_trace_next : 0u);
-    for (uint32_t n = 0u; n < tracked->barrier_trace_count; ++n) {
-      const uint32_t index = (start + tracked->barrier_trace_count - 1u - n)
-          % static_cast<uint32_t>(tracked->barrier_trace.size());
-      const BarrierTraceRecord& record = tracked->barrier_trace[index];
-      if (record.resource != handle) continue;
-      if (record.after == UINT32_MAX) return false;
-      *after = record.after;
-      return true;
-    }
-    return false;
+  if (frame == nullptr || frame->color == nullptr || frame->output == nullptr) return refuse("Color or Output is missing");
+  if (frame->native_nr && !frame->native_nr->enabled) return refuse("native NR is disabled");
+  const auto valid_region = [](ID3D12Resource* image, nr::Rect* region) {
+    if (image == nullptr) return false;
+    const auto desc = image->GetDesc();
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.DepthOrArraySize != 1u || desc.SampleDesc.Count != 1u
+        || region->x >= desc.Width || region->y >= desc.Height) return false;
+    if (region->width == 0u) region->width = static_cast<uint32_t>(desc.Width - region->x);
+    if (region->height == 0u) region->height = desc.Height - region->y;
+    return uint64_t{region->x} + region->width <= desc.Width && uint64_t{region->y} + region->height <= desc.Height;
   };
-  uint32_t color_state = UINT32_MAX;
-  if (!last_state(color, &color_state)) return refuse("no recent explicit Color/Output state on this command list");
-  if (color_state != static_cast<uint32_t>(D3D12_RESOURCE_STATE_UNORDERED_ACCESS)) {
-    if (reason != nullptr) *reason = std::format("Color/Output last explicit state is {:#x}, not UAV", color_state);
-    return false;
+  if (!valid_region(frame->color, &frame->color_region) || !valid_region(frame->output, &frame->output_region)) {
+    return refuse("Color or Output is not a valid single-sample 2D region");
   }
-  constexpr uint32_t NON_PIXEL = static_cast<uint32_t>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  constexpr uint32_t WRITE_STATES = static_cast<uint32_t>(D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-      | static_cast<uint32_t>(D3D12_RESOURCE_STATE_RENDER_TARGET)
-      | static_cast<uint32_t>(D3D12_RESOURCE_STATE_DEPTH_WRITE)
-      | static_cast<uint32_t>(D3D12_RESOURCE_STATE_COPY_DEST);
-  for (const auto& [name, resource] : {std::pair{"Depth", depth}, std::pair{"Motion", motion}}) {
-    if (resource == nullptr) continue;
-    uint32_t state = UINT32_MAX;
-    if (!last_state(resource, &state)) {
-      if (reason != nullptr) *reason = std::format("no recent explicit {} state on this command list", name);
-      return false;
-    }
-    if ((state & NON_PIXEL) == 0u || (state & WRITE_STATES) != 0u) {
-      if (reason != nullptr) *reason = std::format("{} last explicit state {:#x} is not compute-readable", name, state);
-      return false;
-    }
+  // NR is same-resolution. Different atlas sizes/origins are fine; different active extents need a separate policy.
+  if (frame->color_region.width != frame->output_region.width || frame->color_region.height != frame->output_region.height) {
+    return refuse("Color and Output active extents differ");
   }
+  const auto desc = frame->output->GetDesc();
+  if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0u) return refuse("Output lacks UAV capability");
+  if (tracked == nullptr) return refuse("command list is not tracked");
+  // The native evaluate call is the state contract boundary: its distinct Color input is
+  // shader-readable and Output is UAV. A same-resource Color/Output follows Output's UAV state;
+  // the preprocessing pass temporarily transitions that resource to compute-read and restores it.
+  // The ReShade barrier event does not see raw ID3D12GraphicsCommandList::ResourceBarrier calls,
+  // implicit promotions/decays, or barriers on other queues, so its trace cannot prove current state.
+  if ((frame->color->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0u) {
+    return refuse("Color denies shader-resource access");
+  }
+  if (!frame->native_nr) frame->native_nr.emplace();
+  auto& native = *frame->native_nr;
+  native.color_state = (frame->color == frame->output ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                                       : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  const auto optional = [&](nr::BoundResource input, size_t index) {
+    using Status = nr::NativeInputStatus;
+    const auto drop = [&](Status status) { native.input_status[index] = status; return nr::BoundResource{}; };
+    if (input.resource == nullptr) return drop(Status::MISSING);
+    if (!valid_region(input.resource, &input.rect)) return drop(Status::INVALID_REGION);
+    if (input.resource == frame->output && input.resource != frame->color) return drop(Status::OUTPUT_ALIAS);
+    if ((input.resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0u) return drop(Status::SRV_DENIED);
+    // Inputs supplied to native DLSS-NR follow the NGX shader-read contract. Do not infer a
+    // resource state from flags or the incomplete barrier trace; these reads do not transition them.
+    native.input_status[index] = Status::READY;
+    return input;
+  };
+  const auto depth = optional({frame->depth, frame->depth_region}, 0u);
+  frame->depth = depth.resource; frame->depth_region = depth.rect;
+  const auto motion = optional({frame->motion_vectors, frame->motion_region}, 1u);
+  frame->motion_vectors = motion.resource; frame->motion_region = motion.rect;
+  native.control_mask = optional(native.control_mask, 2u);
+  native.backbuffer = optional(native.backbuffer, 3u);
+  native.ui = optional(native.ui, 4u);
+  native.ui_alpha = optional(native.ui_alpha, 5u);
+  if (native.backbuffer.resource == nullptr || (native.ui.resource == nullptr && native.ui_alpha.resource == nullptr)) native.ui_correction = false;
   if (reason != nullptr) reason->clear();
   return true;
+}
+
+bool NativeNrHandleResizeInputsReady(const ListState* tracked, ngx_hooks::DlssFrame* frame, std::string* reason) {
+  return NativeNrReplaceInputsReady(tracked, frame, reason);
 }
 
 void RegisterTrackingEvents() {

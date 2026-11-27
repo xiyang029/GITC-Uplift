@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -25,8 +26,12 @@
 #include "sources/present_change_history.hpp"
 #include "sources/present_motion_counts.hpp"
 #include "sources/present_motion_ring.hpp"
+#include "state/compute_shadow.hpp"
+
+namespace uplift::ngx_hooks { struct DlssFrame; }
 
 namespace uplift::sources {
+class DlssFrameHost;
 
 // The Present path's target: the primary swap chain's back buffer.
 struct PresentTarget {
@@ -62,6 +67,9 @@ struct UavTarget {
   float color_strength = 1.f;
   ID3D12Resource* exposure = nullptr;  // DLSS's ExposureTexture, NON_PIXEL_SHADER_RESOURCE, or null
   float exposure_factor = 1.f;         // DLSS.Exposure.Scale ÷ DLSS.Pre.Exposure
+  // Native-NR replacement may read Color and write a different Output. Empty: read the target as before.
+  nr::BoundResource source;
+  D3D12_RESOURCE_STATES source_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 };
 
 struct PipelineResult {
@@ -74,6 +82,18 @@ struct PipelineResult {
   float motion_scale_x = 1.f;  // valid when motion_source == DIRECT: MV.Scale x MotionScale
   float motion_scale_y = 1.f;
   uint64_t token = 0u;  // split chain: a game-list recording's completion token (RecordOnGameList); 0 otherwise
+};
+
+// The resources substituted into one game-owned DLSS-NR evaluate. Resource order is
+// Color, Output, Depth, MVec, ControlMask, Backbuffer, UI and UIAlpha.
+struct NativeNrHandleWork {
+  std::array<ID3D12Resource*, 8> resources{};
+  nr::Size image;
+  float motion_scale_x = 1.f;
+  float motion_scale_y = 1.f;
+  bool motion_rescaled = false;
+  bool ui_correction = false;
+  std::shared_ptr<void> ticket;
 };
 
 // The size NR works at for one recording.
@@ -146,6 +166,13 @@ class NrPipeline final : private nr::PassResolver {
   // region, left in NON_PIXEL_SHADER_RESOURCE for DLSS.
   PipelineResult RecordPreSr(ID3D12GraphicsCommandList* list, const UavTarget& color, const nr::FrameInputs& inputs,
                              const nr::Controls& controls, const WorkLayout& layout, const ChainPart& part = {}, DlssFrameHost* timing_host = nullptr);
+  // Resize the inputs and output around the game's original DLSS-NR handle. The caller applies
+  // the returned resources only to that evaluate and calls CompleteNativeNrHandle after it returns.
+  PipelineResult PrepareNativeNrHandle(DlssFrameHost& host, state::RestoreMode restore,
+                                       const ngx_hooks::DlssFrame& frame, const WorkLayout& layout,
+                                       NativeNrHandleWork* work);
+  PipelineResult CompleteNativeNrHandle(DlssFrameHost& host, state::RestoreMode restore,
+                                        const NativeNrHandleWork& work, bool native_succeeded);
   // After RecordPreSr applied NR and until the next recording: what DLSS reads as Color. Before upscaling is always pass 1's group: set 0.
   [[nodiscard]] ID3D12Resource* PrivateColor() const { return sets_[0].intermediates.private_color.Get(); }
   // Split chain: the sets of the groups from `first` on, a chain that has fewer, go behind their last use, as a placement switch's set did.
@@ -315,6 +342,7 @@ class NrPipeline final : private nr::PassResolver {
     // The warped work grid the set was made for (nr/foveation.hpp). A grid that moves while the surfaces still fit restarts
     // the histories instead of reallocating: see EnsureIntermediates.
     nr::foveation::Grid foveation;
+    std::array<DXGI_FORMAT, 5> native_input_formats{};  // warped depth, control mask, backbuffer, UI, UI alpha
     friend bool operator==(const SetPlan&, const SetPlan&) = default;
   };
   struct Intermediates {
@@ -325,6 +353,7 @@ class NrPipeline final : private nr::PassResolver {
     Texture change;         // required RGBA16F change field at the image size
     Texture canvas_motion;  // the canvas size: only with SetPlan::canvas_motion
     Texture private_color;  // pre-SR only
+    std::array<Texture, 5> native_inputs;  // optional warped native resources; missing allocation binds null
     SetPlan plan;
     uint64_t bytes = 0u;    // every texture above, as the budget charges them
     bool reset_pending = true;  // only a frame that ran NR pays off the owed reset
@@ -399,6 +428,36 @@ class NrPipeline final : private nr::PassResolver {
     nr::Mark last_use;  // the newest recording that wrote and read it
   };
 
+  struct NativeHandleSurfaces {
+    Texture color;
+    Texture output;
+    Texture baseline;
+    Texture original;
+    Texture motion;
+    std::array<Texture, 5> auxiliary;  // depth, control mask, backbuffer, UI and UI alpha
+    nr::Size size;
+    nr::Size original_size;
+    DXGI_FORMAT color_view = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT color_uav = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT output_view = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT output_uav = DXGI_FORMAT_UNKNOWN;
+    std::array<DXGI_FORMAT, 5> auxiliary_view{};
+    std::array<DXGI_FORMAT, 5> auxiliary_uav{};
+    uint64_t bytes = 0u;
+    nr::Mark last_use;
+    bool color_output_alias = false;
+    bool active = false;
+  };
+  struct NativeNrHandleTicket {
+    std::shared_ptr<NativeHandleSurfaces> surfaces;
+    Microsoft::WRL::ComPtr<ID3D12Resource> original_output;
+    nr::Rect output_region;
+    WorkLayout layout;
+    uint32_t post_slot = UINT32_MAX;
+    DXGI_FORMAT output_view = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT output_uav = DXGI_FORMAT_UNKNOWN;
+  };
+
   Texture CreateTexture(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
                         const wchar_t* name);
   nr::SkipReason EnsureIntermediates(const SetPlan& plan);  // NONE on success, else OUT_OF_MEMORY
@@ -456,12 +515,15 @@ class NrPipeline final : private nr::PassResolver {
   // log, then runs degraded quietly -- never a per-frame warning, never a fully silent fallback. WarnOnce
   // (nr_pipeline.cpp) does the logging; these are its one-shot gates.
   bool dlss_present_motion_warned_ = false;
+  bool native_input_warned_ = false;
+  std::optional<nr::NativeInputReport> native_input_report_;
   bool launchpad_motion_warned_ = false;
   MotionCopies motion_copies_;
   DepthCopies depth_copies_;
   PresentMotionCounters present_motion_counters_;
   LaunchpadMotion launchpad_motion_;
   DlssPresentMotion dlss_present_motion_;
+  std::array<std::shared_ptr<NativeHandleSurfaces>, 4> native_handle_surfaces_{};
 };
 
 }  // namespace uplift::sources

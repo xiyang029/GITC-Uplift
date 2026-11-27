@@ -1715,10 +1715,14 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "OverrideNativeNrParameters",
         .kind = SettingKind::BOOL,
         .section = SettingSection::ADVANCED,
-        .label = "Use panel controls for the game's DLSS-NR",
-        .tooltip = "Independently overrides the game's DLSS-NR Style, Intensity, Local Tone, Local Structure, Skin Structure and Auto Mask for each evaluate. Off leaves its parameters untouched.",
-        .get = [](const Settings& s) { return Flag(s.override_native_nr_parameters); },
-        .set = [](Settings& s, double v) { s.override_native_nr_parameters = (v != 0.0); },
+        .label = "Use panel controls and resolution for the game's DLSS-NR",
+        .tooltip = "While Enabled is on, overrides the game's DLSS-NR Style, Intensity, Local Tone, Local Structure, Skin Structure and Auto Mask. Custom resolution, edge compression and upsampling are applied around the same game-owned NR handle when its inputs are safe; otherwise only parameters are overridden and the native evaluate runs unchanged. No extra Uplift NR runs. Mutually exclusive with After and Replace.",
+        .get = [](const Settings& s) { return Flag(s.override_native_nr_parameters || s.native_nr_handle_mode); },
+        .set = [](Settings& s, double v) {
+          s.override_native_nr_parameters = (v != 0.0);
+          s.native_nr_handle_mode = (v != 0.0);
+          if (s.override_native_nr_parameters) s.uplift_after_native_nr = s.replace_native_nr = false;
+        },
     },
     {
         .key = "UpliftAfterNativeNr",
@@ -1729,7 +1733,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return Flag(s.uplift_after_native_nr); },
         .set = [](Settings& s, double v) {
           s.uplift_after_native_nr = (v != 0.0);
-          if (s.uplift_after_native_nr) s.replace_native_nr = false;
+          if (s.uplift_after_native_nr) s.override_native_nr_parameters = s.replace_native_nr = s.native_nr_handle_mode = false;
         },
     },
     {
@@ -1737,11 +1741,29 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::BOOL,
         .section = SettingSection::ADVANCED,
         .label = "Replace the game's DLSS-NR with Uplift NR",
-        .tooltip = "At the native DLSS-NR evaluate hook, run Uplift NR from the game's Color, Depth and Motion inputs and skip the native call only when Uplift succeeds and same-list resource states are verified. Otherwise the native DLSS-NR runs normally. Requires aliased Color/Output for now.",
+        .tooltip = "At the native DLSS-NR evaluate hook, read the game's Color and write its Output, including separate resources with matching active extents. Uses safe native Depth, Motion, Control Mask and UI inputs when available; missing or unusable optional inputs bind null. Supports Custom resolution, foveated edges and upsampling. Skips the native call only after Uplift succeeds; otherwise native NR runs normally.",
         .get = [](const Settings& s) { return Flag(s.replace_native_nr); },
         .set = [](Settings& s, double v) {
           s.replace_native_nr = (v != 0.0);
-          if (s.replace_native_nr) s.uplift_after_native_nr = false;
+          if (s.replace_native_nr) s.override_native_nr_parameters = s.uplift_after_native_nr = s.native_nr_handle_mode = false;
+        },
+    },
+    {
+        .key = "NativeNrHandleMode",
+        .kind = SettingKind::BOOL,
+        .section = SettingSection::ADVANCED,
+        .label = "Keep the game's DLSS-NR handle and resize its inputs",
+        .tooltip = "Runs the game's own NR handle at Uplift's work resolution: resamples Color and supported guides before the original evaluate, then upsamples that handle's Output to the original Output. Requires a tracked Direct3D 12 list and compatible game handle; handles that alias Color and Output bypass resizing and run natively. Uplift NR is not run.",
+        .get = [](const Settings& s) { return Flag(s.native_nr_handle_mode); },
+        .set = [](Settings& s, double v) {
+          // Retain the old config key as an alias so existing profiles migrate to the merged option.
+          if (v != 0.0) {
+            s.native_nr_handle_mode = true;
+            s.override_native_nr_parameters = true;
+            s.uplift_after_native_nr = s.replace_native_nr = false;
+          } else {
+            s.native_nr_handle_mode = false;
+          }
         },
     },
     {

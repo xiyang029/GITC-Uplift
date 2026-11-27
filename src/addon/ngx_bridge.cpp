@@ -9,6 +9,7 @@
 
 #include "addon/placement.hpp"
 #include "ngx_hooks/ngx_parameters.hpp"
+#include "nr/keys.hpp"
 #include "nvsdk_ngx_defs_dlssg.h"
 #include "text/hudless_messages.hpp"
 #include "addon/sl_fg_hooks.hpp"
@@ -232,6 +233,18 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
         native_nr && ngx_hooks::KindOf(native_nr->feature) == ngx_hooks::FeatureKind::NEURAL_RENDERING) {
       ProbeNativeNr(call, *native_nr);
       call->native_nr_controls = routing_.NativeNrParameterOverrides();
+      if (routing_.NativeNrHandleModeEnabled() && ngx_hooks::ReadUint(*call->parameters, nr::keys::WIDTH)
+          && ngx_hooks::ReadUint(*call->parameters, nr::keys::HEIGHT)) {
+        const void* const device = routing_.DeviceOf(call->list);
+        if (device != nullptr) {
+          const ngx_hooks::DlssFrame frame = ngx_hooks::CaptureNativeNrFrame(*call->parameters, call->handle, *native_nr);
+          if (const auto work = routing_.PrepareNativeNrHandle(device, call->list, frame); work && work->ticket) {
+            call->native_nr_handle = ngx_hooks::EvaluateCall::NativeNrHandleOverrides{
+                .resources = work->resources, .width = work->image.width, .height = work->image.height,
+                .motion_rescaled = work->motion_rescaled, .ui_correction = work->ui_correction, .ticket = work->ticket};
+          }
+        }
+      }
       if (routing_.NativeNrReplacementEnabled()) {
         const void* const device = routing_.DeviceOf(call->list);
         if (device != nullptr) {
@@ -287,6 +300,17 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
     return;
   }
   call->color = routing_.BeforeMainEvaluate(device, call->list, ngx_hooks::CaptureDlssFrame(*call->parameters, call->handle, *record));
+}
+
+void NgxBridge::AfterOriginalEvaluate(ngx_hooks::EvaluateCall* call, NVSDK_NGX_Result result) {
+  if (call == nullptr || !call->native_nr_handle || call->api != ngx_hooks::NgxApi::D3D12) return;
+  const void* const device = routing_.DeviceOf(call->list);
+  if (device == nullptr) return;
+  const auto& overrides = *call->native_nr_handle;
+  sources::NativeNrHandleWork work = {.resources = overrides.resources,
+      .image = {overrides.width, overrides.height}, .motion_rescaled = overrides.motion_rescaled,
+      .ui_correction = overrides.ui_correction, .ticket = overrides.ticket};
+  routing_.CompleteNativeNrHandle(device, call->list, work, NVSDK_NGX_SUCCEED(result));
 }
 
 void NgxBridge::ProbeNativeNr(ngx_hooks::EvaluateCall* call, const ngx_hooks::FeatureRecord& record) {

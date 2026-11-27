@@ -205,6 +205,11 @@ nr::Controls ToControls(const Settings& settings) {
   };
 }
 
+std::optional<nr::Controls> NativeNrParameterOverrides(const Settings& settings) {
+  if (!settings.enabled || (!settings.override_native_nr_parameters && !settings.native_nr_handle_mode)) return std::nullopt;
+  return ToControls(settings);
+}
+
 SessionOptions ToSessionOptions(const Settings& settings) {
   std::array<uint32_t, MAX_PASSES> presets;
   presets[0] = settings.preset;
@@ -213,7 +218,7 @@ SessionOptions ToSessionOptions(const Settings& settings) {
     presets[index + 1u] = (own == 0u ? settings.preset : own);
   }
   return {
-      .enabled = settings.enabled,
+      .enabled = settings.enabled && !settings.override_native_nr_parameters && !settings.native_nr_handle_mode,
       .pass_count = settings.pass_count,
       .presets = presets,
       .grace = std::chrono::milliseconds(std::lround(settings.grace_seconds * 1000.f)),

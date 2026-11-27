@@ -319,8 +319,8 @@ struct DynamicMfgFacts {
 [[nodiscard]] std::optional<std::string> FrameGenerationWarning(bool active, uint32_t passes);
 
 // Keep faces: what decides whether Keep faces can run on the shown device. NR's Character mask (DLSSNR.UseAutoMask), which the extra run
-// needs, is forced off by NR whenever a DLSSNR.ControlMask is bound; Uplift binds none anywhere (its NR mask, UPLIFT_MASK, is applied after NR, in the
-// compose), so that never greys it.
+// needs, is forced off by NR whenever a DLSSNR.ControlMask is bound. Native replacement can forward the game's mask to the main pass; the extra
+// character-mask run always clears that binding. UPLIFT_MASK is applied after NR, in the compose.
 struct KeepFacesFacts {
   bool nr_runs = true;       // Uplift runs NR on this kind of device
   bool gpu_ready = true;  // the GPU loads and stores the formats the recombination needs (as the look stage's), and its pipeline was built

@@ -781,6 +781,9 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
       // the previous frame starts afresh), then the recombination of the two into that pass's result.
       evaluate_inputs.output = inputs.faces.output;
       evaluate_inputs.reset = (pass_reset || !stage.faces_evaluated);
+      // The character-mask twin needs NR's AutoMask; a game control mask would disable it.
+      // The user's main/later passes above retain the native mask.
+      evaluate_inputs.control_mask = {};
       host_.Transition(list, inputs.faces.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
       const NVSDK_NGX_Result twin_result = stage.face_feature->Evaluate(list, evaluate_inputs, inputs.faces.controls);
       host_.Transition(list, inputs.faces.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);

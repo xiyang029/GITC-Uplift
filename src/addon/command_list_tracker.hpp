@@ -83,9 +83,11 @@ void RegisterTrackingEvents();
 void ResetBarrierTrace(ListState* state);
 void LogNativeNrBarrierTrace(ID3D12GraphicsCommandList* list, ID3D12Resource* color, ID3D12Resource* output,
                              ID3D12Resource* depth, ID3D12Resource* motion, std::string_view phase);
-[[nodiscard]] bool NativeNrReplaceInputsReady(const ListState* tracked, ID3D12Resource* color,
-                                                   ID3D12Resource* output, ID3D12Resource* depth,
-                                                   ID3D12Resource* motion, std::string* reason);
+// Validates the native DLSS-NR resources and regions. Resource-state assumptions follow the NGX
+// evaluate contract; the ReShade barrier trace is diagnostic only and is not a complete state query.
+[[nodiscard]] bool NativeNrReplaceInputsReady(const ListState* tracked, ngx_hooks::DlssFrame* frame, std::string* reason);
+// Validates the native NR inputs before preparing resized resources for the game's own handle.
+[[nodiscard]] bool NativeNrHandleResizeInputsReady(const ListState* tracked, ngx_hooks::DlssFrame* frame, std::string* reason);
 
 // One game list for an After-DLSS recording: native recording, ReShade replay, tokens on the list.
 class ReshadeDlssFrameHost final : public sources::DlssFrameHost {

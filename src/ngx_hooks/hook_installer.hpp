@@ -5,6 +5,7 @@
 #include <vulkan/vulkan.h>
 
 #include <atomic>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -41,6 +42,15 @@ struct EvaluateCall {
   const NVSDK_NGX_Parameter* parameters = nullptr;
   // Optional game-native DLSS-NR panel overrides. The detour applies only keys already present in the game's block and restores them after the original call.
   std::optional<nr::Controls> native_nr_controls;
+  struct NativeNrHandleOverrides {
+    std::array<ID3D12Resource*, 8> resources{};  // Color, Output, Depth, MVec, ControlMask, Backbuffer, UI, UIAlpha
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+    bool motion_rescaled = false;
+    bool ui_correction = false;
+    std::shared_ptr<void> ticket;
+  };
+  std::optional<NativeNrHandleOverrides> native_nr_handle;
   // Set by BeforeEvaluate: what DLSS reads as Color for this call only. On Vulkan an NVSDK_NGX_Resource_VK* (nr::AsResource), which the
   // detour writes into the block as a void*, as the game sets its own. On Direct3D 11 an ID3D11Resource* (nr::AsResource), which the
   // detour writes into the block with the ID3D11Resource* overload, as NGX_D3D11_EVALUATE_DLSS_EXT does, and puts back after the original.
@@ -75,6 +85,8 @@ class NgxObserver {
   // by the detour. Setting `call->color` swaps DLSS's Color for this call: the detour writes it into the
   // game's block and puts the game's own Color back after the original, on every path.
   virtual void BeforeEvaluate(EvaluateCall* /*call*/) {}
+  // After the game's original evaluate and after temporary NGX values have been restored.
+  virtual void AfterOriginalEvaluate(EvaluateCall* /*call*/, NVSDK_NGX_Result /*result*/) {}
   // BeforeEvaluate set `call->color`, but the game's own parameter block
   // had no readable Color for the detour to swap it into, so the swap did not happen. Same call, same
   // thread as BeforeEvaluate; may throw, caught and logged once like the others.

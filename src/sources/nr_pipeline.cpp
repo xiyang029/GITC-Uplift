@@ -75,6 +75,24 @@ std::optional<DXGI_FORMAT> ReadDepthFormat(DXGI_FORMAT format) {
   }
 }
 
+struct NativeInputFormat {
+  DXGI_FORMAT source = DXGI_FORMAT_UNKNOWN;
+  DXGI_FORMAT target = DXGI_FORMAT_UNKNOWN;
+};
+std::optional<NativeInputFormat> NativeInputView(nr::BoundResource input, bool depth) {
+  if (input.resource == nullptr) return std::nullopt;
+  const auto desc = input.resource->GetDesc();
+  if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.DepthOrArraySize != 1u || desc.SampleDesc.Count != 1u
+      || (desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0u || input.rect.width == 0u || input.rect.height == 0u
+      || uint64_t{input.rect.x} + input.rect.width > desc.Width || uint64_t{input.rect.y} + input.rect.height > desc.Height) return std::nullopt;
+  if (depth) {
+    if (const auto view = ReadDepthFormat(desc.Format)) return NativeInputFormat{*view, DXGI_FORMAT_R32_FLOAT};
+  } else if (const auto view = color::DescribeMaskFormat(desc.Format)) {
+    return NativeInputFormat{view->view_format, view->view_format};
+  }
+  return std::nullopt;
+}
+
 // A float SRV format for the game's motion-vector texture, or nullopt when Uplift cannot read it.
 std::optional<DXGI_FORMAT> MotionViewFormat(DXGI_FORMAT format) {
   switch (format) {
@@ -123,7 +141,9 @@ uint64_t NrPipeline::HeldBytes() const {
   for (const StageSet& set : sets_) {
     sets += (set.intermediates.model_a ? set.intermediates.bytes : 0u) + set.look.bytes + (set.exposure.state ? METER_STATE_BYTES : 0u) + set.faces.bytes;
   }
-  return sets + copies + depth + launchpad + ring + mask_.bytes;
+  uint64_t native_handle = 0u;
+  for (const auto& surfaces : native_handle_surfaces_) if (surfaces) native_handle += surfaces->bytes;
+  return sets + copies + depth + launchpad + ring + mask_.bytes + native_handle;
 }
 
 bool NrPipeline::SupportsUavTarget(DXGI_FORMAT format) const {
@@ -377,6 +397,12 @@ nr::SkipReason NrPipeline::EnsureIntermediates(const SetPlan& plan) {
       .plan = plan,
       .last_use = held.last_use,
   };
+  for (size_t i = 0u; i < created.native_inputs.size(); ++i) {
+    const auto format = plan.native_input_formats[i];
+    if (format == DXGI_FORMAT_UNKNOWN) continue;
+    created.native_inputs[i] = same_canvas && held.plan.native_input_formats[i] == format && held.native_inputs[i]
+        ? held.native_inputs[i] : CreateTexture(plan.sizes.canvas, format, UAV, COMPUTE_READ, L"Uplift native NR auxiliary input");
+  }
   const bool complete = created.model_a && created.model_b
                         && (plan.copy_format == DXGI_FORMAT_UNKNOWN || created.source_copy)
                         && (!plan.canvas_motion || created.canvas_motion) && (!private_color || created.private_color);
@@ -393,6 +419,9 @@ nr::SkipReason NrPipeline::EnsureIntermediates(const SetPlan& plan) {
                   + ((created.zero_motion ? 1u : 0u) + (created.canvas_motion ? 1u : 0u)) * plan.sizes.canvas.Pixels() * MOTION_BYTES_PER_PIXEL
                   + (created.change ? plan.sizes.image.Pixels() * MODEL_BYTES_PER_PIXEL : 0u)
                   + plan.sizes.private_color.Pixels() * MODEL_BYTES_PER_PIXEL;
+  for (size_t i = 0u; i < created.native_inputs.size(); ++i) {
+    if (created.native_inputs[i]) created.bytes += plan.sizes.canvas.Pixels() * color::DescribeMaskFormat(plan.native_input_formats[i])->bytes_per_pixel;
+  }
   // Commit only after every new surface exists. Reuse model/motion/history storage independently of
   // source-copy and private-output dimensions, but keep the old mapping's reset semantics.
   if (held.model_a && !timeline_.IsComplete(held.last_use)) {
@@ -1103,6 +1132,26 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   const std::optional<color::UavFormatInfo> format = color::DescribeUavFormat(description.Format);
   // For UAV targets: without typed UAV stores the decode could not write NR's result back.
   if (!format || !color_.SupportsTypedUavStore(format->uav_format)) return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
+  ID3D12Resource* const color_input = target.source.resource != nullptr ? target.source.resource : target.resource;
+  const auto color_desc = color_input->GetDesc();
+  auto color_format = color::DescribeFormat(color_desc.Format);
+  if (!color_format) {
+    if (const auto uav = color::DescribeUavFormat(color_desc.Format)) {
+      color_format = color::FormatInfo{.copy_format = uav->copy_format, .source_view_format = uav->source_view_format,
+                                        .bytes_per_pixel = uav->bytes_per_pixel};
+    }
+  }
+  if (!color_format) return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
+  if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || description.DepthOrArraySize != 1u
+      || description.SampleDesc.Count != 1u || (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0u
+      || color_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || color_desc.DepthOrArraySize != 1u
+      || color_desc.SampleDesc.Count != 1u) return {.reason = nr::SkipReason::INVALID_INPUT};
+  const bool separate_source = color_input != target.resource;
+  if (separate_source && ((color_desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0u
+      || (target.source_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+          && (target.source_state & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) == 0u))) {
+    return {.reason = nr::SkipReason::INVALID_INPUT};
+  }
   nr::Rect region = target.region;
   if (region.width == 0u && region.height == 0u) {
     region = {.x = 0u, .y = 0u, .width = static_cast<uint32_t>(description.Width), .height = description.Height};
@@ -1112,6 +1161,12 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
       || uint64_t{region.y} + region.height > description.Height) {
     return {.reason = nr::SkipReason::INVALID_INPUT};
   }
+  nr::Rect color_region = target.source.resource != nullptr ? target.source.rect : region;
+  if (color_region.width == 0u && color_region.x < color_desc.Width) color_region.width = static_cast<uint32_t>(color_desc.Width - color_region.x);
+  if (color_region.height == 0u && color_region.y < color_desc.Height) color_region.height = color_desc.Height - color_region.y;
+  if (color_region.width != size.width || color_region.height != size.height
+      || uint64_t{color_region.x} + color_region.width > color_desc.Width
+      || uint64_t{color_region.y} + color_region.height > color_desc.Height) return {.reason = nr::SkipReason::INVALID_INPUT};
   if (!nr::MeetsNrFloor(size)) {
     set_->intermediates.reset_pending = true;
     return {.reason = nr::SkipReason::FRAME_TOO_SMALL};
@@ -1120,18 +1175,29 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   if (slot == slot_marks_.size()) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
   const WorkLayout work = ResolveLayout(layout, size);
   const bool foveated = work.foveation.active();
-  const bool in_place = description.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && description.DepthOrArraySize == 1u
+  const bool in_place = !separate_source && color_region.x == region.x && color_region.y == region.y
+      && description.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && description.DepthOrArraySize == 1u
       && description.MipLevels == 1u && description.SampleDesc.Count == 1u
       && (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0u
       && (description.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0u
       && format->source_view_format == format->uav_format && color_.CanDecodeInPlace(format->uav_format);
+  const std::array native_inputs = {inputs.depth, inputs.control_mask, inputs.backbuffer, inputs.ui, inputs.ui_alpha};
+  std::array<std::optional<NativeInputFormat>, 5> native_views;
+  std::array<DXGI_FORMAT, 5> native_formats{};
+  if (inputs.native_nr && foveated) {
+    for (size_t i = 0u; i < native_inputs.size(); ++i) {
+      native_views[i] = NativeInputView(native_inputs[i], i == 0u);
+      if (native_views[i] && color_.SupportsTypedUavStore(native_views[i]->target)) native_formats[i] = native_views[i]->target;
+    }
+  }
   if (const nr::SkipReason problem = EnsureIntermediates({
           .sizes = {.output = size, .image = work.image, .canvas = work.image},
-          .copy_format = in_place ? DXGI_FORMAT_UNKNOWN : format->copy_format,
-          .source_bytes_per_pixel = in_place ? 0u : format->bytes_per_pixel,
+          .copy_format = in_place || separate_source ? DXGI_FORMAT_UNKNOWN : color_format->copy_format,
+          .source_bytes_per_pixel = in_place || separate_source ? 0u : color_format->bytes_per_pixel,
           .kind = TargetKind::UAV,
           .canvas_motion = foveated,
           .foveation = work.foveation,
+          .native_input_formats = native_formats,
       });
       problem != nr::SkipReason::NONE) {
     return {.reason = problem};
@@ -1147,13 +1213,7 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   const uint32_t options = ShaderOptions(config_.fixes);
   NoteMeterBasis(part.slice.stage, target.encoding, input_scale);
   const ExposureChoice exposure = ChooseExposure(target.encoding, target.exposure, target.exposure_factor);
-  ID3D12Resource* const source = in_place ? target.resource : set_->intermediates.source_copy.Get();
-  nr::FrameInputs nr_inputs = inputs;
-  if (foveated) {
-    ConvertWorkMotion(list, slot, nr_inputs, work);
-    nr_inputs.depth = {};  // source depth does not cover the warped colour
-  }
-  const MotionSource motion_source = (nr_inputs.motion.resource != nullptr ? MotionSource::DIRECT : MotionSource::NONE);
+  ID3D12Resource* const source = separate_source ? color_input : in_place ? target.resource : set_->intermediates.source_copy.Get();
 
   // The typed load reads each target pixel just before that same thread writes it.
   // Meter, encode and change use the resource as an SRV, before composition starts.
@@ -1166,8 +1226,15 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
       resource = nullptr;
     }
     ~RestoreOutput() { Now(); }
-  } restore{list, in_place ? target.resource : nullptr};
-  if (in_place) {
+  } restore{list, !separate_source && (description.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0u ? target.resource : nullptr};
+  struct RestoreSource {
+    ID3D12GraphicsCommandList* list;
+    ID3D12Resource* resource;
+    ~RestoreSource() { if (resource != nullptr) Transition(list, resource, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS); }
+  } restore_source{list, separate_source && target.source_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS ? color_input : nullptr};
+  if (separate_source) {
+    if (restore_source.resource != nullptr) Transition(list, color_input, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+  } else if (in_place) {
     Transition(list, target.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   } else {
     Transition(list, target.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1176,24 +1243,76 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
         .pResource = source, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, .SubresourceIndex = 0u};
     const D3D12_TEXTURE_COPY_LOCATION origin = {
         .pResource = target.resource, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, .SubresourceIndex = 0u};
-    const D3D12_BOX box = {.left = region.x, .top = region.y, .front = 0u, .right = region.x + region.width,
-                           .bottom = region.y + region.height, .back = 1u};
+    const D3D12_BOX box = {.left = color_region.x, .top = color_region.y, .front = 0u, .right = color_region.x + color_region.width,
+                           .bottom = color_region.y + color_region.height, .back = 1u};
     list->CopyTextureRegion(&destination, 0u, 0u, 0u, &origin, &box);
     Transition(list, source, D3D12_RESOURCE_STATE_COPY_DEST, COMPUTE_READ);
-    Transition(list, target.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(list, target.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, restore.resource != nullptr ? COMPUTE_READ : D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   }
-  const nr::Rect copied = in_place ? region : nr::Rect{.width = size.width, .height = size.height};
+  const nr::Rect copied = in_place || separate_source ? color_region : nr::Rect{.width = size.width, .height = size.height};
+  nr::FrameInputs nr_inputs = inputs;
+  nr::NativeInputReport report{.status = inputs.native_input_status, .foveated = foveated};
+  // Direct pipeline clients need no capture metadata. Preserve an explicit rejection/disable reason.
+  const std::array reported_inputs = {inputs.depth, inputs.motion, inputs.control_mask, inputs.backbuffer, inputs.ui, inputs.ui_alpha};
+  for (size_t i = 0u; i < reported_inputs.size(); ++i) {
+    if (reported_inputs[i].resource != nullptr) report.status[i] = nr::NativeInputStatus::READY;
+  }
+  if (foveated) {
+    if (inputs.motion.resource != nullptr) {
+      const bool supported = MotionViewFormat(inputs.motion.resource->GetDesc().Format).has_value();
+      const bool converted = ConvertWorkMotion(list, slot, nr_inputs, work);
+      report.status[1] = converted ? nr::NativeInputStatus::REMAPPED
+          : supported ? nr::NativeInputStatus::REMAP_FAILED : nr::NativeInputStatus::FORMAT_UNSUPPORTED;
+    }
+    if (inputs.native_nr) {
+      const std::array bindings = {&nr_inputs.depth, &nr_inputs.control_mask, &nr_inputs.backbuffer, &nr_inputs.ui, &nr_inputs.ui_alpha};
+      for (uint32_t i = 0u; i < bindings.size(); ++i) {
+        *bindings[i] = {};
+        if (native_inputs[i].resource == nullptr) continue;
+        ID3D12Resource* const remapped = set_->intermediates.native_inputs[i].Get();
+        bool recorded = false;
+        if (remapped != nullptr && native_views[i]) {
+          Transition(list, remapped, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+          recorded = color_.RecordNativeInput(list, slot, i, native_inputs[i], native_views[i]->source, remapped,
+                                              native_formats[i], work.image, work.foveation);
+          Transition(list, remapped, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+        }
+        const size_t report_index = i == 0u ? 0u : i + 1u;
+        report.status[report_index] = recorded ? nr::NativeInputStatus::REMAPPED
+            : native_formats[i] == DXGI_FORMAT_UNKNOWN ? nr::NativeInputStatus::FORMAT_UNSUPPORTED : nr::NativeInputStatus::REMAP_FAILED;
+        if (recorded) *bindings[i] = {remapped, {0u, 0u, work.image.width, work.image.height}};
+        else WarnOnce(&native_input_warned_, "Native NR: an optional input could not follow the foveated grid; binding null instead");
+      }
+      if (nr_inputs.backbuffer.resource == nullptr || (nr_inputs.ui.resource == nullptr && nr_inputs.ui_alpha.resource == nullptr)) {
+        nr_inputs.ui_correction = false;
+      }
+    } else nr_inputs.depth = {};  // the ordinary After-DLSS path has no warped depth
+  }
+  if (inputs.native_nr) {
+    report.zero_motion = nr_inputs.motion.resource == nullptr;
+    report.ui_correction = nr_inputs.ui_correction;
+    if (!native_input_report_ || *native_input_report_ != report) {
+      native_input_report_ = report;
+      nr::Logf(nr::LogLevel::INFO,
+          "Native NR inputs: Depth={}; Motion={}{}; ControlMask={}; Backbuffer={}; UI={}; UIAlpha={}; foveated={}; UI correction={}; work={}x{}",
+          nr::NativeInputStatusName(report.status[0]), nr::NativeInputStatusName(report.status[1]),
+          report.zero_motion ? " -> zero-motion" : "", nr::NativeInputStatusName(report.status[2]),
+          nr::NativeInputStatusName(report.status[3]), nr::NativeInputStatusName(report.status[4]),
+          nr::NativeInputStatusName(report.status[5]), foveated, report.ui_correction, work.image.width, work.image.height);
+    }
+  }
+  const MotionSource motion_source = (nr_inputs.motion.resource != nullptr ? MotionSource::DIRECT : MotionSource::NONE);
   profile.Copied();
   if (exposure.metered || exposure.probe) {
     RecordMeter(list, slot,
-                {.source = source, .source_view_format = format->source_view_format, .region = copied, .encoding = target.encoding,
+                {.source = source, .source_view_format = color_format->source_view_format, .region = copied, .encoding = target.encoding,
                  .primaries = (options & color::shader_options::PRIMARIES_MASK), .input_scale = input_scale},
                 exposure);
   }
   // 2. Encode into A with the game's exposure, resampled to the work image.
   const color::EncodePass encode = {
       .source = source,
-      .source_view_format = format->source_view_format,
+      .source_view_format = color_format->source_view_format,
       .width = work.image.width,
       .height = work.image.height,
       .encoding = target.encoding,
@@ -1226,7 +1345,7 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   const MaskBinding mask = BoundMask(slot, timing_host ? timing_host->SharedMask() : nullptr);
   const bool decoded = color_.RecordComputeDecode(
       list, slot,
-      {.source = in_place ? nullptr : source, .source_view_format = format->source_view_format, .nr_output = after.texture,
+      {.source = in_place ? nullptr : source, .source_view_format = color_format->source_view_format, .nr_output = after.texture,
        .target = target.resource, .target_uav_format = format->uav_format, .origin_x = region.x, .origin_y = region.y,
        .target_width = static_cast<uint32_t>(description.Width), .target_height = description.Height,
        .width = size.width, .height = size.height, .encoding = target.encoding, .input_scale = input_scale,
@@ -1398,6 +1517,272 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
   return {.recorded = true, .nr_applied = true, .passes_run = evaluated.passes_run, .reason = evaluated.reason,
           .from_session = nr::SessionWroteMessage(evaluated.reason), .motion_source = motion_source,
           .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
+}
+
+PipelineResult NrPipeline::PrepareNativeNrHandle(DlssFrameHost& host, state::RestoreMode restore,
+                                                  const ngx_hooks::DlssFrame& frame, const WorkLayout& layout,
+                                                  NativeNrHandleWork* work) {
+  if (work == nullptr || frame.color == nullptr || frame.output == nullptr || !frame.native_nr || !frame.native_nr->enabled) {
+    return {.reason = nr::SkipReason::INVALID_INPUT};
+  }
+  ID3D12GraphicsCommandList* const list = host.NativeList();
+  if (list == nullptr || !host.StateKnown()) return {.reason = nr::SkipReason::LIST_STATE_UNKNOWN};
+  if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return {.reason = nr::SkipReason::COMPUTE_QUEUE};
+
+  const D3D12_RESOURCE_DESC color_desc = frame.color->GetDesc();
+  const D3D12_RESOURCE_DESC output_desc = frame.output->GetDesc();
+  const nr::Rect input_region = frame.color_region;
+  const nr::Rect output_region = frame.output_region;
+  const bool color_output_alias = (frame.color == frame.output);
+  const nr::Size output_size{output_region.width, output_region.height};
+  const nr::Size image = (layout.image.Empty() ? output_size : layout.image);
+  if (input_region.width != output_size.width || input_region.height != output_size.height || image.Empty()
+      || !nr::MeetsNrFloor(image) || uint64_t{input_region.x} + input_region.width > color_desc.Width
+      || uint64_t{input_region.y} + input_region.height > color_desc.Height || uint64_t{output_region.x} + output_region.width > output_desc.Width
+      || uint64_t{output_region.y} + output_region.height > output_desc.Height
+      || color_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || output_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
+      || color_desc.DepthOrArraySize != 1u || output_desc.DepthOrArraySize != 1u || color_desc.SampleDesc.Count != 1u
+      || output_desc.SampleDesc.Count != 1u || (output_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0u) {
+    return {.reason = nr::SkipReason::INVALID_INPUT};
+  }
+  if (image == output_size && !layout.foveation.active()) return {.reason = nr::SkipReason::NONE};
+  if (!color_.NativeInputReady() || !color_.NativeCompositeReady()) return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
+  const auto color_format = color::DescribeUavFormat(color_desc.Format);
+  const auto output_format = color::DescribeUavFormat(output_desc.Format);
+  if (!color_format || !output_format || !color_.SupportsTypedUavStore(color_format->uav_format)
+      || !color_.SupportsTypedUavStore(output_format->uav_format)) {
+    return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
+  }
+  if (!frame.native_nr->color_state || (color_desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0u) {
+    return {.reason = nr::SkipReason::LIST_STATE_UNKNOWN};
+  }
+
+  const std::array<nr::BoundResource, 5> auxiliary = {
+      nr::BoundResource{frame.depth, frame.depth_region}, frame.native_nr->control_mask, frame.native_nr->backbuffer,
+      frame.native_nr->ui, frame.native_nr->ui_alpha};
+  std::array<std::optional<NativeInputFormat>, 5> auxiliary_formats;
+  std::array<DXGI_FORMAT, 5> auxiliary_views{};
+  std::array<DXGI_FORMAT, 5> auxiliary_uavs{};
+  for (size_t i = 0u; i < auxiliary.size(); ++i) {
+    auxiliary_formats[i] = NativeInputView(auxiliary[i], i == 0u);
+    if (auxiliary_formats[i] && color_.SupportsTypedUavStore(auxiliary_formats[i]->target)) {
+      auxiliary_views[i] = auxiliary_formats[i]->source;
+      auxiliary_uavs[i] = auxiliary_formats[i]->target;
+    }
+  }
+  const std::optional<DXGI_FORMAT> motion_view = (frame.motion_vectors != nullptr
+      ? MotionViewFormat(frame.motion_vectors->GetDesc().Format) : std::nullopt);
+  const bool remap_motion = motion_view.has_value() && frame.motion_region.width != 0u && frame.motion_region.height != 0u
+      && uint64_t{frame.motion_region.x} + frame.motion_region.width <= frame.motion_vectors->GetDesc().Width
+      && uint64_t{frame.motion_region.y} + frame.motion_region.height <= frame.motion_vectors->GetDesc().Height;
+
+  uint32_t descriptor_slots[2] = {UINT32_MAX, UINT32_MAX};
+  size_t found_slots = 0u;
+  for (uint32_t offset = 0u; offset < slot_marks_.size() && found_slots < 2u; ++offset) {
+    const uint32_t slot = (next_slot_ + offset) % static_cast<uint32_t>(slot_marks_.size());
+    if (timeline_.IsComplete(slot_marks_[slot])) descriptor_slots[found_slots++] = slot;
+  }
+  if (found_slots != 2u) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
+
+  size_t surface_index = native_handle_surfaces_.size();
+  for (size_t i = 0u; i < native_handle_surfaces_.size(); ++i) {
+    if (native_handle_surfaces_[i] && native_handle_surfaces_[i]->active) continue;
+    if (native_handle_surfaces_[i] && !timeline_.IsComplete(native_handle_surfaces_[i]->last_use)) continue;
+    surface_index = i;
+    break;
+  }
+  if (surface_index == native_handle_surfaces_.size()) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
+
+  auto matches = [&](const std::shared_ptr<NativeHandleSurfaces>& held) {
+    if (!held || held->size != image || held->original_size != output_size || held->color_view != color_format->source_view_format
+        || held->color_uav != color_format->uav_format || held->output_view != output_format->source_view_format
+        || held->output_uav != output_format->uav_format || !held->color || !held->output || !held->baseline || !held->original
+        || held->color_output_alias != color_output_alias || static_cast<bool>(held->motion) != remap_motion) return false;
+    for (size_t i = 0u; i < auxiliary.size(); ++i) {
+      if (held->auxiliary_view[i] != auxiliary_views[i] || held->auxiliary_uav[i] != auxiliary_uavs[i]
+          || static_cast<bool>(held->auxiliary[i]) != (auxiliary_uavs[i] != DXGI_FORMAT_UNKNOWN)) return false;
+    }
+    return true;
+  };
+  auto& held = native_handle_surfaces_[surface_index];
+  if (!matches(held)) {
+    auto created = std::make_shared<NativeHandleSurfaces>();
+    created->size = image;
+    created->original_size = output_size;
+    created->color_view = color_format->source_view_format;
+    created->color_uav = color_format->uav_format;
+    created->output_view = output_format->source_view_format;
+    created->output_uav = output_format->uav_format;
+    created->color_output_alias = color_output_alias;
+    created->color = CreateTexture(image, color_format->uav_format, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle Color");
+    created->baseline = CreateTexture(image, color_format->uav_format, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle baseline");
+    created->original = CreateTexture(output_size, color_format->uav_format, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle original Color");
+    if (color_output_alias) {
+      // Preserve the game's in-place Color/Output contract for native NR. A separate read-only Color
+      // resource and UAV Output are only safe when the game's original parameters were separate too.
+      created->output = created->color;
+    } else {
+      created->output = CreateTexture(image, output_format->uav_format, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle Output");
+    }
+    if (remap_motion) created->motion = CreateTexture(image, DXGI_FORMAT_R16G16_FLOAT,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle motion");
+    for (size_t i = 0u; i < auxiliary.size(); ++i) {
+      created->auxiliary_view[i] = auxiliary_views[i];
+      created->auxiliary_uav[i] = auxiliary_uavs[i];
+      if (auxiliary_uavs[i] != DXGI_FORMAT_UNKNOWN) {
+        created->auxiliary[i] = CreateTexture(image, auxiliary_uavs[i], D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle guide");
+      }
+    }
+    if (!created->color || !created->output || !created->baseline || !created->original || (remap_motion && !created->motion)) {
+      return {.reason = nr::SkipReason::OUT_OF_MEMORY};
+    }
+    for (size_t i = 0u; i < auxiliary.size(); ++i) {
+      if (auxiliary_uavs[i] != DXGI_FORMAT_UNKNOWN && !created->auxiliary[i]) {
+        created->auxiliary_view[i] = DXGI_FORMAT_UNKNOWN;
+        created->auxiliary_uav[i] = DXGI_FORMAT_UNKNOWN;
+        created->auxiliary[i].Reset();  // optional guides fall back to null
+      }
+    }
+    const auto bytes_per_pixel = [](DXGI_FORMAT format) -> uint64_t {
+      if (const auto info = color::DescribeUavFormat(format)) return info->bytes_per_pixel;
+      if (format == DXGI_FORMAT_R32_FLOAT) return 4u;
+      if (format == DXGI_FORMAT_R16G16_FLOAT) return 4u;
+      if (format == DXGI_FORMAT_R8_UNORM) return 1u;
+      return 8u;
+    };
+    created->bytes = image.Pixels() * (2u * bytes_per_pixel(color_format->uav_format)
+        + (color_output_alias ? 0u : bytes_per_pixel(output_format->uav_format))
+        + (remap_motion ? 4u : 0u)) + output_size.Pixels() * bytes_per_pixel(color_format->uav_format);
+    for (const DXGI_FORMAT format : created->auxiliary_uav) if (format != DXGI_FORMAT_UNKNOWN) created->bytes += image.Pixels() * bytes_per_pixel(format);
+    held = std::move(created);
+  }
+  held->active = true;
+
+  auto ticket = std::make_shared<NativeNrHandleTicket>();
+  ticket->surfaces = held;
+  ticket->original_output = frame.output;
+  ticket->output_region = output_region;
+  ticket->layout = layout;
+  ticket->post_slot = descriptor_slots[1];
+  ticket->output_view = output_format->source_view_format;
+  ticket->output_uav = output_format->uav_format;
+
+  PipelineResult recorded = RecordOnGameList(host, timeline_, restore, [&] {
+    const uint32_t slot = descriptor_slots[0];
+    const D3D12_RESOURCE_STATES color_state = frame.native_nr->color_state;
+    Transition(list, frame.color, color_state, COMPUTE_READ);
+    const bool color_ok = color_.RecordNativeInput(list, slot, 0u, {frame.color, input_region}, color_format->source_view_format,
+        held->color.Get(), color_format->uav_format, image, layout.foveation, true, false);
+    if (!color_ok) {
+      Transition(list, frame.color, COMPUTE_READ, color_state);
+      return PipelineResult{.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
+    }
+    static_cast<void>(color_.RecordNativeInput(list, slot, 6u, {frame.color, input_region}, color_format->source_view_format,
+        held->baseline.Get(), color_format->uav_format, image, layout.foveation, true, false));
+    static_cast<void>(color_.RecordNativeInput(list, slot, 7u, {frame.color, input_region}, color_format->source_view_format,
+        held->original.Get(), color_format->uav_format, output_size, {}, false, false));
+    if (!color_output_alias) {
+      Transition(list, held->color.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+    } else {
+      // The game binds this same surface as both Color and Output. Keep it in UAV state for NGX,
+      // but order the preprocessing dispatch's writes before the native evaluate's UAV accesses.
+      UavBarrier(list, held->color.Get());
+    }
+    Transition(list, held->baseline.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+    Transition(list, held->original.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+    for (size_t i = 0u; i < auxiliary.size(); ++i) {
+      if (auxiliary[i].resource == nullptr || !held->auxiliary[i] || !auxiliary_formats[i]) continue;
+      static_cast<void>(color_.RecordNativeInput(list, slot, static_cast<uint32_t>(i + 1u), auxiliary[i],
+          auxiliary_formats[i]->source, held->auxiliary[i].Get(), auxiliary_uavs[i], image, layout.foveation));
+      Transition(list, held->auxiliary[i].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+    }
+    if (remap_motion && held->motion) {
+      static_cast<void>(color_.RecordMotion(list, slot, {.source = frame.motion_vectors, .source_view_format = *motion_view,
+          .region = frame.motion_region, .target = held->motion.Get(), .image = image, .canvas = image,
+          .scale_x = frame.mv_scale_x * static_cast<float>(image.width) / static_cast<float>(frame.motion_region.width),
+          .scale_y = frame.mv_scale_y * static_cast<float>(image.height) / static_cast<float>(frame.motion_region.height),
+          .foveation = layout.foveation}));
+      Transition(list, held->motion.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+    }
+    Transition(list, frame.color, COMPUTE_READ, color_state);
+    slot_marks_[descriptor_slots[0]] = timeline_.MarkNow(true);
+    slot_marks_[descriptor_slots[1]] = slot_marks_[descriptor_slots[0]];  // reserved until the game's evaluate returns
+    held->last_use = slot_marks_[descriptor_slots[0]];
+    next_slot_ = (descriptor_slots[1] + 1u) % static_cast<uint32_t>(slot_marks_.size());
+    return PipelineResult{.recorded = true};
+  });
+  if (!recorded.recorded) {
+    held->active = false;
+    return recorded;
+  }
+
+  work->resources = {held->color.Get(), held->output.Get(),
+      (auxiliary[0].resource != nullptr && held->auxiliary[0] ? held->auxiliary[0].Get() : nullptr),
+      (remap_motion && held->motion ? held->motion.Get() : nullptr),
+      (auxiliary[1].resource != nullptr && held->auxiliary[1] ? held->auxiliary[1].Get() : nullptr),
+      (auxiliary[2].resource != nullptr && held->auxiliary[2] ? held->auxiliary[2].Get() : nullptr),
+      (auxiliary[3].resource != nullptr && held->auxiliary[3] ? held->auxiliary[3].Get() : nullptr),
+      (auxiliary[4].resource != nullptr && held->auxiliary[4] ? held->auxiliary[4].Get() : nullptr)};
+  work->image = image;
+  work->motion_rescaled = (work->resources[3] != nullptr);
+  work->motion_scale_x = 1.f;
+  work->motion_scale_y = 1.f;
+  work->ui_correction = frame.native_nr->ui_correction && work->resources[5] != nullptr
+      && (work->resources[6] != nullptr || work->resources[7] != nullptr);
+  work->ticket = std::move(ticket);
+  return recorded;
+}
+
+PipelineResult NrPipeline::CompleteNativeNrHandle(DlssFrameHost& host, state::RestoreMode restore,
+                                                   const NativeNrHandleWork& work, bool native_succeeded) {
+  const auto ticket = std::static_pointer_cast<NativeNrHandleTicket>(work.ticket);
+  if (!ticket || !ticket->surfaces) return {.reason = nr::SkipReason::INVALID_INPUT};
+  NativeHandleSurfaces& surfaces = *ticket->surfaces;
+  ID3D12GraphicsCommandList* const list = host.NativeList();
+  if (list == nullptr || !host.StateKnown()) {
+    surfaces.active = false;
+    return {.reason = nr::SkipReason::LIST_STATE_UNKNOWN};
+  }
+  return RecordOnGameList(host, timeline_, restore, [&] {
+    const uint32_t slot = ticket->post_slot;
+    bool upsampled = false;
+    if (native_succeeded) {
+      Transition(list, surfaces.output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
+      upsampled = color_.RecordNativeComposite(list, slot,
+          {.original = surfaces.original.Get(), .original_view_format = surfaces.color_view,
+           .baseline = surfaces.baseline.Get(), .baseline_view_format = surfaces.color_view,
+           .nr_output = surfaces.output.Get(), .nr_output_view_format = surfaces.output_view,
+           .target = ticket->original_output.Get(), .target_uav_format = ticket->output_uav,
+           .output_size = {ticket->output_region.width, ticket->output_region.height}, .work_size = work.image,
+           .origin_x = ticket->output_region.x, .origin_y = ticket->output_region.y, .foveation = ticket->layout.foveation});
+      UavBarrier(list, ticket->original_output.Get());
+      Transition(list, surfaces.output.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+    // Restore every substituted guide to its initial state. The next evaluate can then use the same
+    // resource set even when this command list is replayed.
+    if (surfaces.color && surfaces.color.Get() != surfaces.output.Get()) {
+      Transition(list, surfaces.color.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+    Transition(list, surfaces.baseline.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(list, surfaces.original.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (surfaces.motion && work.motion_rescaled) Transition(list, surfaces.motion.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    for (size_t i = 0u; i < surfaces.auxiliary.size(); ++i) {
+      if (surfaces.auxiliary[i] && work.resources[(i == 0u) ? 2u : (i + 3u)] != nullptr) {
+        Transition(list, surfaces.auxiliary[i].Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      }
+    }
+    slot_marks_[slot] = timeline_.MarkNow(true);
+    surfaces.last_use = slot_marks_[slot];
+    surfaces.active = false;
+    if (!native_succeeded) return PipelineResult{.recorded = true};
+    return PipelineResult{.recorded = true, .nr_applied = upsampled,
+                          .reason = (upsampled ? nr::SkipReason::NONE : nr::SkipReason::UNSUPPORTED_FORMAT)};
+  });
 }
 
 bool NrPipeline::ConvertWorkMotion(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs& inputs, const WorkLayout& work, bool flip_y) {

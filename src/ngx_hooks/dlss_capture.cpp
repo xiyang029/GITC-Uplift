@@ -63,13 +63,23 @@ DlssFrame CaptureNativeNrFrame(const NVSDK_NGX_Parameter& parameters, const NVSD
   const auto resource = [&parameters](const char* key) { return ReadResource(parameters, key); };
   const auto base = [&parameters](const char* key) { return ReadUint(parameters, key).value_or(0u); };
   const auto region = [&](const nr::keys::Resource& key, ID3D12Resource* image) {
+    const uint32_t x = base(key.subrect.base_x), y = base(key.subrect.base_y);
     uint32_t width = base(key.subrect.width), height = base(key.subrect.height);
     if ((width == 0u || height == 0u) && image != nullptr) {
       const D3D12_RESOURCE_DESC desc = image->GetDesc();
-      if (width == 0u) width = static_cast<uint32_t>(desc.Width);
-      if (height == 0u) height = desc.Height;
+      if (width == 0u && x < desc.Width) width = static_cast<uint32_t>(desc.Width - x);
+      if (height == 0u && y < desc.Height) height = desc.Height - y;
     }
-    return nr::Rect{base(key.subrect.base_x), base(key.subrect.base_y), width, height};
+    return nr::Rect{x, y, width, height};
+  };
+  const auto bound = [&](const nr::keys::Resource& key) {
+    ID3D12Resource* const image = resource(key.resource);
+    return nr::BoundResource{image, image != nullptr ? region(key, image) : nr::Rect{}};
+  };
+  const auto flag = [&parameters](const char* key) -> std::optional<bool> {
+    if (const auto value = ReadInt(parameters, key)) return *value != 0;
+    if (const auto value = ReadUint(parameters, key)) return *value != 0u;
+    return std::nullopt;
   };
   const auto scale = [&parameters](const char* key) {
     const std::optional<float> value = ReadFloat(parameters, key);
@@ -83,10 +93,16 @@ DlssFrame CaptureNativeNrFrame(const NVSDK_NGX_Parameter& parameters, const NVSD
       .handle = handle, .feature = record.feature, .snapshot = record.snapshot, .serial = record.serial,
       .color = color, .output = output, .motion_vectors = motion, .depth = depth,
       .mv_scale_x = scale(nr::keys::MVEC_SCALE_X), .mv_scale_y = scale(nr::keys::MVEC_SCALE_Y),
-      .reset = (ReadInt(parameters, nr::keys::RESET).value_or(0) != 0),
+      .reset = flag(nr::keys::RESET).value_or(false),
       .render = record.snapshot.render,
       .color_region = region(nr::keys::COLOR, color), .motion_region = region(nr::keys::MVEC, motion),
       .depth_region = region(nr::keys::DEPTH, depth), .output_region = region(nr::keys::OUTPUT, output),
+      .native_nr = NativeNrInputs{
+          .control_mask = bound(nr::keys::CONTROL_MASK), .backbuffer = bound(nr::keys::BACKBUFFER),
+          .ui = bound(nr::keys::UI), .ui_alpha = bound(nr::keys::UI_ALPHA),
+          .depth_inverted = flag(nr::keys::DEPTH_INVERTED),
+          .ui_correction = flag(nr::keys::UI_CORRECTION).value_or(false),
+          .enabled = flag(nr::keys::ENABLED).value_or(true)},
   };
   if (frame.render.Empty()) frame.render = {frame.color_region.width, frame.color_region.height};
   return frame;

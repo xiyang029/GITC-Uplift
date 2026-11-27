@@ -13,6 +13,7 @@
 #include "nr/budget.hpp"
 #include "nr/feature.hpp"
 #include "nr/host.hpp"
+#include "nr/native_inputs.hpp"
 #include "nr/session_status.hpp"
 #include "nr/skip_reason.hpp"
 #include "nr/timeline.hpp"
@@ -88,6 +89,8 @@ struct FrameInputs {
   std::span<const std::optional<Controls>> later_passes;
   PassResolver* resolver = nullptr;  // Keep faces after each later pass; null: none
   FaceTwin faces;                    // Keep faces; needs `resolver`, which recombines the twin's output with pass 1's
+  bool native_nr = false;  // replacement: remap optional native inputs with the foveated colour grid
+  NativeInputStatuses native_input_status{};
 };
 
 struct EvaluateResult {

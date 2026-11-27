@@ -76,6 +76,7 @@ struct AfterDlssConfig {
   nr::Controls controls;
   WorkLayout layout;  // set by DeviceContext; empty = Full
   ChainPart part;  // split chain: the stage group this evaluate's recording runs; the default is the whole chain
+  bool replace_native_nr = false;
 };
 
 // The region of DLSS's Output NR runs on: the Output subrect, or the whole Output
@@ -140,6 +141,7 @@ PipelineResult RecordOnGameList(DlssFrameHost& host, nr::Timeline& timeline, sta
 class AfterDlssSource {
  public:
   AfterDlssSource(NrPipeline& pipeline, nr::Timeline& timeline);
+  [[nodiscard]] NrPipeline& Pipeline() { return pipeline_; }
 
   PipelineResult Run(DlssFrameHost& host, const ngx_hooks::DlssFrame& frame, bool reset_hint, const AfterDlssConfig& config);
   // An evaluate Run never saw (the Direct3D 11 bridge skipped it before recording) did not apply NR either: the next one that

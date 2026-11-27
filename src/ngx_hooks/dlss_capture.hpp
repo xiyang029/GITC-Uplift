@@ -4,10 +4,26 @@
 
 #include "ngx_hooks/feature_registry.hpp"
 #include "nr/ngx.hpp"
+#include "nr/native_inputs.hpp"
 #include "nr/types.hpp"
 #include "nr/vk_handles.hpp"
 
 namespace uplift::ngx_hooks {
+
+// Optional inputs belonging to the game-owned DLSSNR.* evaluate, not DLSS-SR.
+struct NativeNrInputs {
+  nr::BoundResource control_mask;
+  nr::BoundResource backbuffer;
+  nr::BoundResource ui;
+  nr::BoundResource ui_alpha;
+  std::optional<bool> depth_inverted;
+  bool ui_correction = false;
+  bool enabled = true;
+  nr::NativeInputStatuses input_status{};
+  // Expected entry state from the NGX contract: shader-read for distinct Color, UAV when Color aliases Output.
+  // This is not queried from the resource; the barrier trace is diagnostic and incomplete.
+  D3D12_RESOURCE_STATES color_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+};
 
 // One DLSS evaluate as the After-DLSS placement needs it. Resources are the game's;
 // nothing here is dereferenced or kept past the evaluate.
@@ -33,6 +49,7 @@ struct DlssFrame {
   nr::Rect motion_region;  // the Input.MV subrect base; render-sized for low-resolution MVs, else output-sized
   nr::Rect depth_region;   // the Input.Depth subrect base, render-sized (DLSS reads depth at the render size)
   nr::Rect output_region;  // the Output subrect base, sized by the create-time output size (empty when unknown)
+  std::optional<NativeNrInputs> native_nr;
 };
 
 [[nodiscard]] DlssFrame CaptureDlssFrame(const NVSDK_NGX_Parameter& parameters, const NVSDK_NGX_Handle* handle,

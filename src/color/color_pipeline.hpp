@@ -100,6 +100,24 @@ struct ComputeDecodePass {
   ID3D12Resource* model_input = nullptr;
 };
 
+// Rebuild a resized native-NR result over the original full-resolution Color. The baseline and NR
+// output are the two work-resolution images; only their difference is upsampled.
+struct NativeCompositePass {
+  ID3D12Resource* original = nullptr;
+  DXGI_FORMAT original_view_format = DXGI_FORMAT_UNKNOWN;
+  ID3D12Resource* baseline = nullptr;
+  DXGI_FORMAT baseline_view_format = DXGI_FORMAT_UNKNOWN;
+  ID3D12Resource* nr_output = nullptr;
+  DXGI_FORMAT nr_output_view_format = DXGI_FORMAT_UNKNOWN;
+  ID3D12Resource* target = nullptr;
+  DXGI_FORMAT target_uav_format = DXGI_FORMAT_UNKNOWN;
+  nr::Size output_size;
+  nr::Size work_size;
+  uint32_t origin_x = 0u;
+  uint32_t origin_y = 0u;
+  nr::foveation::Grid foveation;
+};
+
 // v2 design §3.7: NR's change field at the work image size, from the model input recomputed exactly
 // as `encode` computed it (a later pass may have overwritten A) and NR's output.
 struct ChangePass {
@@ -236,7 +254,7 @@ class ColorPipeline {
  public:
   // Fix round 2, Important 1: sized for Timeline's own AGED_SUBMISSION_TIME (250 ms) at up to 240 fps
   // on a submit-only thread (a common engine shape, e.g. Unreal Engine 5's D3D12 RHI), so the ring
-  // never starves NR into nr::SkipReason::DESCRIPTORS_BUSY there: 128 slots of 20 tables of 7 descriptors (Keep faces' ten included), about 570 KB.
+  // never starves NR into nr::SkipReason::DESCRIPTORS_BUSY there: 128 slots of 29 tables of 7 descriptors.
   static constexpr uint32_t RING_SLOTS = 128u;
 
   ColorPipeline() = default;
@@ -250,11 +268,20 @@ class ColorPipeline {
   bool RecordDecode(ID3D12GraphicsCommandList* list, uint32_t slot, const DecodePass& pass);
   // False (logged, nothing recorded) when slot is out of range.
   bool RecordComputeDecode(ID3D12GraphicsCommandList* list, uint32_t slot, const ComputeDecodePass& pass);
+  bool RecordNativeComposite(ID3D12GraphicsCommandList* list, uint32_t slot, const NativeCompositePass& pass);
   // False (logged, nothing recorded) when slot is out of range. Also used for the change field.
   bool RecordChange(ID3D12GraphicsCommandList* list, uint32_t slot, const ChangePass& pass);
   bool RecordDepth(ID3D12GraphicsCommandList* list, uint32_t slot, ID3D12Resource* source, DXGI_FORMAT view_format,
                    nr::Rect region, ID3D12Resource* target);
   bool RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot, const MotionPass& pass);
+  // Native NR's optional inputs keep their stored values (including alpha), sampled at the warped colour positions.
+  // Each input has its own descriptor table in the recording slot. Point sampling preserves mask/depth discontinuities.
+  bool RecordNativeInput(ID3D12GraphicsCommandList* list, uint32_t slot, uint32_t input, nr::BoundResource source,
+                         DXGI_FORMAT source_format, ID3D12Resource* target, DXGI_FORMAT target_format, nr::Size size,
+                         const nr::foveation::Grid& foveation, bool bilinear = false, bool warp_source = false,
+                         uint32_t target_x = 0u, uint32_t target_y = 0u);
+  [[nodiscard]] bool NativeInputReady() const { return native_input_pipeline_ != nullptr; }
+  [[nodiscard]] bool NativeCompositeReady() const { return native_composite_pipeline_ != nullptr; }
   // Plan 5. Each: false (logged, nothing recorded) when slot is out of range.
   bool RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, const MeterPass& pass);
   // One dispatch per level, with UAV barriers on both atlases between them.
@@ -307,6 +334,8 @@ class ColorPipeline {
   Microsoft::WRL::ComPtr<ID3D12PipelineState> in_place_decode_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> depth_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> native_input_pipeline_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> native_composite_pipeline_;
   // Plan 5: the look and meter pipelines.
   Microsoft::WRL::ComPtr<ID3D12PipelineState> meter_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> pyramid_pipeline_;
