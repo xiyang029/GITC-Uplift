@@ -64,7 +64,6 @@ constexpr std::array<std::string_view, 3> PASS_STAGES = {NR_STAGE_NAMES[0], NR_S
 constexpr std::array<std::string_view, 2> UI_CORRECTION_MODES = {"Off", "On"};
 constexpr std::array<std::string_view, 3> STABILIZE_MODES = {"Off", "Static", "Motion"};
 constexpr std::array<std::string_view, 4> INPUT_EXPOSURES = {"Auto", "Game", "Metered", "Manual"};
-constexpr std::array<std::string_view, 2> AUTO_EXPOSURE_MODES = {"Blend", "Switch"};
 constexpr std::array<std::string_view, 2> ADAPT_MODES = {"Off", "Smooth"};
 constexpr std::array<std::string_view, 4> PRIMARIES = {"Auto", "BT.709", "BT.2020", "AP1 (ACEScg)"};
 constexpr std::array<std::string_view, 2> NEURAL_TRANSFERS = {"Bounded ratio", "Consistent"};
@@ -147,12 +146,12 @@ bool ExposureAdaptationHidden(const Settings& s) {
   return (s.input_exposure != color::InputExposure::AUTO && s.input_exposure != color::InputExposure::METERED);
 }
 
-bool AutoExposureModeHidden(const Settings& s) {
-  return s.input_exposure != color::InputExposure::AUTO;
+bool ExposureRatesHidden(const Settings& s) {
+  return ExposureAdaptationHidden(s) || s.exposure_adapt == ExposureAdapt::OFF;
 }
 
 bool AutoExposureBlendHidden(const Settings& s) {
-  return (s.input_exposure != color::InputExposure::AUTO || s.auto_exposure_mode != color::AutoExposureMode::BLEND);
+  return s.input_exposure != color::InputExposure::AUTO;
 }
 
 bool ResolutionScaleNotCustom(const Settings& s) {
@@ -376,8 +375,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .kind = SettingKind::CHOICE,
         .section = SettingSection::MASK,
         .label = "UI correction",
-        .tooltip = "Direct3D 12 Present or Before Framegen. On: NR runs on the game's HUD-less image, so the HUD is not changed; needs HUD-less "
-                   "and HUD opacity tags, even with frame generation off. Auto, Off: the HUD-less image is hidden from frame generation instead",
+        .tooltip = "Direct3D 12 Present or Before Framegen. On: uses the game's HUD-less image and HUD opacity tags for precise blending. Auto, Off: the HUD-less image is hidden from frame generation instead",
         .choices = UI_CORRECTION_MODES,
         .get = [](const Settings& s) { return Index(s.ui_correction); },
         .set = [](Settings& s, double v) { s.ui_correction = FromIndex<UiCorrection>(v); },
@@ -1257,20 +1255,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .set = [](Settings& s, double v) { s.input_exposure = FromIndex<color::InputExposure>(v); },
     },
     {
-        // Shown only while Input exposure is Auto.
-        .key = "AutoExposureMode",
-        .kind = SettingKind::CHOICE,
-        .section = SettingSection::FIXES_COLOR,
-        .label = "Auto exposure",
-        .tooltip = "How Auto uses the game's exposure. Blend: mixes it with Uplift's meter, by the slider below. Switch: the game's alone. "
-                   "A broken game exposure falls back to the meter.",
-        .choices = AUTO_EXPOSURE_MODES,
-        .get = [](const Settings& s) { return Index(s.auto_exposure_mode); },
-        .set = [](Settings& s, double v) { s.auto_exposure_mode = FromIndex<color::AutoExposureMode>(v); },
-        .hidden = AutoExposureModeHidden,
-    },
-    {
-        // Shown only for Auto's Blend. Stored 0..1, shown as a percentage.
+        // Shown only for Auto. Stored 0..1, shown as a percentage.
         .key = "AutoExposureBlend",
         .kind = SettingKind::FLOAT,
         .section = SettingSection::FIXES_COLOR,
@@ -1307,7 +1292,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 20.0,
         .get = [](const Settings& s) { return static_cast<double>(s.adapt_brighter_stops); },
         .set = [](Settings& s, double v) { s.adapt_brighter_stops = static_cast<float>(v); },
-        .hidden = ExposureAdaptationHidden,
+        .hidden = ExposureRatesHidden,
     },
     {
         .key = "AdaptDarkerStops",
@@ -1319,7 +1304,7 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .max = 20.0,
         .get = [](const Settings& s) { return static_cast<double>(s.adapt_darker_stops); },
         .set = [](Settings& s, double v) { s.adapt_darker_stops = static_cast<float>(v); },
-        .hidden = ExposureAdaptationHidden,
+        .hidden = ExposureRatesHidden,
     },
     {
         .key = "LinearUnitNits",
@@ -2112,13 +2097,9 @@ std::string FormatSettingValue(const SettingDescriptor& descriptor, const Settin
 }
 
 bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& settings) {
-  const bool automatic = (settings.input_exposure == color::InputExposure::AUTO);
-  // The Adaptation rows matter wherever the meter can be used: Metered, and Auto, which meters when the game's exposure is missing, broken or blended.
-  if (descriptor.key == "ExposureAdapt" || descriptor.key == "AdaptBrighterStops" || descriptor.key == "AdaptDarkerStops") {
-    return (!automatic && settings.input_exposure != color::InputExposure::METERED);
-  }
-  if (descriptor.key == "AutoExposureMode") return !automatic;
-  if (descriptor.key == "AutoExposureBlend") return (!automatic || settings.auto_exposure_mode != color::AutoExposureMode::BLEND);
+  if (descriptor.key == "ExposureAdapt") return ExposureAdaptationHidden(settings);
+  if (descriptor.key == "AdaptBrighterStops" || descriptor.key == "AdaptDarkerStops") return ExposureRatesHidden(settings);
+  if (descriptor.key == "AutoExposureBlend") return AutoExposureBlendHidden(settings);
   return false;
 }
 

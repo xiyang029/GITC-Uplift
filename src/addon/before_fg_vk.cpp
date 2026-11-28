@@ -169,10 +169,10 @@ void BeforeFgVk::BeginHud(const HudPresentVk& hud, VkQueue queue, const VkPresen
   hud_.reason = DecideHudFrame(true, taken, facts);
   NoteHudFormats(hud_.reason, taken, facts);
   const bool admitted = hud.settle->Admit(hud_.reason);
-  if (hud_.reason == HudReason::USABLE && !admitted) hud_.reason = HudReason::SETTLING;
-  color::HudComposerVk* const composer = (hud_.reason == HudReason::USABLE ? ComposerFor(chain) : nullptr);
+  if (IsHudFrameUsable(hud_.reason) && !admitted) hud_.reason = HudReason::SETTLING;
+  color::HudComposerVk* const composer = (IsHudFrameUsable(hud_.reason) ? ComposerFor(chain) : nullptr);
   if (composer != nullptr) composer->Retire(hud.input->Presents());
-  if (hud_.reason != HudReason::USABLE) return;
+  if (!IsHudFrameUsable(hud_.reason)) return;
   const auto& tagged = *taken.frame;
   const color::HudComposerVk::Inputs inputs = {
       .back_buffer = frame->image.image, .format = chain.vk_format, .size = {chain.size.width, chain.size.height},

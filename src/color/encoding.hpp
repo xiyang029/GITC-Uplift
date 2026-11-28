@@ -48,18 +48,17 @@ enum class Primaries : uint32_t {
 
 // F17: the InputExposure index.
 enum class InputExposure : uint32_t {
-  AUTO = 0u,     // Plan 17: Game while DLSS's exposure agrees with the meter, Metered once it does not (and without one)
+  AUTO = 0u,     // blend game/meter, or meter alone without valid game exposure
   GAME = 1u,     // DLSS's exposure (Plan 4's rule; none at Present)
   METERED = 2u,  // Uplift's own meter and governor
   MANUAL = 3u,   // DiffuseWhiteNits alone
 };
 
-// 2026-10-09 (.superpowers/sdd/2026-10-09-auto-exposure): the AutoExposureMode index, how Auto uses a valid game exposure. Either falls back to the meter
-// alone once the game's is found broken.
-enum class AutoExposureMode : uint32_t {
-  BLEND = 0u,   // the game's and the meter's, blended in stops by AutoExposureBlend
-  SWITCH = 1u,  // the game's (Plan 17's Auto)
-};
+// Shared exposure defaults for settings and pipeline callers.
+inline constexpr InputExposure DEFAULT_INPUT_EXPOSURE = InputExposure::AUTO;
+inline constexpr float DEFAULT_AUTO_EXPOSURE_BLEND = 0.8f;
+inline constexpr float DEFAULT_ADAPT_BRIGHTER = 2.f;
+inline constexpr float DEFAULT_ADAPT_DARKER = 0.7f;
 
 // F15: the NeuralTransfer index.
 enum class NeuralTransfer : uint32_t {

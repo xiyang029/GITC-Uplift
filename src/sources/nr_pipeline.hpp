@@ -235,7 +235,7 @@ class NrPipeline final : private nr::PassResolver {
     bool copied = false;  // the add-on has copied into it: recordings may bind it
     nr::Mark last_use;
   };
-  // The governor's RGBA32F state, (2^E, E, the last anchor, set), in both shader-read states. 2x1, the second texel Auto's check
+  // RGBA32F state, (final multiplier, independent meter EV, last anchor, set), in both shader-read states. 2x1, the second texel Auto's check
   // (the game's exposure beside the meter's target).
   struct MeterState {
     Texture state;
@@ -259,6 +259,8 @@ class NrPipeline final : private nr::PassResolver {
   static constexpr uint32_t CHECK_SLOTS = 4u;
   struct ExposureCheck {
     Texture readback;  // CHECK_SLOTS placed footprints of 2x1 RGBA32F, READBACK heap, COPY_DEST
+    const std::byte* mapped = nullptr;  // mapped for the readback resource's life
+    std::array<double, CHECK_SLOTS> recorded_seconds = {};
     std::array<nr::Mark, CHECK_SLOTS> marks = {};
     std::array<bool, CHECK_SLOTS> pending = {};
     uint32_t next = 0u;  // the oldest slot, written next

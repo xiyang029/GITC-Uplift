@@ -40,8 +40,8 @@ HudBegun BeginHudD3D12(const HudPresentD3D12& present, ID3D12GraphicsCommandList
   begun.reason = DecideHudFrame(present.use_wanted, taken, facts);
   NoteHudFormats(begun.reason, taken, facts);
   const bool admitted = present.settle->Admit(begun.reason);
-  if (begun.reason == HudReason::USABLE && !admitted) begun.reason = HudReason::SETTLING;
-  if (begun.reason != HudReason::USABLE) return begun;
+  if (IsHudFrameUsable(begun.reason) && !admitted) begun.reason = HudReason::SETTLING;
+  if (!IsHudFrameUsable(begun.reason)) return begun;
   const HudFrame& frame = *taken.frame;
   const color::HudComposerD3D12::Inputs inputs = {
       .back_buffer = back_buffer,

@@ -1,10 +1,13 @@
 #include "sources/auto_exposure.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <format>
 #include <limits>
 #include <string_view>
+
+#include "nr/log.hpp"
 
 namespace uplift::sources {
 namespace {
@@ -65,20 +68,37 @@ std::optional<float> AutoExposure::HeldThroughMove() const {
   return held_anchor_span_;
 }
 
+void AutoExposure::ClearHeld() {
+  held_stops_.reset();
+  held_anchors_.clear();
+  held_through_move_ = false;
+  held_anchor_span_ = 0.f;
+}
+
+void AutoExposure::DiscardPending() {
+  if (latched_) return;
+  since_.reset();
+  run_samples_ = 0u;
+  last_gap_.reset();
+  ClearHeld();
+}
+
 bool AutoExposure::Observe(const ExposureSample& sample, double seconds) {
   if (latched_) return false;
   const float outside = OutsideSpan(sample);
   // An unusable sample neither counts nor breaks a run.
   if (!std::isfinite(outside) || !std::isfinite(sample.anchor_stops)) return false;
+  const bool unit = IsUnitGameExposure(sample);
+  if (!unit) ClearHeld();
   const float game_stops = std::log2(sample.game);
   last_gap_ = game_stops - sample.metered_stops;
-  NoteHeld(game_stops, sample.anchor_stops, seconds);
+  if (unit) NoteHeld(game_stops, sample.anchor_stops, seconds);
   // A unit ExposureTexture with a unit DLSS factor is the game's "no exposure"
   // sentinel. If it remains fixed while the scene anchor moves by several stops,
   // blending it back into the meter produces the exact bright/dark oscillation
   // reported by games that leave DLSS auto-exposure disabled. Keep ordinary
   // non-unit or dynamic game exposure on the normal validity window.
-  if (IsUnitGameExposure(sample) && held_through_move_) {
+  if (held_through_move_) {
     latched_ = true;
     reason_ = AutoLatch::HELD;
     stops_off_ = std::abs(*last_gap_);
@@ -112,13 +132,9 @@ bool AutoExposure::DebugDue(double seconds) {
   return true;
 }
 
-float AutoStops(color::AutoExposureMode mode, float blend, bool latched, float game_stops, float metered_stops) {
+float AutoStops(float blend, bool latched, float game_stops, float metered_stops) {
   if (latched) return metered_stops;
-  switch (mode) {
-    case color::AutoExposureMode::BLEND:  return game_stops + blend * (metered_stops - game_stops);
-    case color::AutoExposureMode::SWITCH: break;
-  }
-  return game_stops;
+  return game_stops + std::clamp(blend, 0.f, 1.f) * (metered_stops - game_stops);
 }
 
 std::string ExposureLine(const ExposureReport& report) {
@@ -152,16 +168,29 @@ std::string AutoLatchMessage(const ExposureSample& sample, const AutoExposure& j
                      std::exp2(sample.metered_stops), sample.metered_stops, sample.target_stops, judge.StopsOff());
 }
 
-std::string AutoDebugMessage(const ExposureSample& sample, color::AutoExposureMode mode, float blend, std::optional<float> held_move) {
+std::string AutoDebugMessage(const ExposureSample& sample, float blend, std::optional<float> held_move) {
   const float game = std::log2(sample.game);
-  const float result = AutoStops(mode, blend, false, game, sample.metered_stops);
-  const std::string mode_text = (mode == color::AutoExposureMode::BLEND ? std::format("Blend {:.0f} %", blend * 100.f) : std::string("Switch"));
-  std::string message = std::format("Input exposure Auto: game {:+.2f} stops, meter E {:+.2f} (target {:+.2f}), gap {:+.2f} stops; {} gives {:+.2f} stops",
-                                    game, sample.metered_stops, sample.target_stops, game - sample.metered_stops, mode_text, result);
+  const float target = AutoStops(blend, false, game, sample.target_stops);
+  const std::string mode_text = std::format("Blend {:.0f} %", blend * 100.f);
+  std::string message = std::format("Input exposure Auto: game {:+.2f} stops, meter E {:+.2f} (target {:+.2f}), gap {:+.2f} stops; {} target {:+.2f}, applied {:+.2f} stops",
+                                    game, sample.metered_stops, sample.target_stops, game - sample.metered_stops, mode_text, target, sample.applied_stops);
   if (held_move) {
     message += std::format("; game exposure held while the scene moved {:.1f} stops", *held_move);
   }
   return message;
+}
+
+double ExposureCheckSeconds() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void ObserveExposureSample(AutoExposure& judge, const ExposureSample& sample, double recorded_seconds, float blend) {
+  if (judge.Observe(sample, recorded_seconds)) {
+    if (nr::IsLogEnabled(nr::LogLevel::INFO)) nr::Log(nr::LogLevel::INFO, AutoLatchMessage(sample, judge));
+  } else if (nr::IsLogEnabled(nr::LogLevel::TRACE) && !judge.Latched()
+             && std::isfinite(AutoExposure::OutsideSpan(sample)) && judge.DebugDue(recorded_seconds)) {
+    nr::Log(nr::LogLevel::TRACE, AutoDebugMessage(sample, blend, judge.HeldThroughMove()));
+  }
 }
 
 }  // namespace uplift::sources

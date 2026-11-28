@@ -320,12 +320,11 @@ struct Settings {
   std::array<PassSettings, MAX_PASSES - 1u> passes = {};  // passes 2..10
   look::LookSettings look;                                // Shape result and its rows
   UiCorrection ui_correction = UiCorrection::OFF;
-  color::InputExposure input_exposure = color::InputExposure::AUTO;  // Auto (the game's when it agrees with the meter)
-  color::AutoExposureMode auto_exposure_mode = color::AutoExposureMode::BLEND;  // how Auto uses a valid game exposure
-  float auto_exposure_blend = 0.8f;                                             // Blend's point, 0 the game's, 1 the meter's
+  color::InputExposure input_exposure = color::DEFAULT_INPUT_EXPOSURE;
+  float auto_exposure_blend = color::DEFAULT_AUTO_EXPOSURE_BLEND;  // 0 the game's, 1 the meter's
   ExposureAdapt exposure_adapt = ExposureAdapt::SMOOTH;
-  float adapt_brighter_stops = 2.f;
-  float adapt_darker_stops = 0.7f;
+  float adapt_brighter_stops = color::DEFAULT_ADAPT_BRIGHTER;
+  float adapt_darker_stops = color::DEFAULT_ADAPT_DARKER;
   float linear_unit_nits = 0.f;  // 0 = automatic
   color::Primaries source_primaries = color::Primaries::AUTO;
   color::NeuralTransfer neural_transfer = color::NeuralTransfer::BOUNDED_RATIO;

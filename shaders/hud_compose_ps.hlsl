@@ -7,16 +7,18 @@ Texture2D<float4> game_hudless : register(t2);
 Texture2D<float4> opacity : register(t3);
 
 cbuffer HudCompose : register(b0) {
-  uint alpha_channel;  // 0: the opacity is in .r (a single-channel UI alpha); 3: in .a (UI colour and alpha, A8, four channels)
+  uint alpha_channel;  // 0: opacity in .r; 3: opacity in .a
   uint clamp_unit;     // 1 for UNORM back buffers; 0 for float ones, which keep values beyond [0, 1]
 };
 
 float4 main(float4 position : SV_Position) : SV_Target {
   const int3 texel = int3(int2(position.xy), 0);
   const float4 final_value = final_frame.Load(texel);
+  float4 result = final_value;
+  const float3 hudless = game_hudless.Load(texel).rgb;
+  const float3 nr_value = nr_hudless.Load(texel).rgb;
   const float4 alpha_texel = opacity.Load(texel);
   const float alpha = (alpha_channel == 3u ? alpha_texel.a : alpha_texel.r);
-  float4 result = final_value;
-  result.rgb = final_value.rgb + (1.f - alpha) * (nr_hudless.Load(texel).rgb - game_hudless.Load(texel).rgb);
+  result.rgb += (1.f - alpha) * (nr_value - hudless);
   return (clamp_unit != 0u ? saturate(result) : result);
 }

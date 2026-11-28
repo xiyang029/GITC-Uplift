@@ -1260,7 +1260,7 @@ bool DrawFixesTab(const OverlayView& view, Settings* settings, OverlayState* sta
   widgets::GroupHeading("Exposure");
   changed |= DrawRows(view, settings, state, {"InputExposure"});
   if (white_in_exposure) changed |= DrawRows(view, settings, state, {"DiffuseWhiteNits"});
-  changed |= DrawRows(view, settings, state, {"AutoExposureMode", "AutoExposureBlend", "ExposureAdapt", "AdaptBrighterStops", "AdaptDarkerStops"});
+  changed |= DrawRows(view, settings, state, {"AutoExposureBlend", "ExposureAdapt", "AdaptBrighterStops", "AdaptDarkerStops"});
   widgets::NextGap(style::BlockGap());
   widgets::GroupHeading("Colour conversion");
   changed |= DrawRows(view, settings, state, {"LinearUnitNits", "SourcePrimaries", "NeuralTransfer", "ChromaClamp", "NearBlackGuard"});
@@ -1274,10 +1274,6 @@ bool DrawAdvancedTab(const OverlayView& view, Settings* settings, OverlayState* 
   bool changed = false;
   widgets::GroupHeading("Routing");
   changed |= DrawRows(view, settings, state, {"PresentWithFrameGen", "BeforeFGMotion", "HideHudless", "VulkanNr", "AllowCrossQueuePasses", "UseD3D9Ex"});
-  if (!view.hudless_line.empty()) {
-    const std::string line = gui::Display(text::HUDLESS_DETAILS_LABEL) + ": " + gui::Display(view.hudless_line);
-    widgets::SecondaryWrapped(line.c_str());
-  }
   widgets::NextGap(style::BlockGap());
   widgets::GroupHeading("Memory and recovery");
   changed |= DrawRows(view, settings, state, {"VramCheck", "BudgetMarginMB", "GraceSeconds", "AutoResume", "AutoRetry"});

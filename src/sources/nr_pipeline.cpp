@@ -330,6 +330,7 @@ void NrPipeline::RetireExposureCheck(StageSet* set) {
     }
   }
   set->check = {};
+  set->auto_exposure.DiscardPending();
 }
 
 NrPipeline::Texture NrPipeline::CreateTexture(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags,
@@ -508,11 +509,15 @@ void NrPipeline::NoteMeterBasis(uint8_t stage, color::Encoding encoding, float i
 }
 
 NrPipeline::ExposureChoice NrPipeline::ChooseExposure(color::Encoding encoding, ID3D12Resource* game_texture, float game_factor) {
-  PollExposureChecks();
   const bool game_exposure = (game_texture != nullptr || game_factor != 1.f);
   // Only relative scene-linear images are metered, and the meter needs typed UAV loads.
   const bool can_meter = (color::Meterable(encoding) && color_.SupportsUavLoads());
-  const ExposureDecision decision = DecideExposure(config_.fixes, game_exposure, can_meter, set_->auto_exposure.Latched());
+  ExposureDecision decision = DecideExposure(config_.fixes, game_exposure, can_meter, set_->auto_exposure.Latched());
+  if (decision.Probes()) {
+    PollExposureChecks();
+    decision = DecideExposure(config_.fixes, game_exposure, can_meter, set_->auto_exposure.Latched());
+  }
+  if (!decision.Probes()) RetireExposureCheck(set_);
   if (!decision.WantsState() && set_->exposure.state) {
     RetireExposure(set_);  // InputExposure left Metered/auto-metered; the state is no longer read
   }
@@ -541,24 +546,13 @@ NrPipeline::ExposureChoice NrPipeline::ChooseExposure(color::Encoding encoding, 
 
 void NrPipeline::PollExposureChecks() {
   if (!set_->check.readback) return;
-  const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   for (uint32_t step = 0u; step < CHECK_SLOTS; ++step) {
     const uint32_t index = (set_->check.next + step) % CHECK_SLOTS;  // the oldest first
     if (!set_->check.pending[index] || !timeline_.IsComplete(set_->check.marks[index])) continue;
     set_->check.pending[index] = false;
     std::array<float, METER_SAMPLE_FLOATS> texels = {};
-    const D3D12_RANGE read = {.Begin = index * CHECK_STRIDE, .End = index * CHECK_STRIDE + sizeof(texels)};
-    void* mapped = nullptr;
-    if (FAILED(set_->check.readback->Map(0u, &read, &mapped))) continue;
-    std::memcpy(texels.data(), static_cast<const std::byte*>(mapped) + read.Begin, sizeof(texels));
-    const D3D12_RANGE written = {.Begin = 0u, .End = 0u};
-    set_->check.readback->Unmap(0u, &written);
-    const ExposureSample sample = ExposureSampleFromTexels(texels);
-    if (set_->auto_exposure.Observe(sample, seconds)) {
-      nr::Log(nr::LogLevel::INFO, AutoLatchMessage(sample, set_->auto_exposure));
-    } else if (!set_->auto_exposure.Latched() && std::isfinite(AutoExposure::OutsideSpan(sample)) && set_->auto_exposure.DebugDue(seconds)) {
-      nr::Log(nr::LogLevel::TRACE, AutoDebugMessage(sample, config_.fixes.auto_mode, config_.fixes.auto_blend, set_->auto_exposure.HeldThroughMove()));  // once every AutoExposure::DEBUG_SECONDS
-    }
+    std::memcpy(texels.data(), set_->check.mapped + index * CHECK_STRIDE, sizeof(texels));
+    ObserveExposureSample(set_->auto_exposure, ExposureSampleFromTexels(texels), set_->check.recorded_seconds[index], config_.fixes.auto_blend);
   }
 }
 
@@ -604,6 +598,13 @@ void NrPipeline::RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, col
       return;
     }
     set_->check.readback->SetName(L"Uplift exposure check readback");
+    const D3D12_RANGE read = {.Begin = 0u, .End = CHECK_SLOTS * CHECK_STRIDE};
+    void* mapped = nullptr;
+    if (FAILED(set_->check.readback->Map(0u, &read, &mapped))) {
+      set_->check.readback.Reset();
+      return;
+    }
+    set_->check.mapped = static_cast<const std::byte*>(mapped);
   }
   D3D12_TEXTURE_COPY_LOCATION destination = {.pResource = set_->check.readback.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
   destination.PlacedFootprint = {
@@ -615,6 +616,7 @@ void NrPipeline::RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, col
   Transition(list, state, PIXEL_AND_COMPUTE_READ, D3D12_RESOURCE_STATE_COPY_SOURCE);
   list->CopyTextureRegion(&destination, 0u, 0u, 0u, &origin, nullptr);
   Transition(list, state, D3D12_RESOURCE_STATE_COPY_SOURCE, PIXEL_AND_COMPUTE_READ);
+  set_->check.recorded_seconds[index] = ExposureCheckSeconds();
   set_->check.marks[index] = slot_marks_[slot];
   set_->check.pending[index] = true;
   set_->check.next = (index + 1u) % CHECK_SLOTS;

@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string_view>
 
 #include <unknwn.h>
 
 #include "addon/sl_tag_layout.hpp"
+#include "nr/log.hpp"
 
 namespace uplift::addon {
 namespace {
@@ -21,6 +23,15 @@ uint32_t ViewportId(const void* viewport) {
   uint32_t id = 0u;
   std::memcpy(&id, static_cast<const uint8_t*>(viewport) + sl_layout::VIEWPORT_ID_OFFSET, sizeof(id));
   return id;
+}
+
+std::string_view BufferTypeName(uint32_t type) {
+  switch (type) {
+    case sl_layout::HUDLESS_COLOR: return "HUDLessColor";
+    case sl_layout::UI_COLOR_AND_ALPHA: return "UIColorAndAlpha";
+    case sl_layout::UI_ALPHA: return "UIAlpha";
+    default: return "other";
+  }
 }
 
 TaggedImage Read(const sl_layout::ResourceTag& tag) {
@@ -79,12 +90,17 @@ void HudTags::RecordForFrame(const void* frame, const void* viewport, const void
 }
 
 void HudTags::RecordLocked(uintptr_t key, const void* viewport, const void* tags, uint32_t count) {
-  if (!storing_ || api_ == TagApi::UNKNOWN || tags == nullptr) return;
-  const uint32_t viewport_id = ViewportId(viewport);
+  if (api_ == TagApi::UNKNOWN || tags == nullptr) return;
+  const uint32_t viewport_id = (storing_ ? ViewportId(viewport) : 0u);
   const auto* const list = static_cast<const sl_layout::ResourceTag*>(tags);
   for (uint32_t index = 0u; index < count; ++index) {
     const sl_layout::ResourceTag& tag = list[index];
     if (!(tag.base.type == sl_layout::RESOURCE_TAG_TYPE)) continue;
+    if (std::ranges::find(observed_types_, tag.type) == observed_types_.end()) {
+      observed_types_.push_back(tag.type);
+      nr::Logf(nr::LogLevel::INFO, "Streamline ResourceTag BufferType {} ({}) observed", tag.type, BufferTypeName(tag.type));
+    }
+    if (!storing_) continue;
     size_t slot = SLOTS;
     if (tag.type == sl_layout::HUDLESS_COLOR) slot = SLOT_HUDLESS;
     if (tag.type == sl_layout::UI_ALPHA) slot = SLOT_ALPHA;

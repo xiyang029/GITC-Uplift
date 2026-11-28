@@ -175,7 +175,7 @@ struct VkMeterPass {
   Encoding encoding = Encoding::LINEAR_BT709;
   uint32_t primaries = 0u;  // the SourcePrimaries index (Primaries; 0 = automatic)
   float input_scale = 1.f;
-  VkImageView state = VK_NULL_HANDLE;  // 2x1 RGBA32F storage, GENERAL: (2^E, E, the last anchor, set) at (0, 0)
+  VkImageView state = VK_NULL_HANDLE;  // 2x1 RGBA32F storage, GENERAL: (final multiplier, independent meter EV, last anchor, set) at (0, 0)
   bool snap = false;
   bool smooth = true;
   float brighter_rate = 2.f;
@@ -185,7 +185,7 @@ struct VkMeterPass {
   bool probe = false;
   VkSampledView game_exposure;
   float game_exposure_factor = 1.f;
-  float game_weight = 0.f;  // 2026-10-09, Auto's Blend (with `probe`), as Direct3D 12's MeterPass
+  float game_weight = 0.f;  // as Direct3D 12's MeterPass; 1 mirrors direct game exposure for fallback history
 };
 
 // Keep faces (2026-10-08): ColorPipeline's FacesPass on Vulkan (shaders/faces_cs.hlsl). Every image RGBA16F in GENERAL, at the canvas (the atlas:

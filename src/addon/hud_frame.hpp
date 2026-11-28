@@ -27,6 +27,7 @@ struct HudFrameFacts {
 // USABLE when every condition holds, else the first that fails. `use_wanted`: UICorrection On.
 // Tagged HUD-less/opacity inputs are useful at Present even when frame generation is off.
 [[nodiscard]] HudReason DecideHudFrame(bool use_wanted, const TakeResult& taken, const HudFrameFacts& back_buffer);
+[[nodiscard]] bool IsHudFrameUsable(HudReason reason) noexcept;
 
 // The reason's English (text/hudless_messages.hpp), for Details and the log.
 [[nodiscard]] std::string_view HudReasonText(HudReason reason);

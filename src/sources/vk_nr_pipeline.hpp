@@ -269,7 +269,7 @@ class VkNrPipeline final : private nr::PassResolver {
     VkImageView model_input = VK_NULL_HANDLE;
   };
 
-  // The governor's RGBA32F state, (2^E, E, the last anchor, set), which the encode and the decode read as their exposure. It carries across
+  // RGBA32F state, (final multiplier, independent meter EV, last anchor, set); the encode and decode read x as their exposure. It carries across
   // frames in GENERAL, as the stabiliser's histories do. 2x1, the second texel Auto's check (the game's exposure beside the meter's target).
   struct MeterState {
     vk::NrImage state;
@@ -295,6 +295,7 @@ class VkNrPipeline final : private nr::PassResolver {
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     const std::byte* mapped = nullptr;  // host-coherent, mapped for the buffer's life
+    std::array<double, CHECK_SLOTS> recorded_seconds = {};
     std::array<nr::Mark, CHECK_SLOTS> marks = {};
     std::array<bool, CHECK_SLOTS> pending = {};
     uint32_t next = 0u;  // the oldest slot, written next

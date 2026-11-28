@@ -1266,9 +1266,9 @@ std::optional<addon::HudPresentD3D12> HudPresentFor(AddonState& state, DeviceEnt
                                 .use_wanted = true};
 }
 
-// After a Present that decided: NR's history restarts when use starts or stops (design §3), and UI correction's note says what happened.
+// After a Present that decided: NR history restarts when use starts or stops; the note records the resulting HUD-less state.
 void NoteHudPresent(DeviceEntry& entry, bool wanted, addon::HudReason reason, bool used) {
-  if (wanted && !used && reason != addon::HudReason::USABLE) {
+  if (wanted && !used && !addon::IsHudFrameUsable(reason)) {
     g_state->last_hud_reason.store(reason, std::memory_order_relaxed);
     g_state->hud_reasons[static_cast<size_t>(reason)].fetch_add(1u, std::memory_order_relaxed);
   }
@@ -1278,14 +1278,19 @@ void NoteHudPresent(DeviceEntry& entry, bool wanted, addon::HudReason reason, bo
   }
   entry.hud_used = used;
   const std::string_view why = addon::HudReasonText(reason);
+  std::string note;
   if (!wanted) {
-    entry.hud_note.clear();
+    note.clear();
   } else if (used) {
-    entry.hud_note = uplift::text::HUDLESS_UI_CORRECTION_USED;
-  } else if (reason == addon::HudReason::USABLE) {
-    entry.hud_note = uplift::text::HUDLESS_UI_CORRECTION_IDLE;
+    note = uplift::text::HUDLESS_UI_CORRECTION_USED;
+  } else if (addon::IsHudFrameUsable(reason)) {
+    note = uplift::text::HUDLESS_UI_CORRECTION_IDLE;
   } else {
-    entry.hud_note = std::vformat(uplift::text::HUDLESS_UI_CORRECTION_UNUSABLE, std::make_format_args(why));
+    note = std::vformat(uplift::text::HUDLESS_UI_CORRECTION_UNUSABLE, std::make_format_args(why));
+  }
+  if (note != entry.hud_note) {
+    entry.hud_note = std::move(note);
+    if (wanted) nr::Logf(nr::LogLevel::INFO, "HUD-less Present: {}", entry.hud_note);
   }
 }
 

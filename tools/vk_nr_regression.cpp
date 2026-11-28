@@ -143,6 +143,46 @@ void Fusion(Gpu& gpu) {
   std::cout << "PASS Vulkan " << cases << " bit-exact fusion cases (SDR/HDR10/scRGB/linear, alpha/mask/subrect)\n";
 }
 
+void ExposureBlendRateLimitGpu(Gpu& gpu) {
+  constexpr uint32_t width = 64u, height = 64u;
+  std::vector<float> source(size_t(width) * height * 4u);
+  for (size_t i = 0; i < source.size(); i += 4u) {
+    source[i] = source[i + 1u] = source[i + 2u] = .18f;
+    source[i + 3u] = 1.f;
+  }
+  const std::array<float, 8> zero_state{};
+  auto image = gpu.Image(width, height, VK_FORMAT_R32G32B32A32_SFLOAT, source.data(), 16u);
+  auto state = gpu.Image(2u, 1u, VK_FORMAT_R32G32B32A32_SFLOAT, zero_state.data(), 16u);
+  const auto frame = [&](float game_value, float weight, bool snap) {
+    auto game = gpu.Image(1u, 1u, VK_FORMAT_R32_SFLOAT, &game_value, sizeof(game_value));
+    color::VkMeterPass pass{.source = image.view, .source_layout = VK_IMAGE_LAYOUT_GENERAL,
+      .source_format = VK_FORMAT_R32G32B32A32_SFLOAT, .region = {0u, 0u, width, height},
+      .encoding = color::Encoding::LINEAR_BT709, .state = state.view, .snap = snap, .smooth = true,
+      .brighter_rate = 2.f, .darker_rate = 2.f, .frame_seconds = .1f, .probe = true,
+      .game_exposure = {.view = game.view, .layout = VK_IMAGE_LAYOUT_GENERAL},
+      .game_exposure_factor = 1.f, .game_weight = weight};
+    Check(gpu.color.RecordMeter(gpu.commands, 0u, pass), "Vulkan meter dispatch failed");
+    gpu.color.ComputeBarrier(gpu.commands);
+    auto read = gpu.Read(state, 2u, 1u, 16u); gpu.Submit();
+    const auto* values = static_cast<const float*>(read.mapped);
+    const float applied = std::log2(values[0]); const float meter = values[1];
+    gpu.Transition(state.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    return std::pair{applied, meter};
+  };
+  const auto reset = frame(1.f, .5f, true);
+  const auto jump = frame(16.f, .5f, false);
+  const auto follow = frame(16.f, .5f, false);
+  const auto direct = frame(16.f, 1.f, false);
+  const auto return_to_blend = frame(16.f, .5f, false);
+  Check(std::abs(reset.first - .5f * reset.second) < .03f, "Vulkan initial applied EV did not match the 50% target blend");
+  Check(jump.first > reset.first && jump.first - reset.first <= .201f && std::abs(jump.second - reset.second) < .03f,
+        "Vulkan blended exposure bypassed the EV rate limit or polluted meter EV");
+  Check(follow.first > jump.first && follow.first - jump.first <= .201f, "Vulkan blended exposure exceeded the per-frame EV rate limit");
+  Check(std::abs(direct.first - 4.f) < .03f, "Vulkan direct-game probe did not mirror actual game exposure");
+  Check(return_to_blend.first < direct.first && direct.first - return_to_blend.first <= .201f, "Vulkan fallback into blend did not rate-limit from applied history");
+  std::cout << "PASS Vulkan final exposure blend EV rate limit and independent meter history\n";
+}
+
 class IdentityHost final : public nr::Host {
  public:
   explicit IdentityHost(Gpu& gpu):gpu_(gpu){}
@@ -211,6 +251,23 @@ void Present(Gpu& gpu) {
     frame(color::Primaries::AP1,false,true);frame(color::Primaries::AP1,true,true);
     frame(color::Primaries::AP1,true,true);frame(color::Primaries::AP1,false,false);
     std::cout<<"PASS Vulkan resolved colour-basis history invalidation and consecutive explicit resets\n";
+    for (const float blend : {.8f, .8f, 0.f, .8f, 1.f, .8f, .8f, 1.f}) {
+      const auto previous = pipeline.LastExposure();
+      config.fixes.auto_blend = blend;
+      pipeline.SetLookConfig(config);
+      const auto exposed = pipeline.RecordAfterDlss(gpu.commands,
+          {.resource = &image.ngx, .encoding = color::Encoding::LINEAR_BT709, .exposure_factor = .5f}, {}, nr::Controls{});
+      Check(exposed.nr_applied, "Vulkan exposure transition did not apply NR");
+      const auto report = pipeline.LastExposure();
+      Check(report.use == (blend == 1.f ? sources::ExposureUse::METERED : blend == 0.f ? sources::ExposureUse::GAME : sources::ExposureUse::BLEND),
+            "Vulkan GPU exposure endpoint selected the wrong source");
+      if (report.use == sources::ExposureUse::BLEND) {
+        const bool expected_gap = previous.use == sources::ExposureUse::BLEND || previous.use == sources::ExposureUse::GAME;
+        Check(report.gap.has_value() == expected_gap, "Vulkan exposure checks were lost or survived pure-meter retirement");
+      }
+      gpu.Submit();
+    }
+    std::cout << "PASS Vulkan exposure endpoints, readback and probe retirement/recreation\n";
     pipeline.ReleaseNrSurfaces();timeline.Flush(std::chrono::milliseconds(0));gpu.idle(gpu.device);
   }
   session.OnDeviceDestroyed();
@@ -267,4 +324,4 @@ void QueueOrder(Gpu& gpu) {
   std::cout<<"PASS Vulkan dual-queue ordering, queue-pair retirement, failed signal/wait and CPU fallback\n";
 }
 
-int main(){try{{Gpu gpu;Fusion(gpu);Present(gpu);QueueOrder(gpu);}Check(errors.load()==0u,"Vulkan validation errors");return 0;}catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}}
+int main(){try{{Gpu gpu;Fusion(gpu);ExposureBlendRateLimitGpu(gpu);Present(gpu);QueueOrder(gpu);}Check(errors.load()==0u,"Vulkan validation errors");return 0;}catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}}

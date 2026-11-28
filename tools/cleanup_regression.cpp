@@ -1,5 +1,7 @@
 #include <array>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -13,6 +15,7 @@
 #include "nvfp4/Nvfp4Support.h"
 #include "sources/auto_exposure.hpp"
 #include "sources/stage_sets.hpp"
+#include "sources/pipeline_rules.hpp"
 #include "ui/localization.hpp"
 #include "ui/settings_schema.hpp"
 
@@ -45,6 +48,125 @@ void Configuration() {
           "current nested Vulkan status stopped translating");
   }
   std::cout << "PASS settings, FPS steps and live Vulkan translations\n";
+}
+
+void ExposureConfiguration() {
+  auto store = ipc::TextConfigStore::Parse("AutoExposureMode=1\nAutoExposureBlend=0.8\n");
+  auto settings = ui::LoadSettings(store, nullptr);
+  Check(settings.auto_exposure_blend == 0.f && !ui::FindSetting("AutoExposureMode"), "Switch migration retained a runtime mode or old blend");
+  ui::SaveSettings(settings, &store);
+  settings.auto_exposure_blend = .35f;
+  ui::SaveSettings(settings, &store);
+  Check(ui::LoadSettings(store, nullptr).auto_exposure_blend == .35f, "legacy Switch key overrode a later blend edit");
+  ipc::TextConfigStore fresh;
+  ui::SaveSettings(settings, &fresh);
+  Check(!fresh.Get("AutoExposureMode"), "new settings emitted the retired mode");
+  for (const auto mode : {"0", "invalid", "2"}) {
+    auto legacy = ipc::TextConfigStore::Parse(std::string("AutoExposureMode=") + mode + "\nAutoExposureBlend=0.4\n");
+    Check(ui::LoadSettings(legacy, nullptr).auto_exposure_blend == .4f, "non-Switch legacy mode changed the blend");
+  }
+  const sources::ColorFixes defaults;
+  const ui::Settings ui_defaults;
+  Check(defaults.input_exposure == ui_defaults.input_exposure && defaults.auto_blend == ui_defaults.auto_exposure_blend
+        && defaults.adapt_brighter == ui_defaults.adapt_brighter_stops && defaults.adapt_darker == ui_defaults.adapt_darker_stops,
+        "pipeline and settings exposure defaults differ");
+  settings.exposure_adapt = ui::ExposureAdapt::OFF;
+  for (const auto key : {"ExposureAdapt", "AdaptBrighterStops", "AdaptDarkerStops", "AutoExposureBlend"}) {
+    const auto& descriptor = *ui::FindSetting(key);
+    const bool hidden = std::string_view(key).starts_with("Adapt");
+    Check(descriptor.hidden(settings) == hidden && ui::ExposureRowHidden(descriptor, settings) == hidden,
+          "exposure UI paths disagree about adaptation visibility");
+  }
+  std::cout << "PASS exposure migration, round trip, defaults and UI visibility\n";
+}
+
+void ExposureDecisions() {
+  using namespace sources;
+  for (const auto input : {color::InputExposure::AUTO, color::InputExposure::GAME, color::InputExposure::METERED, color::InputExposure::MANUAL}) {
+    for (float blend : {0.f, .8f, 1.f}) for (bool game : {false, true}) for (bool meter : {false, true})
+    for (bool state : {false, true}) for (bool latched : {false, true}) {
+      ColorFixes fixes{.input_exposure = input, .auto_blend = blend};
+      AutoExposure judge;
+      if (latched) {
+        const ExposureSample invalid{.texture_value = 64.f, .game = 64.f};
+        for (unsigned n = 0; n < AutoExposure::SUSTAIN_SAMPLES; ++n) judge.Observe(invalid, n * .2);
+        Check(judge.Latched(), "test failed to produce an invalid-game latch");
+      }
+      const auto decision = DecideExposure(fixes, game, meter, judge.Latched());
+      const bool allocated = state && decision.WantsState();
+      const auto outcome = PickExposure(decision, fixes, game, allocated, judge);
+      ExposureSource expected = ExposureSource::NONE;
+      bool probe = false;
+      if (input == color::InputExposure::GAME) expected = ExposureSource::GAME;
+      if (input == color::InputExposure::METERED && meter && allocated) expected = ExposureSource::STATE;
+      if (input == color::InputExposure::AUTO) {
+        if (!meter) expected = game ? ExposureSource::GAME : ExposureSource::NONE;
+        else if (!game || latched) expected = allocated ? ExposureSource::STATE : ExposureSource::NONE;
+        else {
+          expected = blend == 0.f || !allocated ? ExposureSource::GAME : ExposureSource::STATE;
+          probe = allocated && blend < 1.f;
+        }
+      }
+      Check(outcome.source == expected && outcome.probe == probe, "exposure endpoint/capability/allocation matrix changed");
+      Check(outcome.metered == (expected == ExposureSource::STATE), "exposure source and dispatch disagree");
+      if (probe) Check(std::abs(outcome.game_weight - (1.f - blend)) < 1e-6f, "blend/direct-game history weight changed");
+      if (input == color::InputExposure::AUTO && blend == 1.f && meter && allocated && !latched) {
+        Check(!outcome.with_game && outcome.report.use == ExposureUse::METERED, "100% still binds/probes game exposure");
+      }
+    }
+  }
+  Check(AutoStops(0.f, false, 2.f, -2.f) == 2.f && AutoStops(1.f, false, 2.f, -2.f) == -2.f
+        && AutoStops(.5f, false, 2.f, -2.f) == 0.f && AutoStops(0.f, true, 2.f, -2.f) == -2.f,
+        "exposure blend/latch arithmetic changed");
+  std::cout << "PASS exposure decision matrix and allocation fallbacks\n";
+}
+
+void ExposureValidity() {
+  using namespace sources;
+  ExposureSample unit;
+  AutoExposure held;
+  held.Observe(unit, 0.);
+  unit.anchor_stops = 3.f;
+  Check(held.Observe(unit, .5) && held.Reason() == AutoLatch::HELD, "unit exposure no longer detects scene movement");
+  held.DiscardPending();
+  Check(held.Latched() && held.HeldThroughMove(), "discard lost a permanent latch's diagnostics");
+  AutoExposure candidate;
+  unit.anchor_stops = 0.f;
+  candidate.Observe(unit, 0.);
+  // Product remains one and game EV barely changes; only the raw sentinel stops being unit.
+  ExposureSample ordinary{.texture_value = 2.f, .factor = .5f, .game = 1.f, .anchor_stops = 3.f};
+  Check(!candidate.Observe(ordinary, .1) && !candidate.HeldThroughMove(), "non-unit exposure retained Held tracking");
+  unit.anchor_stops = 3.f;
+  Check(!candidate.Observe(unit, .2), "ordinary exposure history contaminated a new unit candidate");
+  unit.anchor_stops = 6.f;
+  Check(candidate.Observe(unit, .3), "new unit candidate did not collect its own history");
+  AutoExposure interrupted;
+  unit.anchor_stops = 0.f;
+  interrupted.Observe(unit, 0.);
+  interrupted.DiscardPending();
+  unit.anchor_stops = 3.f;
+  Check(!interrupted.Observe(unit, .1), "interrupted probing retained Held history");
+  AutoExposure unusable_sample;
+  unit.anchor_stops = 0.f;
+  unusable_sample.Observe(unit, 0.);
+  ExposureSample unusable{.game = std::numeric_limits<float>::quiet_NaN()};
+  Check(!unusable_sample.Observe(unusable, .1), "unusable sample latched exposure");
+  unit.anchor_stops = 3.f;
+  Check(unusable_sample.Observe(unit, .2) && unusable_sample.Reason() == AutoLatch::HELD,
+        "unusable sample broke a pending unit exposure history");
+  for (bool above : {false, true}) {
+    AutoExposure judge;
+    ExposureSample invalid{.texture_value = above ? 64.f : 1.f / 64.f, .game = above ? 64.f : 1.f / 64.f};
+    // These samples may be polled together, but carry recording times one second apart.
+    for (unsigned n = 0; n < AutoExposure::SUSTAIN_SAMPLES - 1; ++n) Check(!judge.Observe(invalid, n * .2), "sustained rule latched too early");
+    Check(judge.Observe(invalid, 1.4) && judge.Reason() == (above ? AutoLatch::ABOVE : AutoLatch::BELOW), "sustained recording times lost");
+  }
+  AutoExposure short_run;
+  ExposureSample invalid{.game = 64.f};
+  for (unsigned n = 0; n < 20; ++n) Check(!short_run.Observe(invalid, n * .01), "sample count bypassed sustained duration");
+  short_run.DiscardPending();
+  Check(!short_run.Observe(invalid, 10.), "probe interruption retained invalid duration");
+  std::cout << "PASS unit-only Held history, interrupted probes and sustained sample timing\n";
 }
 
 struct StageSet { struct { bool history_valid = true, change_valid = true; } look; };
@@ -142,6 +264,6 @@ void Dispatch() {
 }
 
 int main() {
-  try { Configuration(); HistoryDecisions(); LayoutAndTimeouts(); Dispatch(); return 0; }
+  try { Configuration(); ExposureConfiguration(); ExposureDecisions(); ExposureValidity(); HistoryDecisions(); LayoutAndTimeouts(); Dispatch(); return 0; }
   catch (const std::exception& e) { std::cerr << "FAIL " << e.what() << '\n'; return 1; }
 }

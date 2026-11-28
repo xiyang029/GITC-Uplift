@@ -45,7 +45,11 @@ void Policy() {
   unsafe.technique_expected = false;
   Check(addon::DecideHudFrame(true, taken, unsafe) == addon::HudReason::USABLE, "FG-off effects rejected HUD-less inputs");
   taken.frame->opacity.native = 0u;
-  Check(addon::DecideHudFrame(true, taken, facts) == addon::HudReason::NO_OPACITY, "missing opacity admitted");
+  Check(addon::DecideHudFrame(true, taken, facts) == addon::HudReason::NO_OPACITY, "missing opacity was accepted");
+  taken.frame->opacity = h;
+  taken.frame->hudless.lifecycle = addon::sl_layout::ONLY_VALID_NOW;
+  Check(addon::DecideHudFrame(true, taken, facts) == addon::HudReason::LIFECYCLE, "invalid HUD-less lifecycle admitted");
+  taken.frame->hudless.lifecycle = addon::sl_layout::VALID_UNTIL_PRESENT;
   taken.frame->opacity = h;
   taken.frame->opacity.lifecycle = addon::sl_layout::ONLY_VALID_NOW;
   Check(addon::DecideHudFrame(true, taken, facts) == addon::HudReason::LIFECYCLE, "expired opacity admitted");
@@ -137,10 +141,13 @@ void Composer() {
   auto readback = buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
   uint8_t* bytes = nullptr;
   Hr(upload->Map(0u, nullptr, reinterpret_cast<void**>(&bytes)));
-  // F = H = 0.2, N after the simulated NR pass = 0.6. Opacity samples cover clear, partial and opaque HUD.
+  // F = H = 0.2 except for one HUD pixel; N after the simulated NR pass = 0.6.
   for (size_t row = 0; row < 3u; ++row) {
     for (size_t pixel = 0; pixel < 3u; ++pixel) {
-      for (size_t channel = 0; channel < 4u; ++channel) bytes[row * 512u + pixel * 4u + channel] = row == 2u ? static_cast<uint8_t>(pixel == 0u ? 0u : pixel == 1u ? 128u : 255u) : 51u;
+      for (size_t channel = 0; channel < 4u; ++channel) {
+        bytes[row * 512u + pixel * 4u + channel] = (row == 2u ? static_cast<uint8_t>(pixel == 0u ? 0u : pixel == 1u ? 128u : 255u)
+            : row == 0u && pixel == 2u && channel < 3u ? 204u : (channel == 3u ? 255u : 51u));
+      }
     }
   }
   upload->Unmap(0u, nullptr);
@@ -215,17 +222,28 @@ void Composer() {
   composer.Submitted(queue.Get());
   wait();
   Hr(readback->Map(0u, nullptr, reinterpret_cast<void**>(&bytes)));
-  const std::array<int, 3> expected = {153, 102, 51};
+  const std::array<int, 3> expected = {153, 102, 204};
   bool matches = true;
   for (size_t pixel = 0; pixel < expected.size(); ++pixel) {
     for (size_t channel = 0; channel < 3u; ++channel) matches = matches && std::abs(static_cast<int>(bytes[pixel * 4u + channel]) - expected[pixel]) <= 1;
   }
   readback->Unmap(0u, nullptr);
   Check(matches, "HUD opacity composition changed clear, partial or opaque pixels");
+
+  Hr(allocators[0]->Reset());
+  Hr(lists[0]->Reset(allocators[0].Get(), nullptr));
+  tags.Clear();
+  addon::sl_layout::ResourceTag hudless_tag = {.base = {.type = addon::sl_layout::RESOURCE_TAG_TYPE}, .resource = &tagged[0],
+      .type = addon::sl_layout::HUDLESS_COLOR, .lifecycle = addon::sl_layout::VALID_UNTIL_PRESENT};
+  tags.Record(nullptr, &hudless_tag, 1u);
+  Check(tags.Totals().last_hudless_ms != 0u && tags.Totals().last_opacity_ms == 0u, "HUD-less-only tag accounting retained opacity freshness");
+  begun = addon::BeginHudD3D12(present, lists[0].Get(), images[0].Get(), addon::HUD_SETTLE_PRESENTS + 1u);
+  Check(begun.n == nullptr && begun.reason == addon::HudReason::NO_OPACITY, "D3D12 composer accepted missing opacity");
+  Hr(lists[0]->Close());
   tags.Record(nullptr, resource_tags.data(), static_cast<uint32_t>(resource_tags.size()));
   tags.SetStoring(false);
   Check(!tags.Take().frame, "turning correction off retained tags");
-  std::cout << "PASS D3D12 FG-off tags, settle, command-list rotation and GPU opacity composition\n";
+  std::cout << "PASS D3D12 FG-off tags, settle, command-list rotation, opacity composition and missing-opacity rejection\n";
 
   // The overlay reads Status after BeginFrame, following the native-NR evaluate on the game list.
   for (const auto placement_source : {ui::PlacementSource::AUTO, ui::PlacementSource::DLSS, ui::PlacementSource::PRESENT}) {

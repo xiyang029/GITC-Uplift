@@ -2,7 +2,7 @@
 #include "vk_common.hlsli"
 
 // The exposure meter and governor, one thread group before the encode. The state
-// texture's x is the encode's and decode's exposure multiplier.
+// texture's x is the encode's and decode's governed final multiplier; y is the independent meter used by Auto's validity check.
 // The state is 2x1. With `probe` (Input exposure = Auto while the game passes an exposure) the second texel holds
 // the game's exposure as the encode reads it, beside the meter's target, for the add-on's readback.
 cbuffer MeterConstants : register(b0) {
@@ -21,7 +21,7 @@ cbuffer MeterConstants : register(b0) {
   uint probe;            // write texel (1, 0)
   uint has_game_texture;  // the game's ExposureTexture is bound at t2
   float game_factor;     // DLSS.Exposure.Scale ÷ DLSS.Pre.Exposure
-  float game_weight;     // Auto's Blend with `probe`: the game's share, in stops, of the multiplier at (0, 0).x (1 − AutoExposureBlend); 0 the meter alone
+  float game_weight;     // Auto with `probe`: the game's share, in stops, of the multiplier at (0, 0).x (1 − AutoExposureBlend); 0 the meter alone
 };
 
 // On Vulkan's After DLSS the source is DLSS's output, read in place from its storage view (u2), as the encode reads it.
@@ -32,7 +32,7 @@ UPLIFT_IMAGE_FORMAT(UPLIFT_VK_TARGET_FORMAT) RWTexture2D<float4> source_texture 
 Texture2D<float4> source_texture : register(t0);
 #define UPLIFT_LOAD_SOURCE(pixel) source_texture.Load(int3((pixel), 0))
 #endif
-UPLIFT_IMAGE_FORMAT("rgba32f") RWTexture2D<float4> state_texture : register(u0);  // (2^E, E, the last anchor, set)
+UPLIFT_IMAGE_FORMAT("rgba32f") RWTexture2D<float4> state_texture : register(u0);  // (final multiplier, independent meter EV, last anchor, set)
 Texture2D<float> exposure_texture : register(t2);  // the game's exposure, as the encode binds it
 
 static const uint BINS = 96u;
@@ -46,6 +46,15 @@ static const float DEADBAND = 0.1f;
 static const float MIDDLE_GREY = 0.18f;
 
 groupshared uint g_bins[BINS];
+
+float GovernExposure(float previous, float target, bool reset) {
+  if (reset) return target;
+  const float delta = target - previous;
+  if (abs(delta) <= DEADBAND) return previous;
+  const float seconds = clamp(frame_seconds, 0.001f, 0.1f);
+  return previous + clamp(delta, -brighter_rate * seconds, darker_rate * seconds);
+}
+
 
 [numthreads(256, 1, 1)]
 void main(uint3 group_thread : SV_GroupThreadID) {
@@ -80,26 +89,21 @@ void main(uint3 group_thread : SV_GroupThreadID) {
   const float anchor = (total > 0u ? sum / (high - low) : log2(MIDDLE_GREY));
   const float target = clamp(log2(MIDDLE_GREY) - anchor, -TARGET_LIMIT, TARGET_LIMIT);
   const float4 previous = state_texture[uint2(0, 0)];
-  const bool was_set = (previous.w > 0.5f && all(isfinite(previous)));
-  float exposure = previous.y;
-  // A large anchor change is a scene cut, but snapping the exposure to its new target here makes the whole
-  // output flash when the game or the camera crosses a bright/dark boundary. Smooth adaptation must rate-limit
-  // scene cuts exactly like ordinary meter changes; only initialization and an explicitly disabled governor snap.
-  if (snap != 0u || !was_set || smooth == 0u) {
-    exposure = target;
-  } else if (abs(target - exposure) > DEADBAND) {
-    const float seconds = clamp(frame_seconds, 0.001f, 0.1f);
-    exposure += clamp(target - exposure, -brighter_rate * seconds, darker_rate * seconds);
-  }
-  // Here x is what the encode and the decode multiply by; y stays the governor's E, which the next frame moves on from.
-  float multiplier_stops = exposure;
+  const bool was_set = (previous.w > 0.5f && previous.x > 0.f && all(isfinite(previous)));
+  // Keep the independent meter for Auto's validity window. The applied exposure follows the blended raw target once,
+  // so game exposure changes cannot bypass the governor and the meter is not smoothed twice.
+  const bool reset = (snap != 0u || !was_set || smooth == 0u);
+  const float exposure = GovernExposure(previous.y, target, reset);
+  float applied_target = target;
   if (probe != 0u) {
-    // (the game's texel, its factor, what the encode would multiply by, the meter's target in stops).
     const float texel = (has_game_texture != 0u ? exposure_texture.Load(int3(0, 0, 0)) : 1.f);
     const float game = GameExposure(has_game_texture, texel, game_factor);
     state_texture[uint2(1, 0)] = float4(texel, game_factor, game, target);
-    // Blend: game + w · (E − game) in stops, written as E + (1 − w) · (game − E). GameExposure is finite and positive.
-    multiplier_stops += game_weight * (log2(game) - exposure);
+    applied_target += saturate(game_weight) * (log2(game) - target);
   }
-  state_texture[uint2(0, 0)] = float4(exp2(multiplier_stops), exposure, anchor, 1.f);
+  // At Auto's 0% endpoint the encode binds the game directly. Mirror that value in x so a later fallback starts
+  // from the exposure actually used, while y keeps metering independently. Scene cuts use the ordinary rate limits.
+  const bool direct_game = (probe != 0u && game_weight >= 1.f);
+  const float applied = GovernExposure(log2(max(previous.x, 1e-20f)), applied_target, reset || direct_game);
+  state_texture[uint2(0, 0)] = float4(exp2(applied), exposure, anchor, 1.f);
 }

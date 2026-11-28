@@ -16,13 +16,11 @@ inline constexpr size_t LATER_PASSES = nr::MAX_PASSES - 1u;
 struct ColorFixes {
   color::Primaries primaries = color::Primaries::AUTO;
   float linear_unit_nits = 0.f;  // 0 = automatic
-  color::InputExposure input_exposure = color::InputExposure::GAME;
-  // Auto with a valid game exposure. The default here is Switch (the settings' default is Blend); `auto_blend` is 0 the game's, 1 the meter's.
-  color::AutoExposureMode auto_mode = color::AutoExposureMode::SWITCH;
-  float auto_blend = 0.5f;
+  color::InputExposure input_exposure = color::DEFAULT_INPUT_EXPOSURE;
+  float auto_blend = color::DEFAULT_AUTO_EXPOSURE_BLEND;  // 0 the game's, 1 the meter's
   bool smooth_adapt = true;      // ExposureAdapt = Smooth
-  float adapt_brighter = 2.f;    // stops per second
-  float adapt_darker = 0.7f;
+  float adapt_brighter = color::DEFAULT_ADAPT_BRIGHTER;    // stops per second
+  float adapt_darker = color::DEFAULT_ADAPT_DARKER;
   color::NeuralTransfer transfer = color::NeuralTransfer::BOUNDED_RATIO;
   float chroma_clamp = 0.f;      // stops; 0 = off
   float guided_low_gain = 1.f;     // Edge-aware: the base band's gain (Upsampling = Edge-aware only)

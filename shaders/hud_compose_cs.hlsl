@@ -10,7 +10,7 @@ Texture2D<float4> opacity : register(t3);
 UPLIFT_IMAGE_FORMAT(UPLIFT_VK_TARGET_FORMAT) RWTexture2D<float4> output : register(u0);
 
 struct HudCompose {
-  uint alpha_channel;  // 0: the opacity is in .r; 3: in .a
+  uint alpha_channel;  // 0: opacity in .r; 3: opacity in .a
   uint clamp_unit;     // 1 for UNORM back buffers
   uint swap_rb;        // 1 for a BGRA8 back buffer written through RGBA8
   uint width;
@@ -22,10 +22,12 @@ struct HudCompose {
   if (id.x >= constants.width || id.y >= constants.height) return;
   const int3 texel = int3(int2(id.xy), 0);
   const float4 final_value = final_frame.Load(texel);
+  float4 result = final_value;
+  const float3 hudless = game_hudless.Load(texel).rgb;
+  const float3 nr_value = nr_hudless.Load(texel).rgb;
   const float4 alpha_texel = opacity.Load(texel);
   const float alpha = (constants.alpha_channel == 3u ? alpha_texel.a : alpha_texel.r);
-  float4 result = final_value;
-  result.rgb = final_value.rgb + (1.f - alpha) * (nr_hudless.Load(texel).rgb - game_hudless.Load(texel).rgb);
+  result.rgb += (1.f - alpha) * (nr_value - hudless);
   if (constants.clamp_unit != 0u) result = saturate(result);
   output[id.xy] = (constants.swap_rb != 0u ? result.bgra : result);
 }

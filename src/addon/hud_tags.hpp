@@ -102,6 +102,7 @@ class HudTags {
   bool storing_ = false;
   uint64_t sequence_ = 0;
   std::vector<Frame> frames_;
+  std::vector<uint32_t> observed_types_;  // one diagnostic line per Streamline BufferType value
   Counts counts_;
 };
 

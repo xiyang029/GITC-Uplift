@@ -24,9 +24,10 @@ struct ExposureSample {
   float texture_value = 1.f;  // the game's ExposureTexture texel (1 without one)
   float factor = 1.f;         // DLSS.Exposure.Scale / DLSS.Pre.Exposure
   float game = 1.f;           // what the encode multiplies by: color::GameExposure of the two
-  float metered_stops = 0.f;  // the meter's governed exposure E (Metered multiplies by 2^E)
+  float metered_stops = 0.f;  // independent governed meter EV; the applied exposure has its own adaptation history
   float target_stops = 0.f;   // the meter's target this frame, which E moves toward at the Adaptation rates
   float anchor_stops = 0.f;   // the meter's anchor (the scene's mean log luminance it exposes to middle grey), for the held check
+  float applied_stops = 0.f;  // actual final exposure read by the encode, including blend adaptation
 };
 
 // Which validity rule latched Auto to Metered.
@@ -49,7 +50,7 @@ class AutoExposure {
   // on purpose sits below it. A game passing 1 on physical-unit images sits 5-10 stops above.
   static constexpr float ABOVE_LIMIT_STOPS = 4.f;
   static constexpr float BELOW_LIMIT_STOPS = 5.f;
-  // Held (information only): the game's exposure within HELD_EPSILON_STOPS of one value while the meter's anchor spans more than HELD_ANCHOR_STOPS within
+  // Held: a unit game exposure within HELD_EPSILON_STOPS of one value while the meter's anchor spans more than HELD_ANCHOR_STOPS within
   // SUSTAIN_SECONDS.
   static constexpr float HELD_EPSILON_STOPS = 0.01f;
   static constexpr float HELD_ANCHOR_STOPS = 2.f;
@@ -57,14 +58,16 @@ class AutoExposure {
   static constexpr uint32_t SUSTAIN_SAMPLES = 8u;
   static constexpr double DEBUG_SECONDS = 1.0;  // one debug line per this many seconds
 
-  // `seconds`: a steady clock, in seconds, when the sample was read. True when this sample latched Metered.
+  // `seconds`: a steady clock, in seconds, when the sample was recorded. True when this sample latched Metered.
   bool Observe(const ExposureSample& sample, double seconds);
+  // Discard an interrupted probe run while preserving a permanent latch.
+  void DiscardPending();
   [[nodiscard]] bool Latched() const { return latched_; }
   [[nodiscard]] AutoLatch Reason() const { return reason_; }
   // At the latch: how far the game's exposure was from the meter's E, in stops (always positive).
   [[nodiscard]] float StopsOff() const { return stops_off_; }
-  // How far the meter's anchor has moved while the game's exposure held still, in stops, once that is more than HELD_ANCHOR_STOPS within
-  // SUSTAIN_SECONDS; none while the game's exposure follows the scene. A unit game exposure latches Auto when this becomes available.
+  // How far the meter's anchor has moved while a unit game exposure held still, in stops, once that is more than HELD_ANCHOR_STOPS within
+  // SUSTAIN_SECONDS; none outside a unit candidate. Auto latches when this becomes available.
   [[nodiscard]] std::optional<float> HeldThroughMove() const;
   // The game's exposure minus the meter's E, in stops, of the latest usable sample: none before one.
   [[nodiscard]] std::optional<float> LastGap() const { return last_gap_; }
@@ -76,6 +79,7 @@ class AutoExposure {
 
  private:
   // The held check's bookkeeping for one usable sample.
+  void ClearHeld();
   void NoteHeld(float game_stops, float anchor_stops, double seconds);
 
   bool latched_ = false;
@@ -93,9 +97,8 @@ class AutoExposure {
   float held_anchor_span_ = 0.f;
 };
 
-// NR's input exposure under Auto with a game exposure, in stops: Switch the game's, Blend game + blend · (E − game) with `blend` in [0, 1]; the
-// meter's E once latched. meter_cs.hlsl writes the blend into the state the encode reads.
-[[nodiscard]] float AutoStops(color::AutoExposureMode mode, float blend, bool latched, float game_stops, float metered_stops);
+// Auto blends in stops, with 0 the game's and 1 the meter's; a latch always uses the meter.
+[[nodiscard]] float AutoStops(float blend, bool latched, float game_stops, float metered_stops);
 
 // What the latest recording's encode read as its exposure, for the Details line.
 enum class ExposureUse : uint8_t {
@@ -117,9 +120,13 @@ struct ExposureReport {
 [[nodiscard]] std::string ExposureLine(const ExposureReport& report);
 // The one INFO line Auto logs when it latches to Metered: the rule, the game's texel, its factor, what that gives, and the meter's values, in stops too.
 [[nodiscard]] std::string AutoLatchMessage(const ExposureSample& sample, const AutoExposure& judge);
-// The debug line Auto logs once every AutoExposure::DEBUG_SECONDS before a latch: the game in stops, the meter's E and target, the gap, what the mode
+// The debug line Auto logs once every AutoExposure::DEBUG_SECONDS before a latch: the game in stops, the meter's E and target, the gap, what the blend
 // gives, and `held_move` (AutoExposure::HeldThroughMove) when there is one.
-[[nodiscard]] std::string AutoDebugMessage(const ExposureSample& sample, color::AutoExposureMode mode, float blend, std::optional<float> held_move);
+[[nodiscard]] std::string AutoDebugMessage(const ExposureSample& sample, float blend, std::optional<float> held_move);
+
+// Common CPU sample validation and rate-limited diagnostics for both GPU backends.
+void ObserveExposureSample(AutoExposure& judge, const ExposureSample& sample, double recorded_seconds, float blend);
+[[nodiscard]] double ExposureCheckSeconds();
 
 // A new stage, encoding, resolved primaries or input scale invalidates the meter's previous basis.
 inline bool UpdateMeterBasis(std::optional<MeterBasis>& current, bool& snap, uint8_t stage, color::Encoding encoding,

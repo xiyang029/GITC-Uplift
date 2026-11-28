@@ -344,6 +344,7 @@ void VkNrPipeline::RetireExposureCheck(StageSet* set) {
     }
   }
   set->check = {};
+  set->auto_exposure.DiscardPending();
 }
 
 bool VkNrPipeline::EnsureExposureCheck() {
@@ -381,19 +382,13 @@ bool VkNrPipeline::EnsureExposureCheck() {
 
 void VkNrPipeline::PollExposureChecks() {
   if (set_->check.buffer == VK_NULL_HANDLE) return;
-  const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   for (uint32_t step = 0u; step < CHECK_SLOTS; ++step) {
     const uint32_t index = (set_->check.next + step) % CHECK_SLOTS;  // the oldest first
     if (!set_->check.pending[index] || !timeline_.IsComplete(set_->check.marks[index])) continue;
     set_->check.pending[index] = false;
     std::array<float, METER_SAMPLE_FLOATS> texels = {};
     std::memcpy(texels.data(), set_->check.mapped + index * CHECK_STRIDE, sizeof(texels));
-    const ExposureSample sample = ExposureSampleFromTexels(texels);
-    if (set_->auto_exposure.Observe(sample, seconds)) {
-      nr::Log(nr::LogLevel::INFO, AutoLatchMessage(sample, set_->auto_exposure));
-    } else if (!set_->auto_exposure.Latched() && std::isfinite(AutoExposure::OutsideSpan(sample)) && set_->auto_exposure.DebugDue(seconds)) {
-      nr::Log(nr::LogLevel::TRACE, AutoDebugMessage(sample, config_.fixes.auto_mode, config_.fixes.auto_blend, set_->auto_exposure.HeldThroughMove()));  // once every AutoExposure::DEBUG_SECONDS
-    }
+    ObserveExposureSample(set_->auto_exposure, ExposureSampleFromTexels(texels), set_->check.recorded_seconds[index], config_.fixes.auto_blend);
   }
 }
 
@@ -665,11 +660,15 @@ void VkNrPipeline::NoteMeterBasis(uint8_t stage, color::Encoding encoding, float
 }
 
 VkNrPipeline::ExposureChoice VkNrPipeline::ChooseExposure(color::Encoding encoding, const NVSDK_NGX_Resource_VK* game_texture, float game_factor) {
-  PollExposureChecks();
   const bool game_exposure = (game_texture != nullptr || game_factor != 1.f);
   // Only relative scene-linear images are metered, and the meter needs the look's storage formats (its state is RGBA32F).
   const bool can_meter = (color::Meterable(encoding) && look_storage_);
-  const ExposureDecision decision = DecideExposure(config_.fixes, game_exposure, can_meter, set_->auto_exposure.Latched());
+  ExposureDecision decision = DecideExposure(config_.fixes, game_exposure, can_meter, set_->auto_exposure.Latched());
+  if (decision.Probes()) {
+    PollExposureChecks();
+    decision = DecideExposure(config_.fixes, game_exposure, can_meter, set_->auto_exposure.Latched());
+  }
+  if (!decision.Probes()) RetireExposureCheck(set_);
   if (!decision.WantsState() && set_->exposure.state.image != VK_NULL_HANDLE) {
     RetireExposure(set_);  // InputExposure left Metered or auto-metered: the state is no longer read
   }
@@ -730,6 +729,7 @@ bool VkNrPipeline::RecordMeter(VkCommandBuffer buffer, uint32_t slot, color::VkM
   functions_.vkCmdCopyImageToBuffer(buffer, set_->exposure.state.image, VK_IMAGE_LAYOUT_GENERAL, set_->check.buffer, 1u, &copy);
   const VkMemoryBarrier to_host = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
   functions_.vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0u, 1u, &to_host, 0u, nullptr, 0u, nullptr);
+  set_->check.recorded_seconds[index] = ExposureCheckSeconds();
   set_->check.marks[index] = slot_marks_[slot];
   set_->check.pending[index] = true;
   set_->check.next = (index + 1u) % CHECK_SLOTS;

@@ -17,6 +17,7 @@ constexpr std::string_view BOOL_ONE = "1";
 constexpr std::string_view BOOL_ZERO = "0";
 constexpr std::string_view TEXT_TRUE = "true";
 constexpr std::string_view TEXT_FALSE = "false";
+constexpr std::string_view LEGACY_AUTO_EXPOSURE_MODE = "AutoExposureMode";
 constexpr std::string_view FG_PRESENT_KEY = "PresentWithFrameGen";
 constexpr char UNREADABLE_SETTING_WARNING[] = "{}: ignored the unreadable value '{}'";
 constexpr char OUT_OF_RANGE_SETTING_WARNING[] = "{}: '{}' is out of range; using the default {}";
@@ -78,6 +79,8 @@ Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnin
       rejected.push_back({&descriptor, std::move(*text), error});
     }
   }
+  // Switch used the game's exposure until invalid; the blend's zero endpoint now has that behavior.
+  if (store.Get(LEGACY_AUTO_EXPOSURE_MODE) == "1") settings.auto_exposure_blend = 0.f;
   // The language is known now. Translate the template, not the literal INI key or rejected value.
   if (warnings != nullptr) {
     for (const auto& [descriptor, text, error] : rejected) {
@@ -97,6 +100,9 @@ Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnin
 }
 
 void SaveSettings(const Settings& settings, ConfigStore* store) {
+  // ConfigStore has no erase operation. Neutralize an existing legacy key so it cannot override future blend edits.
+  // New stores only receive live schema keys.
+  if (store->Get(LEGACY_AUTO_EXPOSURE_MODE)) store->Set(LEGACY_AUTO_EXPOSURE_MODE, BOOL_ZERO);
   for (const SettingDescriptor& descriptor : SettingsSchema()) {
     // A pass sharing its look still writes its look-sharing switch, stage and network selection (PASS_SWITCH rows).
     if (descriptor.pass != 0u && (descriptor.flags & setting_flags::PASS_SWITCH) == 0u

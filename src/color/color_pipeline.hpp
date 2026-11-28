@@ -134,7 +134,7 @@ struct MeterPass {
   Encoding encoding = Encoding::LINEAR_BT709;
   uint32_t primaries = 0u;           // the SourcePrimaries index (Primaries; 0 = automatic)
   float input_scale = 1.f;
-  ID3D12Resource* state = nullptr;   // 2x1 RGBA32F, UNORDERED_ACCESS: (2^E, E, the last anchor, set) at (0, 0)
+  ID3D12Resource* state = nullptr;   // 2x1 RGBA32F, UNORDERED_ACCESS: (final multiplier, independent meter EV, last anchor, set) at (0, 0)
   bool snap = false;
   bool smooth = true;
   float brighter_rate = 2.f;
@@ -144,7 +144,7 @@ struct MeterPass {
   bool probe = false;
   ID3D12Resource* game_exposure = nullptr;  // DLSS's ExposureTexture, NON_PIXEL_SHADER_RESOURCE, or null
   float game_exposure_factor = 1.f;
-  // 2026-10-09, Auto's Blend (with `probe`): the game's share of the state's multiplier, in stops (1 − AutoExposureBlend); 0 is the meter alone.
+  // Auto with a probe: game's share of the raw exposure target, in stops (1 - blend); 1 mirrors direct game exposure for fallback history.
   float game_weight = 0.f;
 };
 

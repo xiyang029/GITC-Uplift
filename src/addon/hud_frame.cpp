@@ -103,6 +103,8 @@ HudReason DecideHudFrame(bool use_wanted, const TakeResult& taken, const HudFram
   return HudReason::USABLE;
 }
 
+bool IsHudFrameUsable(HudReason reason) noexcept { return reason == HudReason::USABLE; }
+
 void NoteHudFormats(HudReason reason, const TakeResult& taken, const HudFrameFacts& back_buffer) {
   if (reason != HudReason::FORMAT || !taken.frame) return;
   const uint32_t hudless = taken.frame->hudless.format;
@@ -125,7 +127,7 @@ std::string_view HudReasonText(HudReason reason) {
 }
 
 bool HudSettle::Admit(HudReason reason) noexcept {
-  if (reason != HudReason::USABLE) {
+  if (!IsHudFrameUsable(reason)) {
     usable_ = 0u;
     return false;
   }

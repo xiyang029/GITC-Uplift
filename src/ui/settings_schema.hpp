@@ -124,7 +124,7 @@ void RestoreAllDefaults(Settings* settings);
 // A FLOAT slider's end: `ui_max` when set, else `max`.
 [[nodiscard]] double SliderMax(const SettingDescriptor& descriptor);
 // The colour fixes' exposure rows the overlay hides while `settings`' Input exposure makes them moot: Adaptation and its rates unless
-// Metered or Auto; Auto exposure unless Auto, and Blend unless Auto's Blend.
+// Metered or Auto; rates also while Adaptation is Off; Blend unless Auto.
 [[nodiscard]] bool ExposureRowHidden(const SettingDescriptor& descriptor, const Settings& settings);
 // Manual exposure is Diffuse white alone, so the overlay shows the Diffuse white row in the Exposure group, under Input exposure, while
 // `settings` says Manual, and in the Colour group otherwise.

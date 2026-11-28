@@ -471,6 +471,24 @@ void ColorHistory() {
                                                     {.reset_hint = false}, nr::Controls{});
     Check(after_recovery.nr_applied && !host.resets.back(), "recovery reset repeated after a successful frame");
     gpu.Submit();
+    // Exercise real meter dispatches and the persistently mapped check ring, including retirement and recreation.
+    for (const float blend : {.8f, .8f, 0.f, .8f, 1.f, .8f, .8f, 1.f}) {
+      const auto previous = pipeline.LastExposure();
+      config.fixes.auto_blend = blend;
+      pipeline.SetLookConfig(config);
+      const auto exposed = pipeline.RecordUav(gpu.list.Get(),
+          {.resource = target.Get(), .encoding = color::Encoding::LINEAR_BT709, .exposure_factor = .5f}, {}, nr::Controls{});
+      Check(exposed.nr_applied, "exposure transition did not apply NR");
+      const auto report = pipeline.LastExposure();
+      Check(report.use == (blend == 1.f ? sources::ExposureUse::METERED : blend == 0.f ? sources::ExposureUse::GAME : sources::ExposureUse::BLEND),
+            "GPU exposure endpoint selected the wrong source");
+      if (report.use == sources::ExposureUse::BLEND) {
+        const bool expected_gap = previous.use == sources::ExposureUse::BLEND || previous.use == sources::ExposureUse::GAME;
+        Check(report.gap.has_value() == expected_gap, "mapped exposure checks were lost or survived pure-meter retirement");
+      }
+      gpu.Submit();
+    }
+    std::cout << "PASS D3D12 exposure endpoints, persistent readback and probe retirement/recreation\n";
     pipeline.ReleaseIntermediates(); timeline.Flush(std::chrono::milliseconds(0));
   }
   session.OnDeviceDestroyed();
@@ -569,6 +587,58 @@ void LookSceneCutGpu() {
   Check(values[1] > 0.5f, "GPU Look cut detector missed a same-mean tonal-spread change");
   read.buffer->Unmap(0u, nullptr);
   std::cout << "PASS GPU Look cut detector catches same-mean tonal-spread changes\n";
+}
+
+void ExposureBlendRateLimitGpu() {
+  Gpu gpu;
+  constexpr UINT width = 64u, height = 64u;
+  std::vector<float> source(size_t(width) * height * 4u);
+  for (size_t i = 0; i < source.size(); i += 4u) {
+    source[i] = source[i + 1u] = source[i + 2u] = .18f;
+    source[i + 3u] = 1.f;
+  }
+  const std::array<float, 8> zero_state{};
+  auto image = gpu.Texture(width, height, DXGI_FORMAT_R32G32B32A32_FLOAT, source.data(), 16u);
+  auto state = gpu.Texture(2u, 1u, DXGI_FORMAT_R32G32B32A32_FLOAT, zero_state.data(), 16u);
+  auto game = gpu.Texture(1u, 1u, DXGI_FORMAT_R32_FLOAT);
+  gpu.Barrier(state.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  bool state_in_copy = false;
+  bool game_initialized = false;
+  const auto frame = [&](float game_value, float weight, bool snap) {
+    auto upload = gpu.Buffer(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT, D3D12_HEAP_TYPE_UPLOAD);
+    void* mapped = nullptr; Hr(upload->Map(0u, nullptr, &mapped)); std::memcpy(mapped, &game_value, sizeof(game_value)); upload->Unmap(0u, nullptr);
+    gpu.Barrier(game.Get(), game_initialized ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = upload.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint = {.Offset = 0u, .Footprint = {.Format = DXGI_FORMAT_R32_FLOAT, .Width = 1u, .Height = 1u, .Depth = 1u, .RowPitch = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT}};
+    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = game.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    gpu.list->CopyTextureRegion(&dst, 0u, 0u, 0u, &src, nullptr);
+    gpu.Barrier(game.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    game_initialized = true;
+    if (state_in_copy) gpu.Barrier(state.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    color::MeterPass pass{.source = image.Get(), .source_view_format = DXGI_FORMAT_R32G32B32A32_FLOAT, .region = {0u, 0u, width, height},
+      .encoding = color::Encoding::LINEAR_BT709, .state = state.Get(), .snap = snap, .smooth = true, .brighter_rate = 2.f, .darker_rate = 2.f,
+      .frame_seconds = .1f, .probe = true, .game_exposure = game.Get(), .game_exposure_factor = 1.f, .game_weight = weight};
+    Check(gpu.color.RecordMeter(gpu.list.Get(), 0u, pass), "D3D12 meter dispatch failed");
+    auto read = gpu.Readback(state.Get()); state_in_copy = true; gpu.Submit();
+    void* result = nullptr; Hr(read.buffer->Map(0u, nullptr, &result));
+    const auto* values = static_cast<const float*>(result);
+    const float applied = std::log2(values[0]); const float meter = values[1];
+    read.buffer->Unmap(0u, nullptr);
+    return std::pair{applied, meter};
+  };
+  const auto reset = frame(1.f, .5f, true);
+  const auto jump = frame(16.f, .5f, false);
+  const auto follow = frame(16.f, .5f, false);
+  const auto direct = frame(16.f, 1.f, false);
+  const auto return_to_blend = frame(16.f, .5f, false);
+  Check(std::abs(reset.first - .5f * reset.second) < .03f, "D3D12 initial applied EV did not match the 50% target blend");
+  Check(jump.first > reset.first && jump.first - reset.first <= .201f && std::abs(jump.second - reset.second) < .03f,
+        "D3D12 blended exposure bypassed the EV rate limit or polluted meter EV");
+  Check(follow.first > jump.first && follow.first - jump.first <= .201f, "D3D12 blended exposure exceeded the per-frame EV rate limit");
+  Check(std::abs(direct.first - 4.f) < .03f, "D3D12 direct-game probe did not mirror actual game exposure");
+  Check(return_to_blend.first < direct.first && direct.first - return_to_blend.first <= .201f, "D3D12 fallback into blend did not rate-limit from applied history");
+  std::cout << "PASS D3D12 final exposure blend EV rate limit and independent meter history\n";
 }
 
 void DepthCopies() {
@@ -686,6 +756,6 @@ void Pixels() {
 }
 
 int main() {
-  try { FoveationPercentOverflowRegression(); EdgeAwareDensityRegression(); SceneCutRegression(); PresentMotionWriteSlots(); PresentDlssProducer(); PresentMotionReadFallback(); Lifetime(); ProducerProofs(); RecordingBatches(); IntermittentDepthLogging(); ColorHistory(); Pixels(); LookHistory(); LookSceneCutGpu(); DepthCopies(); Timings(); return 0; }
+  try { FoveationPercentOverflowRegression(); EdgeAwareDensityRegression(); SceneCutRegression(); PresentMotionWriteSlots(); PresentDlssProducer(); PresentMotionReadFallback(); Lifetime(); ProducerProofs(); RecordingBatches(); IntermittentDepthLogging(); ColorHistory(); Pixels(); LookHistory(); LookSceneCutGpu(); ExposureBlendRateLimitGpu(); DepthCopies(); Timings(); return 0; }
   catch (const std::exception& e) { std::cerr << "FAIL " << e.what() << '\n'; return 1; }
 }

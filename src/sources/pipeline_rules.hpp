@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <optional>
 
 #include "color/color_pipeline.hpp"
@@ -16,7 +17,7 @@
 
 namespace uplift::sources {
 
-// The meter's RGBA32F state as shaders/meter_cs.hlsl writes it: texel 0 is (2^E, E, the anchor, set), texel 1 (the game's texel, its factor, the game's
+// The meter's RGBA32F state: texel 0 is (governed final multiplier, independent meter EV, anchor, set), texel 1 (the game's texel, its factor, the game's
 // exposure, the meter's target). Auto's check reads both texels back.
 inline constexpr uint32_t METER_STATE_TEXELS = 2u;
 inline constexpr uint32_t METER_TEXEL_COMPONENTS = 4u;
@@ -58,47 +59,39 @@ inline constexpr float AUTO_BLEND_METER = 1.f;
           .game = texels[GAME_EXPOSURE_COMPONENT],
           .metered_stops = texels[METERED_STOPS_COMPONENT],
           .target_stops = texels[TARGET_STOPS_COMPONENT],
-          .anchor_stops = texels[ANCHOR_STOPS_COMPONENT]};
+          .anchor_stops = texels[ANCHOR_STOPS_COMPONENT],
+          .applied_stops = std::log2(texels[0])};
 }
 
 // InputExposure's choice for one recording, before the meter's state is made or retired.
+enum class ExposurePlan : uint8_t {
+  NONE,
+  GAME,
+  CHECK_GAME,  // Auto at 0%: bind the game directly and run the meter only to validate it.
+  BLEND,
+  METERED,
+};
 struct ExposureDecision {
-  bool use_game = false;  // the encode and the decode read the game's exposure
-  bool metered = false;   // they read the meter's state
-  bool probe = false;     // the meter runs beside the game's exposure for Auto's check
-  bool blend = false;     // Auto's Blend: the meter writes the blend of the two into its state
-  // The meter's state is read: made when missing, retired when no longer wanted.
-  [[nodiscard]] bool WantsState() const { return metered || probe; }
+  ExposurePlan plan = ExposurePlan::NONE;
+  bool fallback_game = false;  // Auto's blend (including 100%) keeps the game if allocating the state fails.
+  [[nodiscard]] bool Probes() const { return plan == ExposurePlan::CHECK_GAME || plan == ExposurePlan::BLEND; }
+  [[nodiscard]] bool WantsState() const { return Probes() || plan == ExposurePlan::METERED; }
 };
 
-// `game_exposure`: the target carries the game's exposure (a texture, or a factor other than 1). `can_meter`: the image is relative scene-linear and the
-// device can run the meter. `latched`: Auto latched to Metered for the pipeline's life (AutoExposure::Latched).
+// Plan before allocating the meter's state; PickExposure resolves allocation failure afterwards.
 [[nodiscard]] inline ExposureDecision DecideExposure(const ColorFixes& fixes, bool game_exposure, bool can_meter, bool latched) {
-  ExposureDecision decision;
   switch (fixes.input_exposure) {
     case color::InputExposure::AUTO:
-      // The game's exposure while it is valid against the meter, which runs beside it (Auto's check), and the meter once it has not been for a
-      // sustained invalid-sample window; the meter without one, and the game's where the meter cannot run. Blend has the meter write the blend of the two into
-      // its state, which the encode and the decode read as Metered's.
-      if (!game_exposure) {
-        decision.metered = true;
-      } else if (can_meter && latched) {
-        decision.metered = true;
-      } else if (can_meter && fixes.auto_mode == color::AutoExposureMode::BLEND) {
-        decision.metered = true;
-        decision.probe = true;
-        decision.blend = true;
-      } else {
-        decision.use_game = true;
-        decision.probe = can_meter;
-      }
-      break;
-    case color::InputExposure::GAME:    decision.use_game = true; break;
-    case color::InputExposure::METERED: decision.metered = true; break;
-    case color::InputExposure::MANUAL:  break;
+      if (!can_meter) return {.plan = game_exposure ? ExposurePlan::GAME : ExposurePlan::NONE};
+      if (!game_exposure || latched) return {.plan = ExposurePlan::METERED};
+      if (fixes.auto_blend >= AUTO_BLEND_METER) return {.plan = ExposurePlan::METERED, .fallback_game = true};
+      if (fixes.auto_blend <= AUTO_BLEND_GAME) return {.plan = ExposurePlan::CHECK_GAME};
+      return {.plan = ExposurePlan::BLEND, .fallback_game = true};
+    case color::InputExposure::GAME: return {.plan = ExposurePlan::GAME};
+    case color::InputExposure::METERED: return {.plan = can_meter ? ExposurePlan::METERED : ExposurePlan::NONE};
+    case color::InputExposure::MANUAL: return {};
   }
-  decision.metered = (decision.metered && can_meter);
-  return decision;
+  return {};
 }
 
 // What the encode and the decode bind as their exposure.
@@ -119,20 +112,22 @@ struct ExposureOutcome {
 // The decision's outcome once the meter's state was made, or could not be (`have_state`).
 [[nodiscard]] inline ExposureOutcome PickExposure(const ExposureDecision& decision, const ColorFixes& fixes, bool game_exposure, bool have_state,
                                                   const AutoExposure& auto_exposure) {
-  if (decision.blend && have_state) {
+  if (decision.plan == ExposurePlan::BLEND && have_state) {
     return {.source = ExposureSource::STATE, .metered = true, .probe = true, .with_game = true,
             .game_weight = AUTO_BLEND_METER - std::clamp(fixes.auto_blend, AUTO_BLEND_GAME, AUTO_BLEND_METER),
             .report = {.use = ExposureUse::BLEND, .blend = fixes.auto_blend, .gap = auto_exposure.LastGap()}};
   }
-  if (decision.metered && have_state) {
+  if (decision.plan == ExposurePlan::METERED && have_state) {
     const bool latched = (fixes.input_exposure == color::InputExposure::AUTO && game_exposure && auto_exposure.Latched());
     return {.source = ExposureSource::STATE, .metered = true,
             .report = {.use = ExposureUse::METERED,
                        .stops_off = (latched ? std::optional<float>(auto_exposure.StopsOff()) : std::nullopt),
                        .latch = (latched ? auto_exposure.Reason() : AutoLatch::NONE)}};
   }
-  if (decision.use_game || decision.blend) {  // Blend without its state: the game's
-    return {.source = ExposureSource::GAME, .probe = (decision.probe && have_state), .with_game = true,
+  // Direct game exposure, or Auto's blend when the state could not be allocated.
+  if (decision.plan == ExposurePlan::GAME || decision.plan == ExposurePlan::CHECK_GAME || decision.fallback_game) {
+    return {.source = ExposureSource::GAME, .probe = (decision.Probes() && have_state), .with_game = true,
+            .game_weight = (decision.plan == ExposurePlan::CHECK_GAME ? 1.f : 0.f),
             .report = {.use = (game_exposure ? ExposureUse::GAME : ExposureUse::NONE)}};
   }
   return {};
