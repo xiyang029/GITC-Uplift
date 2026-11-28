@@ -23,7 +23,6 @@
 #include "meter_cs.h"
 #include "motion_cs.h"
 #include "native_input_cs.h"
-#include "native_composite_cs.h"
 #include "nr/log.hpp"
 
 namespace uplift::color {
@@ -58,10 +57,9 @@ constexpr uint32_t FACES_DESPIKE_FIRST_TABLE = 16u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_TABLE = 17u * TABLE_SIZE;
 constexpr uint32_t FACES_DESPIKE_SWAPPED_TABLE = 18u * TABLE_SIZE;
 constexpr uint32_t CHANGE_STABILIZE_TABLE = 19u * TABLE_SIZE;
-constexpr uint32_t NATIVE_INPUT_TABLE = 20u * TABLE_SIZE;  // native Color/guides and the two preserved Color images
-constexpr uint32_t NATIVE_INPUT_TABLES = 8u;  // Color, five guides, preserved work baseline and original-resolution Color
-constexpr uint32_t NATIVE_COMPOSITE_TABLE = (20u + NATIVE_INPUT_TABLES) * TABLE_SIZE;
-constexpr uint32_t DESCRIPTORS_PER_SLOT = (21u + NATIVE_INPUT_TABLES) * TABLE_SIZE;
+constexpr uint32_t NATIVE_INPUT_TABLE = 20u * TABLE_SIZE;
+constexpr uint32_t NATIVE_INPUT_TABLES = 5u;  // depth, control mask, backbuffer, UI, UI alpha
+constexpr uint32_t DESCRIPTORS_PER_SLOT = (20u + NATIVE_INPUT_TABLES) * TABLE_SIZE;
 constexpr uint32_t STABILIZE_CUT = 0u;  // look_stabilize_cs.hlsl's modes and flags
 constexpr uint32_t STABILIZE_LEVELS = 1u;
 constexpr uint32_t STABILIZE_DETAIL = 2u;
@@ -212,11 +210,6 @@ bool ColorPipeline::Initialize(ID3D12Device* device, std::string* error) {
   };
   // An unavailable optional-input pipeline must not prevent the primary colour/motion path from starting.
   if (FAILED(device->CreateComputePipelineState(&native_input, IID_PPV_ARGS(&native_input_pipeline_)))) native_input_pipeline_.Reset();
-  const D3D12_COMPUTE_PIPELINE_STATE_DESC native_composite = {
-      .pRootSignature = root_signature_.Get(),
-      .CS = {.pShaderBytecode = g_native_composite_cs, .BytecodeLength = sizeof(g_native_composite_cs)},
-  };
-  if (FAILED(device->CreateComputePipelineState(&native_composite, IID_PPV_ARGS(&native_composite_pipeline_)))) native_composite_pipeline_.Reset();
   // Plan 5: the look and meter pipelines.
   const auto build_compute = [&](const void* bytecode, size_t length, Microsoft::WRL::ComPtr<ID3D12PipelineState>* pipeline,
                                  const char* name) {
@@ -368,9 +361,12 @@ bool ColorPipeline::RecordEncode(ID3D12GraphicsCommandList* list, uint32_t slot,
 bool ColorPipeline::RecordChange(ID3D12GraphicsCommandList* list, uint32_t slot, const ChangePass& pass) {
   if (!SlotInRange(slot, "RecordChange")) return false;
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + CHANGE_TABLE;
-  WriteTable(base, {{pass.encode.source, pass.encode.source_view_format}, {pass.nr_output}, ExposureView(pass.encode.exposure), {pass.model_input}},
+  WriteTable(base, {{pass.encode.source, pass.encode.source_view_format},
+                    {pass.nr_output},
+                    ExposureView(pass.encode.exposure), {pass.model_input}},
              {{pass.change}, {pass.basis, DXGI_FORMAT_R16G16_FLOAT}});
-  DispatchCompute(list, encode_pipeline_.Get(), EncodeConstants(pass.encode, (pass.model_input != nullptr ? 2u : 1u), pass.basis != nullptr), base, pass.encode.width,
+  const uint32_t change_mode = pass.model_input != nullptr ? 2u : 1u;
+  DispatchCompute(list, encode_pipeline_.Get(), EncodeConstants(pass.encode, change_mode, pass.basis != nullptr), base, pass.encode.width,
                   pass.encode.height);
   return true;
 }
@@ -401,30 +397,15 @@ bool ColorPipeline::RecordMotion(ID3D12GraphicsCommandList* list, uint32_t slot,
 
 bool ColorPipeline::RecordNativeInput(ID3D12GraphicsCommandList* list, uint32_t slot, uint32_t input, nr::BoundResource source,
                                      DXGI_FORMAT source_format, ID3D12Resource* target, DXGI_FORMAT target_format, nr::Size size,
-                                     const nr::foveation::Grid& foveation, bool bilinear, bool warp_source,
-                                     uint32_t target_x, uint32_t target_y) {
+                                     const nr::foveation::Grid& foveation, bool bilinear) {
   if (!native_input_pipeline_ || input >= NATIVE_INPUT_TABLES || !SlotInRange(slot, "RecordNativeInput")) return false;
   const uint32_t base = slot * DESCRIPTORS_PER_SLOT + NATIVE_INPUT_TABLE + input * TABLE_SIZE;
   WriteTable(base, {{source.resource, source_format}}, {{target, target_format}});
-  const std::array<uint32_t, 14> constants = {
+  const std::array<uint32_t, 11> constants = {
       source.rect.x, source.rect.y, source.rect.width, source.rect.height, size.width, size.height,
       foveation.x.packed, foveation.y.packed, Bits(foveation.x.gmax), Bits(foveation.y.gmax),
-      (bilinear ? 1u : 0u), (warp_source ? 1u : 0u), target_x, target_y};
+      (bilinear ? 1u : 0u)};
   DispatchCompute(list, native_input_pipeline_.Get(), constants, base, size.width, size.height);
-  return true;
-}
-
-bool ColorPipeline::RecordNativeComposite(ID3D12GraphicsCommandList* list, uint32_t slot, const NativeCompositePass& pass) {
-  if (!native_composite_pipeline_ || !SlotInRange(slot, "RecordNativeComposite")) return false;
-  const uint32_t base = slot * DESCRIPTORS_PER_SLOT + NATIVE_COMPOSITE_TABLE;
-  WriteTable(base, {{pass.original, pass.original_view_format}, {pass.baseline, pass.baseline_view_format},
-                    {pass.nr_output, pass.nr_output_view_format}},
-             {{pass.target, pass.target_uav_format}});
-  const std::array<uint32_t, 10> constants = {
-      pass.output_size.width, pass.output_size.height, pass.work_size.width, pass.work_size.height,
-      pass.origin_x, pass.origin_y, pass.foveation.x.packed, pass.foveation.y.packed,
-      Bits(pass.foveation.x.gmax), Bits(pass.foveation.y.gmax)};
-  DispatchCompute(list, native_composite_pipeline_.Get(), constants, base, pass.output_size.width, pass.output_size.height);
   return true;
 }
 
@@ -660,16 +641,6 @@ bool ColorPipeline::SupportsTypedUavStore(DXGI_FORMAT format) const {
                          && (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
   typed_uav_store_.emplace(format, supported);
   return supported;
-}
-
-bool ColorPipeline::CanDecodeInPlace(DXGI_FORMAT format) const {
-  if (!in_place_decode_pipeline_) return false;
-  if (const auto found = in_place_formats_.find(format); found != in_place_formats_.end()) return found->second;
-  D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {.Format = format};
-  const bool supported = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support)))
-      && (support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_LOAD) != 0u
-      && (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0u;
-  return in_place_formats_.emplace(format, supported).first->second;
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE ColorPipeline::CpuDescriptor(uint32_t index) const {

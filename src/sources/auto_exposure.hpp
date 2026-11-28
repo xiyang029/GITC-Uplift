@@ -34,14 +34,15 @@ enum class AutoLatch : uint8_t {
   NONE,
   ABOVE,  // the game's exposure sat more than ABOVE_LIMIT_STOPS above the meter's span
   BELOW,  // more than BELOW_LIMIT_STOPS below it
+  HELD,   // the unit game exposure stayed fixed while the scene moved substantially
 };
 
 // Input exposure = Auto with a game that passes an exposure. The game's exposure is valid while it lies within the window around Uplift's meter;
 // once it has been invalid for SUSTAIN_SECONDS (and SUSTAIN_SAMPLES samples) in a row, Auto latches to Metered for the pipeline's life: a game whose value is
 // wrong stays wrong, and a latch never flips back. Pure, so the unit tests drive it.
-// The window is asymmetric. A game exposure that holds still while the scene moves is noted for the
-// debug line only: a fixed exposure, or DLSS's Exposure 1 on pre-exposed images, is legitimate, and a constant 1 on
-// physical-unit images already lands above the window.
+// The window is asymmetric. A non-unit game exposure that holds still while the scene moves remains valid because
+// some games intentionally pre-expose their input. The unit ExposureTexture/factor sentinel is different: when it
+// holds while the scene moves, Auto treats it as a broken game exposure and latches to the meter.
 class AutoExposure {
  public:
   // NR After DLSS sees the image before the game's tone mapper, so a right game exposure sits 1.5-2.5 stops above the meter, and a scene the game keeps dark
@@ -62,8 +63,8 @@ class AutoExposure {
   [[nodiscard]] AutoLatch Reason() const { return reason_; }
   // At the latch: how far the game's exposure was from the meter's E, in stops (always positive).
   [[nodiscard]] float StopsOff() const { return stops_off_; }
-  // How far the meter's anchor has moved while the game's exposure held still, in stops, once that is more than HELD_ANCHOR_STOPS within SUSTAIN_SECONDS;
-  // none while the game's exposure follows the scene. Information for the debug line: never a reason to latch.
+  // How far the meter's anchor has moved while the game's exposure held still, in stops, once that is more than HELD_ANCHOR_STOPS within
+  // SUSTAIN_SECONDS; none while the game's exposure follows the scene. A unit game exposure latches Auto when this becomes available.
   [[nodiscard]] std::optional<float> HeldThroughMove() const;
   // The game's exposure minus the meter's E, in stops, of the latest usable sample: none before one.
   [[nodiscard]] std::optional<float> LastGap() const { return last_gap_; }

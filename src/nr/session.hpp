@@ -97,6 +97,7 @@ struct EvaluateResult {
   ID3D12Resource* output = nullptr;  // a or b in NON_PIXEL_SHADER_RESOURCE; nullptr when nothing ran
   uint32_t passes_run = 0u;
   SkipReason reason = SkipReason::NONE;  // NONE when every requested pass ran
+  bool first_pass_reset = false;  // reset actually passed to NGX for the slice's first pass
 };
 
 class Session {
@@ -254,8 +255,7 @@ class Session {
   std::chrono::steady_clock::duration grace_elapsed_{0};
   std::optional<std::chrono::steady_clock::time_point> last_tick_;
   std::optional<std::chrono::steady_clock::time_point> last_sample_;
-  // Depth input (2026-11-05): whether the current run of frames without a depth has had its one report (see Session::Evaluate).
-  bool depth_without_logged_ = false;  // using logs nothing (2026-11-06): the copy falls back a frame; only the failure is a line
+  bool depth_without_logged_ = false;  // one missing-depth report per session, even if depth returns later
   // Split chain (design 3.2): indexed by pass, global; a pass whose stage has not run yet leaves a hole. Each live feature's capacity is its stage's size.
   std::array<std::unique_ptr<FeatureInterface>, MAX_PASSES> features_;
   std::array<StageState, SESSION_STAGES> stages_;

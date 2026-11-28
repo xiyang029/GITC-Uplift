@@ -69,7 +69,7 @@ Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnin
     std::errc error;
   };
   std::vector<RejectedValue> rejected;
-  // Unknown keys are ignored, including the retired PedestalRemoval placeholder (it never affected rendering).
+  // Unknown keys are ignored.
   for (const SettingDescriptor& descriptor : SettingsSchema()) {
     std::optional<std::string> text = store.Get(descriptor.key);
     if (!text) continue;
@@ -93,24 +93,7 @@ Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnin
   if (settings.use_d3d9ex) settings.startup_latches &= ~Settings::LATCH_D3D9EX;
   if (settings.adjust_vulkan_devices) settings.startup_latches &= ~Settings::LATCH_VK_DEVICE;
   if (settings.adjust_vulkan_devices_for_ngx) settings.startup_latches &= ~Settings::LATCH_VK_NGX;
-  MigrateSettings(&settings);
   return settings;
-}
-
-void MigrateSettings(Settings* settings) {
-  if (settings->config_version < 3u && settings->input_exposure == color::InputExposure::GAME) {
-    settings->input_exposure = color::InputExposure::AUTO;
-  }
-  // Home is ReShade's own overlay key: it handles that key itself, so the add-on never sees the press and cannot claim it.
-  // A file written while Home was the default moves to Insert; a key the user then picks is saved and left alone (version 5).
-  if (settings->config_version < 5u && settings->panel_key == 0x24u) {
-    settings->panel_key = 0x2Du;
-  }
-  // 0 was EnableKey's default (no hotkey) before version 6: those files, and a 0 a right-click wrote since, move to F7.
-  if (settings->config_version < 6u && settings->enable_key == 0u) {
-    settings->enable_key = 0x76u;
-  }
-  settings->config_version = CONFIG_VERSION;
 }
 
 void SaveSettings(const Settings& settings, ConfigStore* store) {
@@ -206,7 +189,7 @@ nr::Controls ToControls(const Settings& settings) {
 }
 
 std::optional<nr::Controls> NativeNrParameterOverrides(const Settings& settings) {
-  if (!settings.enabled || (!settings.override_native_nr_parameters && !settings.native_nr_handle_mode)) return std::nullopt;
+  if (!settings.enabled || settings.native_nr_mode != NativeNrMode::PARAMETERS) return std::nullopt;
   return ToControls(settings);
 }
 
@@ -218,7 +201,7 @@ SessionOptions ToSessionOptions(const Settings& settings) {
     presets[index + 1u] = (own == 0u ? settings.preset : own);
   }
   return {
-      .enabled = settings.enabled && !settings.override_native_nr_parameters && !settings.native_nr_handle_mode,
+      .enabled = settings.enabled && settings.native_nr_mode != NativeNrMode::PARAMETERS,
       .pass_count = settings.pass_count,
       .presets = presets,
       .grace = std::chrono::milliseconds(std::lround(settings.grace_seconds * 1000.f)),

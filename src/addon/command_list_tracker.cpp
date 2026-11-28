@@ -300,13 +300,17 @@ void LogNativeNrBarrierTrace(ID3D12GraphicsCommandList* list, ID3D12Resource* co
            state->barrier_trace_count, state->barrier_trace.size(), state->barrier_trace_total, matches);
 }
 
-bool NativeNrReplaceInputsReady(const ListState* tracked, ngx_hooks::DlssFrame* frame, std::string* reason) {
+bool NativeNrInputsReady(const ListState* tracked, ngx_hooks::DlssFrame* frame, std::string* reason, NativeNrInputPolicy policy) {
   const auto refuse = [reason](const char* why) {
     if (reason != nullptr) *reason = why;
     return false;
   };
   if (frame == nullptr || frame->color == nullptr || frame->output == nullptr) return refuse("Color or Output is missing");
-  if (frame->native_nr && !frame->native_nr->enabled) return refuse("native NR is disabled");
+  if (policy == NativeNrInputPolicy::DISABLED_FALLBACK) {
+    if (!frame->native_nr || frame->native_nr->enabled) return refuse("native NR is not disabled");
+  } else if (frame->native_nr && !frame->native_nr->enabled) {
+    return refuse("native NR is disabled");
+  }
   const auto valid_region = [](ID3D12Resource* image, nr::Rect* region) {
     if (image == nullptr) return false;
     const auto desc = image->GetDesc();
@@ -361,10 +365,6 @@ bool NativeNrReplaceInputsReady(const ListState* tracked, ngx_hooks::DlssFrame* 
   if (native.backbuffer.resource == nullptr || (native.ui.resource == nullptr && native.ui_alpha.resource == nullptr)) native.ui_correction = false;
   if (reason != nullptr) reason->clear();
   return true;
-}
-
-bool NativeNrHandleResizeInputsReady(const ListState* tracked, ngx_hooks::DlssFrame* frame, std::string* reason) {
-  return NativeNrReplaceInputsReady(tracked, frame, reason);
 }
 
 void RegisterTrackingEvents() {

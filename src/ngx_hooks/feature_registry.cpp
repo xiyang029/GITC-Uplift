@@ -133,11 +133,11 @@ std::optional<FeatureRecord> FeatureRegistry::Find(const NVSDK_NGX_Handle* handl
   return found->second;
 }
 
-uint32_t FeatureRegistry::LiveCount(FeatureKind kind) const {
+uint32_t FeatureRegistry::LiveCount(FeatureKind kind, const void* device) const {
   const std::shared_lock lock(mutex_);
   uint32_t count = 0u;
   for (const auto& [handle, record] : features_) {
-    if (KindOf(record.feature) == kind) {
+    if (KindOf(record.feature) == kind && (device == nullptr || record.device == nullptr || record.device == device)) {
       ++count;
     }
   }

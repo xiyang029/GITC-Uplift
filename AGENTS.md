@@ -2,7 +2,7 @@
 
 ## Tools
 - PowerShell 7 (`pwsh`) only; never `cmd.exe` or PowerShell 5.1.
-- Search with `rg`/`fd`; in large files read only ~30 lines around a match.
+- When searching with rg/fd, if the search term contains regex special characters (( ) [ ] { } * ? | ^ $ . ), it may be mistakenly treated as syntax, causing injection or incorrect matches. The simplest way: add -F to disable regex, wrap it in single quotes, and add -- to prevent option injection, i.e., rg -F -- 'pattern' file; for large files, use rg -F -C 15 -- 'pattern' bigfile to only read about 30 lines around the matched line.
 - Prefer Python for complex commands. PowerShell: backticks escape, `-eq` for strings, `$true`/`$false`, `$env:NAME = "value"`.
 
 ## Change discipline

@@ -148,7 +148,7 @@ void Wrappers() {
 }
 
 void SettingsAndText() {
-  auto store = ipc::TextConfigStore::Parse("ConfigVersion=3\nFGHudInputsOnly=1\nUICorrection=On\n");
+  auto store = ipc::TextConfigStore::Parse("FGHudInputsOnly=1\nUICorrection=On\n");
   std::vector<std::string> warnings;
   auto settings = ui::LoadSettings(store, &warnings);
   Check(settings.fg_hud_inputs_only, "HUD-only config was not loaded");

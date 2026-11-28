@@ -748,10 +748,12 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
     stage.evaluated_end = slice.first;
     return {nullptr, 0u, SkipReason::BUDGET};
   }
+  bool first_pass_reset = false;
   for (uint32_t index = slice.first; index < run_end; ++index) {
     auto& feature = features_[index];
     // Chained history off is a diagnostic: every pass after the first starts fresh each frame.
     const bool pass_reset = reset || (!inputs.chained_history && index > 0u) || index >= stage.evaluated_end || stage_reset_owed_[index];
+    if (index == slice.first) first_pass_reset = pass_reset;
     // Pass n ≥ 2 runs with its own controls unless it follows pass 1.
     const std::optional<Controls>* const own =
         (index > 0u && index - 1u < inputs.later_passes.size() ? &inputs.later_passes[index - 1u] : nullptr);
@@ -808,7 +810,7 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
         EnterFailed(std::format("NR disabled after {} failed frames (last {:#010x})", consecutive_failures_,
                                 static_cast<uint32_t>(result)));
       }
-      return {nullptr, 0u, SkipReason::EVALUATE_FAILED};
+      return {nullptr, 0u, SkipReason::EVALUATE_FAILED, first_pass_reset};
     }
     if (index > 0u && inputs.resolver != nullptr) {
       inputs.resolver->ResolvePass(list, index, color, output);
@@ -821,19 +823,14 @@ EvaluateResult Session::Evaluate(ID3D12GraphicsCommandList* list, const PassChai
   std::fill(stage_reset_owed_.begin() + slice.first, stage_reset_owed_.begin() + run_end, false);
   stage.faces_evaluated = faces_ran;
   const uint32_t run = run_end - slice.first;
-  // Depth input (2026-11-05): NR asks with a depth whenever one reached it -- the game's own, as DLSS read it, or a copy
-  // made for a Present group -- and a game that hands DLSS none leaves NR without it. Only the failure logs (2026-11-06):
-  // the copy falls back a frame, and "using" said nothing a fix could act on. One line when the depth goes missing; quiet
-  // until it comes back.
-  if (run > 0u && inputs.depth.resource == nullptr && !depth_without_logged_) {
+  // Depth is optional and may come and go between frames or stages. Report its absence once per session.
+  if (inputs.depth.resource == nullptr && !depth_without_logged_ && IsLogEnabled(LogLevel::INFO)) {
     depth_without_logged_ = true;
     Log(LogLevel::INFO, "Depth input: NR is running without DLSSNR.Depth (no depth reached it)");
-  } else if (inputs.depth.resource != nullptr) {
-    depth_without_logged_ = false;  // back, silently; the next loss reports again
   }
   const uint32_t wanted_end = std::min(slice_end, pass_count_);
   const uint32_t wanted = wanted_end - slice.first;
-  return {color, run, (run < wanted ? SkipReason::BUDGET : SkipReason::NONE)};
+  return {color, run, (run < wanted ? SkipReason::BUDGET : SkipReason::NONE), first_pass_reset};
 }
 
 void Session::OnDeviceDestroyed() {

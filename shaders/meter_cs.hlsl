@@ -43,7 +43,6 @@ static const uint GRID_HEIGHT = 36u;
 static const uint THREADS = 256u;
 static const float TARGET_LIMIT = 10.f;
 static const float DEADBAND = 0.1f;
-static const float SCENE_CUT_STOPS = 1.5f;
 static const float MIDDLE_GREY = 0.18f;
 
 groupshared uint g_bins[BINS];
@@ -83,7 +82,10 @@ void main(uint3 group_thread : SV_GroupThreadID) {
   const float4 previous = state_texture[uint2(0, 0)];
   const bool was_set = (previous.w > 0.5f && all(isfinite(previous)));
   float exposure = previous.y;
-  if (snap != 0u || !was_set || smooth == 0u || abs(anchor - previous.z) > SCENE_CUT_STOPS) {
+  // A large anchor change is a scene cut, but snapping the exposure to its new target here makes the whole
+  // output flash when the game or the camera crosses a bright/dark boundary. Smooth adaptation must rate-limit
+  // scene cuts exactly like ordinary meter changes; only initialization and an explicitly disabled governor snap.
+  if (snap != 0u || !was_set || smooth == 0u) {
     exposure = target;
   } else if (abs(target - exposure) > DEADBAND) {
     const float seconds = clamp(frame_seconds, 0.001f, 0.1f);

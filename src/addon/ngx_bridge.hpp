@@ -37,20 +37,13 @@ class NgxRouting {
   [[nodiscard]] virtual ngx_hooks::SrOverrides DlssPresetOverrides() = 0;
   // The panel's RayReconstructionPreset<Mode> choices, same shape as the SR ones above.
   [[nodiscard]] virtual ngx_hooks::SrOverrides RrPresetOverrides() = 0;
-  // The hidden DLSS-SR create overrides (DLSSQualityMode / DLSSAutoExposure): always empty (see
-  // addon::ToSrOverrides), so the game's own choices stand; kept as the create-side seam.
-  [[nodiscard]] virtual ngx_hooks::SrOverrides SrCreateOverrides() = 0;
   // Native DLSS-NR parameter-only mode is gated by Enabled and excludes extra Uplift NR.
   [[nodiscard]] virtual std::optional<nr::Controls> NativeNrParameterOverrides() = 0;
-  [[nodiscard]] virtual bool NativeNrFollowupEnabled() = 0;
-  [[nodiscard]] virtual bool NativeNrReplacementEnabled() = 0;
-  [[nodiscard]] virtual bool NativeNrHandleModeEnabled() = 0;
-  [[nodiscard]] virtual std::optional<sources::NativeNrHandleWork> PrepareNativeNrHandle(
-      const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) = 0;
-  virtual void CompleteNativeNrHandle(const void* device, ID3D12GraphicsCommandList* list,
-                                      const sources::NativeNrHandleWork& work, bool native_succeeded) = 0;
-  virtual bool TryReplaceNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list,
-                                          const ngx_hooks::DlssFrame& frame) = 0;
+  [[nodiscard]] virtual bool BeforeNativeNrEvaluate(ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame,
+                                                     const void* feature_device) = 0;
+  // `reason` is a string literal, held until the next Present of the registered creation device.
+  virtual void NoteNativeNrHookBypass(const void* feature_device, uint64_t serial, ID3D12GraphicsCommandList* list,
+                                      std::string_view reason) = 0;
   virtual void OnNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) = 0;
   // The ReShade device a game list was created on (Uplift's identity data), or null when untracked.
   [[nodiscard]] virtual const void* DeviceOf(ID3D12GraphicsCommandList* list) = 0;
@@ -125,10 +118,9 @@ class NgxBridge final : public ngx_hooks::NgxObserver {
   void BeforeCreate(ngx_hooks::CreateCall* call) override;  // also an early EnsureFgPresetHook install point
   void AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle* handle, NVSDK_NGX_Result result) override;
   void BeforeEvaluate(ngx_hooks::EvaluateCall* call) override;
-  void AfterOriginalEvaluate(ngx_hooks::EvaluateCall* call, NVSDK_NGX_Result result) override;
   void OnColorSwapRejected(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle) override;
   void AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle,
-                     const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Result result) override;
+                     const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Result result, bool original_ran) override;
   void BeforeRelease(NVSDK_NGX_Handle* handle) override;
   void BeforeCoreShutdown(ngx_hooks::NgxApi api, void* device, const void* caller) override;
   // The render scale override's plant point (addon/dlss_ratio.hpp): the core's cached DLSS capability

@@ -2,11 +2,9 @@
 
 // The shared, read-mostly NvAPI resolver (addon/nvapi_query.hpp).
 //
-// Two callers resolve through it: the Reflex override (addon/reflex_override.cpp) reaches
-// NvAPI_D3D_SetSleepMode's internal implementation and reads the driver's own state through
-// NvAPI_D3D_GetSleepStatus; the FG preset override (addon/fg_preset.cpp) hooks NvAPI_DRS_GetSetting's
-// internal implementation beside its public export. Every id resolves through the same
-// nvapi_QueryInterface export, cached once per process (Module() below).
+// The Reflex override hooks NvAPI_D3D_SetSleepMode and the FG preset override hooks
+// NvAPI_DRS_GetSetting. Both resolve through the nvapi_QueryInterface export, cached
+// once per process (Module() below).
 //
 // The structures are NVIDIA's own (nvapi.h, shipped by the pinned Streamline commit): nothing
 // here is a hand-copied ABI. NV_SET_SLEEP_MODE_PARAMS' version a caller sends is
@@ -37,11 +35,9 @@ using QueryInterfaceFn = void*(__cdecl*)(uint32_t);
 // functions and their structures but carries no ids, and nvapi64.dll exports only nvapi_QueryInterface.
 [[nodiscard]] uint32_t InterfaceId(const char* name);
 
-[[nodiscard]] uint32_t GetSleepStatusId();
 [[nodiscard]] uint32_t SetSleepModeId();
 [[nodiscard]] uint32_t DrsGetSettingId();
 
-using SleepStatus = NV_GET_SLEEP_STATUS_PARAMS;
 using SleepModeParams = NV_SET_SLEEP_MODE_PARAMS;
 
 // Loads the system's nvapi64.dll (or returns the copy already mapped); null when the driver has
@@ -65,21 +61,6 @@ template <typename Fn>
 Fn Interface(uint32_t id) {
   const auto query = QueryInterface();
   return query == nullptr ? nullptr : reinterpret_cast<Fn>(query(id));
-}
-
-// The Reflex/FG sleep state for `device`, with kUnavailable when NvAPI cannot answer. Read-only.
-struct SleepSample {
-  Status status = kUnavailable;
-  SleepStatus sleep{};
-};
-inline SleepSample GetSleepStatus(IUnknown* device) {
-  SleepSample sample{};
-  if (device == nullptr) return sample;
-  const auto get = Interface<Status(__cdecl*)(IUnknown*, SleepStatus*)>(GetSleepStatusId());
-  if (get == nullptr) return sample;
-  sample.sleep.version = NV_GET_SLEEP_STATUS_PARAMS_VER;
-  sample.status = get(device, &sample.sleep);
-  return sample;
 }
 
 }  // namespace uplift::addon::nvapi

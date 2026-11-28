@@ -15,11 +15,6 @@ uint32_t InterfaceId(const char* name) {
   return 0u;  // not in the table: Interface() then resolves no entry point
 }
 
-uint32_t GetSleepStatusId() {
-  static const uint32_t id = InterfaceId("NvAPI_D3D_GetSleepStatus");
-  return id;
-}
-
 uint32_t SetSleepModeId() {
   static const uint32_t id = InterfaceId("NvAPI_D3D_SetSleepMode");
   return id;

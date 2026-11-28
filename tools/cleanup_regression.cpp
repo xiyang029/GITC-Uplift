@@ -20,11 +20,12 @@ using namespace uplift;
 void Check(bool condition, const char* why) { if (!condition) throw std::runtime_error(why); }
 
 void Configuration() {
-  auto store = ipc::TextConfigStore::Parse("ConfigVersion=3\nPedestalRemoval=obsolete\nDynamicMFGTargetFps=97\nReflexFpsCap=117\n");
+  constexpr std::array<std::string_view, 2> retired = {"DLSSQualityMode", "DLSSAutoExposure"};
+  auto store = ipc::TextConfigStore::Parse(
+      "DLSSQualityMode=obsolete\nDLSSAutoExposure=obsolete\nDynamicMFGTargetFps=97\nReflexFpsCap=117\n");
   std::vector<std::string> warnings;
   auto settings = ui::LoadSettings(store, &warnings);
-  Check(warnings.empty(), "retired setting blocked a valid old config");
-  Check(ui::FindSetting("PedestalRemoval") == nullptr, "retired setting remains in the schema");
+  Check(warnings.empty(), "retired DLSS settings were parsed instead of ignored");
   for (const auto key : {"DynamicMFGTargetFps", "ReflexFpsCap"}) {
     const auto* descriptor = ui::FindSetting(key);
     Check(descriptor && descriptor->step == 1 && descriptor->fast_step == 32, "FPS increments are incorrect");
@@ -32,7 +33,7 @@ void Configuration() {
   }
   ipc::TextConfigStore saved;
   ui::SaveSettings(settings, &saved);
-  Check(!saved.Get("PedestalRemoval"), "retired setting was serialized again");
+  for (const auto key : retired) Check(!saved.Get(key), "a retired DLSS setting was saved");
   const auto loaded = ui::LoadSettings(saved, &warnings);
   Check(ui::FindSetting("ReflexFpsCap")->get(loaded) == 117, "settings round trip lost the FPS cap");
   const auto zh = ui::Language::SIMPLIFIED_CHINESE;
@@ -43,7 +44,7 @@ void Configuration() {
     Check(translated.find("共享纹理") != std::string::npos && translated.find("12.5 MiB") != std::string::npos,
           "current nested Vulkan status stopped translating");
   }
-  std::cout << "PASS old config compatibility, FPS steps and live Vulkan translations\n";
+  std::cout << "PASS settings, FPS steps and live Vulkan translations\n";
 }
 
 struct StageSet { struct { bool history_valid = true, change_valid = true; } look; };

@@ -89,7 +89,7 @@ class FeatureRegistry {
   // The device is gone: UpscalerCreated forgets it, so a device recreated at the same address does not start as "DLSS seen".
   void OnDeviceDestroyed(const void* device);
   [[nodiscard]] std::optional<FeatureRecord> Find(const NVSDK_NGX_Handle* handle) const;
-  [[nodiscard]] uint32_t LiveCount(FeatureKind kind) const;
+  [[nodiscard]] uint32_t LiveCount(FeatureKind kind, const void* device = nullptr) const;
   // The game created a DLSS-SR or Ray Reconstruction feature on `device` at some point this session. Sticky: a release does not clear
   // it. Fed by every create, so the Vulkan passthrough (no watching contexts) learns it too.
   [[nodiscard]] bool UpscalerCreated(const void* device) const;

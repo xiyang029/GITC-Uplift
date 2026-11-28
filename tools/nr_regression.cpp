@@ -13,8 +13,10 @@
 #include "color/color_pipeline.hpp"
 #include "look/look_math.hpp"
 #include "nr/foveation.hpp"
+#include "nr/log.hpp"
 #include "nr/timeline.hpp"
 #include "sources/after_dlss_source.hpp"
+#include "sources/present_dlss_producer.hpp"
 #include "sources/present_motion_ring.hpp"
 #include "testing/identity_host.hpp"
 
@@ -67,6 +69,99 @@ void PresentMotionWriteSlots() {
   std::cout << "PASS motion-copy writes redirect only to retired slots\n";
 }
 
+void PresentDlssProducer() {
+  using Capture = sources::PresentDlssProducer::Capture;
+  constexpr nr::Size present{2560u, 1440u};
+  constexpr nr::Rect full{0u, 0u, 2560u, 1440u};
+  const auto eligible = [&](nr::Rect region) { return sources::CoversPresent(region, present, present); };
+  Check(eligible(full) && !eligible({0u, 0u, 853u, 1440u}) && !eligible({853u, 0u, 2560u, 1440u})
+        && !sources::CoversPresent(full, {2560u, 720u}, present), "subview, offset or incompatible output accepted as full-frame");
+  for (const bool reverse : {false, true}) {
+    sources::PresentDlssProducer route;
+    Check(!route.SetExtent(present), "initial extent discarded history");
+    const auto offer = [&](uint64_t frame, uint64_t serial, nr::Rect rect, bool reset = false) {
+      return route.Observe(frame, serial, static_cast<uintptr_t>(serial), eligible(rect), reset, {.motion = true});
+    };
+    Check(offer(1, 7, full) == Capture::UNSELECTED && !route.Finish(1).changed && route.Serial() == 7u,
+          "unique full-frame producer was not learned without guessing on the first frame");
+    for (int i = 0; i < 6; ++i) {
+      const int j = reverse ? 5 - i : i;
+      Check(offer(2, 10u + j, {0u, 0u, 853u, 1440u}, true) == Capture::NOT_FULL_FRAME,
+            "tile was accepted as the Present source");
+      if (i == 2) {
+        Check(offer(2, 7, full) == Capture::RECORD && offer(2, 7, full) == Capture::RECORD,
+              "failed capture prevented a retry of the actual producer");
+        route.Captured({.motion = true});
+      }
+    }
+    Check(offer(2, 7, full) == Capture::ALREADY_CAPTURED, "one producer could record twice for the same Present");
+    const auto stable = route.Finish(2);
+    Check(!stable.changed && !stable.game_reset && route.Serial() == 7u, "tile resets contaminated the selected producer");
+    Check(offer(3, 7, full, true) == Capture::RECORD && route.Finish(3).game_reset, "real producer reset was lost");
+    Check(offer(4, 8, full, true) == Capture::UNSELECTED, "new source captured without observing a full window");
+    const auto changed = route.Finish(4);
+    Check(changed.changed && changed.game_reset && route.Serial() == 8u, "real source change or explicit reset was lost");
+    Check(!route.Finish(5).changed && route.Serial() == 8u, "missing evaluate invalidated a safe one-frame fallback");
+    const std::array<uint64_t, 2> competing = reverse ? std::array<uint64_t, 2>{9u, 8u} : std::array<uint64_t, 2>{8u, 9u};
+    for (const uint64_t id : competing) (void)offer(6, id, full);
+    const auto ambiguous = route.Finish(6);
+    Check(ambiguous.changed && ambiguous.ambiguous && route.Serial() == 0u, "competing full-frame claims depended on callback order");
+    for (uint64_t id = 10; id < 16; ++id) (void)offer(7, id, {0u, 0u, 853u, 1440u}, true);
+    Check(!route.Finish(7).changed && route.Serial() == 0u, "tile-only frames kept resetting or elected a tile");
+    (void)offer(8, 7, full); (void)route.Finish(8);
+    Check(offer(9, 7, full) == Capture::RECORD, "stable source was not eligible");
+    Check(route.Observe(9, 7, 0x1234u, true, false, {.motion = true}) == Capture::UNSELECTED && route.Finish(9).ambiguous,
+          "one handle writing two full outputs was treated as unique");
+    (void)offer(10, 7, full); (void)route.Finish(10);
+    Check(route.SetExtent({1920u, 1080u}) && route.Serial() == 0u, "resize kept the previous producer");
+  }
+  using Guides = sources::PresentDlssProducer::Inputs;
+  sources::PresentDlssProducer route;
+  route.SetExtent(present);
+  const Guides both{.motion = true, .depth = true};
+  const auto guides = [&](uint64_t frame, Guides requested) { return route.Observe(frame, 7, 1, true, false, requested); };
+  (void)guides(1, both); (void)route.Finish(1);
+  Check(guides(2, {.depth = true}) == Capture::RECORD, "depth-only call was not eligible");
+  route.Captured({.depth = true});
+  Check(guides(2, both) == Capture::RECORD && route.Pending(both).motion && !route.Pending(both).depth,
+        "depth-only copy blocked the later same-frame motion or would copy depth again");
+  Check(guides(2, both) == Capture::RECORD, "a failed motion copy could not be retried");
+  route.Captured({.motion = true});
+  Check(guides(2, both) == Capture::ALREADY_CAPTURED, "both copied guides did not deduplicate");
+  (void)route.Finish(2);
+  Check(guides(3, {.motion = true}) == Capture::RECORD, "guide state leaked into the next frame");
+  route.Captured({.motion = true});
+  Check(guides(3, both) == Capture::RECORD && !route.Pending(both).motion && route.Pending(both).depth,
+        "motion-only copy blocked later depth or would copy motion again");
+  std::cout << "PASS Present DLSS producer uniqueness, independent guide capture, reset isolation and real source changes\n";
+}
+
+void PresentMotionReadFallback() {
+  const std::array<uint64_t, 5> copies{10u, 9u, 9u, 8u, 11u};
+  const std::array<uint64_t, 5> all_ready = copies;
+  std::vector<size_t> checked;
+  std::optional<size_t> waitable;
+  const auto wait = [&](size_t slot) { checked.push_back(slot); return waitable == slot; };
+  auto pick = sources::PickD3D12PresentMotion(copies, all_ready, 10u, true, wait);
+  Check(pick.slot == 0u && pick.age == 0u && checked.empty(), "ready current frame did not win without a wait");
+  const std::array<uint64_t, 5> old_ready{0u, 9u, 0u, 8u, 11u};
+  waitable = 0u;
+  pick = sources::PickD3D12PresentMotion(copies, old_ready, 10u, true, wait);
+  Check(pick.slot == 0u && checked == std::vector<size_t>{0u}, "waitable current frame did not win before the older one");
+  const std::array<uint64_t, 5> missing_current{0u, 9u, 9u, 8u, 11u};
+  const std::array<uint64_t, 5> none_ready{};
+  checked.clear(); waitable = 1u;
+  pick = sources::PickD3D12PresentMotion(missing_current, none_ready, 10u, true, wait);
+  Check(pick.slot == 1u && pick.age == 1u && checked == std::vector<size_t>{1u}, "waitable older copy was missed or extra waits were attempted");
+  checked.clear(); waitable.reset();
+  pick = sources::PickD3D12PresentMotion(missing_current, none_ready, 10u, true, wait);
+  Check(!pick.slot && checked == std::vector<size_t>{1u, 2u}, "unorderable, future or two-frame-old motion was bound");
+  checked.clear(); waitable = 1u;
+  pick = sources::PickD3D12PresentMotion(missing_current, none_ready, 10u, false, wait);
+  Check(!pick.slot && checked.empty(), "non-foveated path began waiting on old motion");
+  std::cout << "PASS D3D12 Present motion ordering priority, one-frame wait fallback and safe miss\n";
+}
+
 void RecordingBatches() {
   nr::Timeline timeline([] { return UINT64_MAX; }, [](auto*, auto) {}, [](auto, auto) { return true; });
   struct Host final : sources::DlssFrameHost {
@@ -110,10 +205,12 @@ void ProducerProofs() {
     ID3D12CommandQueue* wait_queue = nullptr;
     ID3D12CommandQueue* producer_queue = nullptr;
     uint64_t wait_value = 0u;
+    unsigned waits = 0u;
+    bool fail_wait = false;
     bool Signal(ID3D12CommandQueue*, uint64_t value) override { signalled = value; return true; }
     uint64_t Completed(ID3D12CommandQueue*) const override { return completed; }
     bool EnqueueWait(ID3D12CommandQueue* consumer, ID3D12CommandQueue* producer, uint64_t value) override {
-      wait_queue = consumer; producer_queue = producer; wait_value = value; return true;
+      ++waits; wait_queue = consumer; producer_queue = producer; wait_value = value; return !fail_wait;
     }
     bool Wait(ID3D12CommandQueue*, uint64_t value, std::chrono::milliseconds) override { return completed >= value; }
   };
@@ -132,17 +229,31 @@ void ProducerProofs() {
   timeline.BeginFrame(producer);
   Check(timeline.OrderedBefore(first.get(), producer) && !timeline.OrderedBefore(first.get(), other),
         "a copy submitted on this queue in an earlier frame was refused");
+  const std::array<uint64_t, 2> frames{1u, 0u};
+  const std::array<uint64_t, 2> unordered{};
+  const auto select_older = [&] {
+    return sources::PickD3D12PresentMotion(frames, unordered, 2u, true, [&](size_t) {
+      return timeline.PrepareSubmissionRead(first.get(), other).ordered;
+    });
+  };
+  Check(!select_older().slot && progress->waits == 0u, "older unstamped submission enqueued an unproven wait");
   timeline.StampThread(17u);
   const auto queued_read = timeline.PrepareSubmissionRead(first.get(), other);
   Check(queued_read.ordered && queued_read.gpu_wait_enqueued && progress->wait_queue == other && progress->producer_queue == producer &&
             progress->wait_value == progress->signalled,
         "a signalled cross-queue producer fence was not queued before its consumer");
+  const auto older = select_older();
+  Check(older.slot == 0u && older.age == 1u && progress->waits == 2u, "older cross-queue fence was not used through Present selection");
+  progress->fail_wait = true;
+  Check(!select_older().slot && progress->waits == 3u, "failed wait was treated as an ordered fallback");
+  progress->fail_wait = false;
   Check(!timeline.OrderedBefore(first.get(), other), "queue ordering wait was mistaken for CPU fence completion");
   Check(timeline.OrderedBefore(first.get(), producer) && !timeline.OrderedBefore(first.get(), other), "producer queue ordering was not checked");
   progress->completed = progress->signalled; timeline.Poll();
   Check(timeline.OrderedBefore(first.get(), other), "completed producer proof did not survive token pruning");
   timeline.Resubmit(recordings.front(), producer, 17u, now, recordings);
   Check(!timeline.OrderedBefore(first.get(), producer) && !timeline.OrderedBefore(second.get(), other), "replayed copy retained stale first-execution proof");
+  Check(!select_older().slot && progress->waits == 3u, "replayed copy was used as an older fallback");
   timeline.StampThread(17u); progress->completed = progress->signalled;
   timeline.ReleaseRecordings(recordings); timeline.Poll();
   const auto discarded = timeline.IssueToken(); auto absent = timeline.TrackSubmission(discarded);
@@ -282,6 +393,40 @@ struct Gpu {
     uploads.clear(); Hr(allocator->Reset()); Hr(list->Reset(allocator.Get(), nullptr));
   }
 };
+
+void IntermittentDepthLogging() {
+  Gpu gpu;
+  testing::IdentityHost host;
+  nr::Timeline timeline([] { return UINT64_MAX; }, [](auto*, auto) {}, [](auto, auto) { return true; });
+  nr::Session session(host, timeline);
+  const nr::Size size{640u, 360u};
+  session.SetEnabled(true);
+  session.NoteFrameSize(size);
+  for (unsigned i = 0u; i < 1000u && session.State() != nr::SessionState::ACTIVE; ++i) { session.Tick(); Sleep(1u); }
+  Check(session.State() == nr::SessionState::ACTIVE, "identity session unavailable");
+  auto a = gpu.Texture(size.width, size.height, DXGI_FORMAT_R16G16B16A16_FLOAT);
+  auto b = gpu.Texture(size.width, size.height, DXGI_FORMAT_R16G16B16A16_FLOAT);
+  auto depth = gpu.Texture(size.width, size.height, DXGI_FORMAT_R32_FLOAT);
+  for (auto* texture : {a.Get(), b.Get(), depth.Get()}) {
+    gpu.Barrier(texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  }
+  unsigned reports = 0u;
+  struct ResetLogSink { ~ResetLogSink() { nr::SetLogSink(nullptr, nullptr, nr::LogLevel::INFO); } } reset_log;
+  nr::SetLogSink([](nr::LogLevel level, std::string_view message, void* user) {
+    if (level == nr::LogLevel::INFO && message.starts_with("Depth input: NR is running without DLSSNR.Depth")) {
+      ++*static_cast<unsigned*>(user);
+    }
+  }, &reports, nr::LogLevel::INFO);
+  for (bool has_depth : {true, false, false, true, false, true, false}) {
+    const auto result = session.Evaluate(gpu.list.Get(), {.a = a.Get(), .b = b.Get(), .size = size},
+                                         {.depth = {.resource = has_depth ? depth.Get() : nullptr}}, nr::Controls{});
+    Check(result.passes_run == 1u, "depth logging frame did not apply NR");
+    gpu.Submit();
+  }
+  Check(reports == 1u, "intermittent depth must produce exactly one missing-depth report per session");
+  session.OnDeviceDestroyed();
+  std::cout << "PASS intermittent depth reports once per NR session\n";
+}
 
 void ColorHistory() {
   Gpu gpu;
@@ -541,6 +686,6 @@ void Pixels() {
 }
 
 int main() {
-  try { FoveationPercentOverflowRegression(); EdgeAwareDensityRegression(); SceneCutRegression(); PresentMotionWriteSlots(); Lifetime(); ProducerProofs(); RecordingBatches(); ColorHistory(); Pixels(); LookHistory(); LookSceneCutGpu(); DepthCopies(); Timings(); return 0; }
+  try { FoveationPercentOverflowRegression(); EdgeAwareDensityRegression(); SceneCutRegression(); PresentMotionWriteSlots(); PresentDlssProducer(); PresentMotionReadFallback(); Lifetime(); ProducerProofs(); RecordingBatches(); IntermittentDepthLogging(); ColorHistory(); Pixels(); LookHistory(); LookSceneCutGpu(); DepthCopies(); Timings(); return 0; }
   catch (const std::exception& e) { std::cerr << "FAIL " << e.what() << '\n'; return 1; }
 }

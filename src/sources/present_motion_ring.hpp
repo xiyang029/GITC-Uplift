@@ -87,4 +87,23 @@ enum class PresentMotionWrite : uint8_t {
   return write == PresentMotionWrite::SLOT_BUSY && slots < PRESENT_MOTION_SLOTS;
 }
 
+// D3D12 can establish read order on the consumer queue. Prefer an ordered
+// candidate at each age; enqueue a wait only when no such candidate exists.
+// The callback validates submission proof and returns true only on safe order.
+template<class PrepareRead>
+[[nodiscard]] PresentMotionPick PickD3D12PresentMotion(std::span<const uint64_t> recorded,
+                                                       std::span<const uint64_t> ordered, uint64_t frame,
+                                                       bool foveated, PrepareRead prepare_read) {
+  if (frame == 0u || recorded.size() != ordered.size()) return {};
+  for (uint64_t age = 0u; age <= PRESENT_MOTION_MAX_AGE && age < frame; ++age) {
+    const uint64_t candidate = frame - age;
+    if (auto pick = PickPresentMotion(ordered, candidate, 0u); pick.slot) return {*pick.slot, age};
+    if (age != 0u && !foveated) continue;
+    for (size_t i = 0u; i < recorded.size(); ++i) {
+      if (recorded[i] == candidate && prepare_read(i)) return {i, age};
+    }
+  }
+  return {};
+}
+
 }  // namespace uplift::sources

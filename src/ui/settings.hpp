@@ -23,11 +23,6 @@ inline constexpr char CONFIG_SECTION[] = "Uplift";
 inline constexpr char ENABLED_KEY[] = "Enabled";  // the one key the add-on polls every present
 inline constexpr float SKIN_SAME_AS_STRUCTURE = -1.f;
 
-// The version written into the settings file; 3 is the one in which InputExposure's default became Auto, 5 the one in
-// which PanelKey stopped defaulting to Home (ReShade's own overlay key), 6 the one in which EnableKey stopped defaulting to
-// none and became F7, and 7 the one that removed UICorrection Auto. Older config files should be regenerated.
-inline constexpr uint32_t CONFIG_VERSION = 7u;
-
 // Every combo is stored as its index, in the order below.
 enum class PlacementSource : uint32_t {
   AUTO = 0u,     // after DLSS once the game has used DLSS, else Present
@@ -75,25 +70,6 @@ enum class MotionPick : uint32_t {
   DLSS,
   LAUNCHPAD,
   LUMENITE,
-};
-
-// The DLSS-SR quality mode an override asks the game's next feature create for (spec §10). The stored index is
-// NVSDK_NGX_PerfQuality_Value + 1; GAME keeps the game's own mode.
-enum class DlssQualityOverride : uint32_t {
-  GAME = 0u,
-  PERFORMANCE = 1u,
-  BALANCED = 2u,
-  QUALITY = 3u,
-  ULTRA_PERFORMANCE = 4u,
-  ULTRA_QUALITY = 5u,
-  DLAA = 6u,
-};
-
-// The DLSS-SR auto-exposure flag the same create asks for; GAME keeps DLSS's own.
-enum class AutoExposureOverride : uint32_t {
-  GAME = 0u,
-  OFF = 1u,
-  ON = 2u,
 };
 
 // GAME keeps the game's preset; J..M are DLSS render presets 10..13 (spec §10).
@@ -171,6 +147,18 @@ enum class NgxHooksMode : uint32_t {
   AUTO = 0u,
   OFF = 1u,  // safe mode, from the next game start: only the Present path exists
 };
+
+// One internal mode; the INI still exposes three mutually exclusive boolean keys.
+enum class NativeNrMode : uint8_t {
+  OFF,
+  PARAMETERS,  // drive the game's own NR handle with Uplift's controls
+  AFTER,       // run Uplift immediately after the game-owned NR evaluate
+  REPLACE,     // run Uplift at the native NR call site and skip it on success
+};
+
+[[nodiscard]] constexpr bool UsesNativeNrGameList(NativeNrMode mode) {
+  return mode == NativeNrMode::AFTER || mode == NativeNrMode::REPLACE;
+}
 
 enum class ForeignNrMode : uint32_t {
   YIELD = 0u,    // stand down while another NR producer runs
@@ -259,11 +247,6 @@ struct Settings {
   PlacementSource source = PlacementSource::AUTO;
   MotionVectorSource motion_vectors = MotionVectorSource::AUTO;
   std::array<DlssPresetOverride, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_presets = {};
-  // The two hidden DLSS-SR create-time overrides (schema rows DLSSQualityMode / DLSSAutoExposure): the INI keeps
-  // them readable, but nothing applies them -- the game's own choices stand.
-  DlssQualityOverride dlss_quality_mode = DlssQualityOverride::GAME;
-  AutoExposureOverride dlss_auto_exposure = AutoExposureOverride::GAME;
-
   // The render scale override (2026-10-25, addon/dlss_ratio.hpp): each mode's render size as percent of
   // the output, 100 = the game's choice. Applied at the game's next OptimalSettings query.
   std::array<uint32_t, static_cast<size_t>(DlssPresetMode::COUNT)> dlss_render_scale {100u, 100u, 100u, 100u, 100u, 100u};
@@ -298,10 +281,7 @@ struct Settings {
   StateRestore state_restore = StateRestore::FULL;
   NgxHooksMode ngx_hooks = NgxHooksMode::AUTO;
   ForeignNrMode foreign_nr = ForeignNrMode::YIELD;
-  bool override_native_nr_parameters = false;  // use panel NR controls and safely resize the game's own NR handle
-  bool uplift_after_native_nr = false;          // exclusive Uplift stage after the game-owned DLSS-NR evaluate
-  bool replace_native_nr = false;               // run Uplift at the native DLSS-NR call site and skip it on success
-  bool native_nr_handle_mode = false;            // legacy config alias for override_native_nr_parameters
+  NativeNrMode native_nr_mode = NativeNrMode::OFF;
   VulkanNrMode vulkan_nr = VulkanNrMode::NATIVE;  // Plan 19
   ResolutionMode resolution_mode = ResolutionMode::FULL;  // user ruling: Full by default
   float resolution_scale = 100.f;                         // Custom: % of the output's width, 25-100
@@ -352,7 +332,6 @@ struct Settings {
   float chroma_clamp = 0.f;
   bool near_black_guard = false;
   bool dlss_placement_blocked = false;       // hidden: the device-removal latch
-  uint32_t config_version = CONFIG_VERSION;  // hidden: the version the loaded file declared
   bool auto_retry = true;                    // retry a failed session on the backoff
   // These settings can also be turned off manually. Remember which ones Uplift disabled after a failed start.
   static constexpr uint32_t LATCH_D3D9EX = 1u, LATCH_VK_DEVICE = 2u, LATCH_VK_NGX = 4u;
@@ -414,15 +393,9 @@ class ConfigStore {
 [[nodiscard]] std::optional<bool> ParseBoolSetting(std::string_view text);
 
 // Missing keys keep their defaults. An unreadable, non-finite or out-of-range value keeps its default
-// and adds one line to `warnings`. An older ConfigVersion is migrated (MigrateSettings).
+// and adds one line to `warnings`.
 [[nodiscard]] Settings LoadSettings(const ConfigStore& store, std::vector<std::string>* warnings);
 void SaveSettings(const Settings& settings, ConfigStore* store);
-// A file written before CONFIG_VERSION 3 (1.0.0 stored every key, its default InputExposure Game included) reads InputExposure Game as Auto, the
-// new default; Metered and Manual stay. A file written before CONFIG_VERSION 5 that still holds Home for PanelKey (the old default) moves to
-// Insert: Home cannot be taken over, because ReShade handles its own overlay key before this add-on sees the input.
-// A file written before CONFIG_VERSION 6 that still holds none for EnableKey (the old default) moves to F7; a 0
-// written by a right-click after that is indistinguishable from the old default, so it moves too.
-void MigrateSettings(Settings* settings);
 // After an overlay edit: a non-finite value returns to its default, a number is clamped into its
 // range (a documented special value such as 0 = automatic is kept), an unknown combo index or key
 // code returns to its default.

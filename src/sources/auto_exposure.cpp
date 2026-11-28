@@ -13,9 +13,17 @@ std::string_view LatchWord(AutoLatch latch) {
   switch (latch) {
     case AutoLatch::ABOVE: return "above";
     case AutoLatch::BELOW: return "below";
+    case AutoLatch::HELD:  return "held";
     case AutoLatch::NONE:  break;
   }
   return {};
+}
+
+bool IsUnitGameExposure(const ExposureSample& sample) {
+  constexpr float EPSILON = 0.01f;
+  return std::isfinite(sample.texture_value) && std::isfinite(sample.factor) && std::isfinite(sample.game)
+         && std::abs(sample.texture_value - 1.f) <= EPSILON && std::abs(sample.factor - 1.f) <= EPSILON
+         && std::abs(sample.game - 1.f) <= EPSILON;
 }
 
 }  // namespace
@@ -64,7 +72,18 @@ bool AutoExposure::Observe(const ExposureSample& sample, double seconds) {
   if (!std::isfinite(outside) || !std::isfinite(sample.anchor_stops)) return false;
   const float game_stops = std::log2(sample.game);
   last_gap_ = game_stops - sample.metered_stops;
-  NoteHeld(game_stops, sample.anchor_stops, seconds);  // the debug line's information only: never invalidates a sample
+  NoteHeld(game_stops, sample.anchor_stops, seconds);
+  // A unit ExposureTexture with a unit DLSS factor is the game's "no exposure"
+  // sentinel. If it remains fixed while the scene anchor moves by several stops,
+  // blending it back into the meter produces the exact bright/dark oscillation
+  // reported by games that leave DLSS auto-exposure disabled. Keep ordinary
+  // non-unit or dynamic game exposure on the normal validity window.
+  if (IsUnitGameExposure(sample) && held_through_move_) {
+    latched_ = true;
+    reason_ = AutoLatch::HELD;
+    stops_off_ = std::abs(*last_gap_);
+    return true;
+  }
   AutoLatch rule = AutoLatch::NONE;
   if (outside > ABOVE_LIMIT_STOPS) {
     rule = AutoLatch::ABOVE;
@@ -119,6 +138,11 @@ std::string ExposureLine(const ExposureReport& report) {
 }
 
 std::string AutoLatchMessage(const ExposureSample& sample, const AutoExposure& judge) {
+  if (judge.Reason() == AutoLatch::HELD) {
+    return std::format("Input exposure Auto: the game's unit exposure stayed fixed while the scene moved {:.1f} stops, so NR's input is metered from now on (ExposureTexture {:.4g}, factor {:.4g}: the game's {:.4g} = {:+.2f} stops; metered {:.4g} = {:+.2f} stops, target {:+.2f} stops; {:.1f} stops off)",
+                       judge.HeldThroughMove().value_or(0.f), sample.texture_value, sample.factor, sample.game, std::log2(sample.game),
+                       std::exp2(sample.metered_stops), sample.metered_stops, sample.target_stops, judge.StopsOff());
+  }
   const std::string rule = std::format("sat {:.1f} stops {} Uplift's meter (the window is {:.0f} below to {:.0f} above)",
                                        std::abs(AutoExposure::OutsideSpan(sample)), LatchWord(judge.Reason()), AutoExposure::BELOW_LIMIT_STOPS,
                                        AutoExposure::ABOVE_LIMIT_STOPS);

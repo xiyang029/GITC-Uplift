@@ -26,8 +26,6 @@ inline constexpr std::string_view HUDLESS_NOT_CHANGED = "NR did not change this 
 inline constexpr std::string_view HUDLESS_OTHER_FRAME = "another frame's HUD-less image";
 inline constexpr std::string_view HUDLESS_NOT_USED = "NR ran on the frame with its HUD";
 inline constexpr std::string_view HUDLESS_HIDE_OFF = "hiding is off";
-inline constexpr auto HUDLESS_EVALUATE_REASONS =
-    std::to_array<std::string_view>({HUDLESS_NO_IMAGE, HUDLESS_NOT_CHANGED, HUDLESS_OTHER_FRAME, HUDLESS_NOT_USED, HUDLESS_HIDE_OFF});
 
 // Why a Present's HUD-less image can or cannot be used, indexed by addon::HudReason.
 inline constexpr auto HUD_REASON_TEXTS = std::to_array<std::string_view>({

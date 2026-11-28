@@ -135,8 +135,9 @@ void main(uint3 id : SV_DispatchThreadID) {
     model_value = ModelAt(id.xy, scale);
   }
   if (change_mode != 0u) {
+    const float3 model_output = nr_texture.Load(int3(id.xy, 0)).rgb;
     output_texture[id.xy] =
-        ChangeField(encoding, model_value, nr_texture.Load(int3(id.xy, 0)).rgb, (options & OPTION_NEAR_BLACK_GUARD) != 0u);
+        ChangeField(encoding, model_value, model_output, (options & OPTION_NEAR_BLACK_GUARD) != 0u);
     if (second_output != 0u) {
       motion_texture[id.xy] = Chroma(LinearToOkLab(SrgbDecode(model_value)));  // κ_M, the look's colour basis
     }

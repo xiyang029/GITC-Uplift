@@ -84,8 +84,131 @@ void DeviceContext::SetDlssUnavailableReason(std::string reason) {
   dlss_unavailable_reason_ = std::move(reason);
 }
 
+bool DeviceContext::NativeNrTrace::ChangedFrom(const NativeNrTrace& prev) const {
+  return serial != prev.serial || (calls == 0u) != (prev.calls == 0u) || path != prev.path || uplift != prev.uplift || game != prev.game
+      || hook_serial != prev.hook_serial || hook_reason != prev.hook_reason || present != prev.present || trigger != prev.trigger || native_reason != prev.native_reason || present_reason != prev.present_reason
+      || bypass != prev.bypass || (game_reset_hint && !prev.game_reset_hint) || (uplift_reset && !prev.uplift_reset)
+      || (present_reset && !prev.present_reset);
+}
+
+void DeviceContext::NoteNativeNrReplacement(const ngx_hooks::DlssFrame& frame, NativeNrPath path,
+                                          const sources::PipelineResult& result, std::string_view bypass, ID3D12GraphicsCommandList* list) noexcept try {
+  if (!nr::IsLogEnabled(nr::LogLevel::TRACE)) return;
+  auto& trace = native_nr_trace_;
+  if (++trace.calls == 1u) {
+    trace.first_list = list;
+    trace.first_output = frame.output;
+  }
+  trace.last_list = list;
+  trace.last_output = frame.output;
+  // Preserve the first failure, or the success that owned the image, not a later duplicate call's INACTIVE.
+  if (trace.calls == 1u || result.nr_applied) {
+    trace.serial = frame.serial;
+    trace.path = path;
+    trace.native_reason = result.reason;
+    trace.bypass = bypass;
+  }
+  trace.uplift |= result.nr_applied;
+  trace.game_reset_hint |= frame.reset;
+  trace.uplift_reset |= result.first_pass_reset;
+  if (result.nr_applied && result.token != 0u) {
+    native_nr_recordings_[1] = std::move(native_nr_recordings_[0]);
+    native_nr_recordings_[0] = {.token = result.token, .cursor = timeline_->CurrentFrame(), .list = list, .output = frame.output,
+                                .proof = timeline_->TrackSubmission(result.token)};
+  }
+} catch (...) {
+  // Logging must not make the caller run the game NR after Uplift has already recorded its replacement.
+}
+
+void DeviceContext::NoteNativeNrHookBypass(uint64_t serial, ID3D12GraphicsCommandList* list, std::string_view reason) {
+  if (++native_nr_trace_.hook_bypasses == 1u) {
+    native_nr_trace_.hook_serial = serial;
+    native_nr_trace_.hook_list = list;
+    native_nr_trace_.hook_reason = reason;
+  }
+}
+
+void DeviceContext::CloseNativeNrFrame() {
+  (void)native_nr_frame_.Close();
+  native_nr_trace_ = {};  // rejected outer Present: do not attribute this interval's evaluations to the next image
+}
+
+void DeviceContext::FinishNativeNrTrace(std::chrono::steady_clock::time_point now) noexcept try {
+  auto sample = std::exchange(native_nr_present_trace_, std::nullopt);
+  if (!sample || !nr::IsLogEnabled(nr::LogLevel::TRACE)) return;
+  const bool changed = !native_nr_last_trace_ || sample->ChangedFrom(*native_nr_last_trace_);
+  const bool recovered = native_nr_last_trace_ && native_nr_last_trace_->Gap() && sample->uplift;
+  native_nr_last_trace_ = std::move(sample);
+  if (now - native_nr_trace_window_ >= std::chrono::seconds(1)) {
+    native_nr_trace_window_ = now;
+    native_nr_trace_lines_ = 0u;
+  }
+  if (!changed && (native_nr_trace_suppressed_ == 0u || native_nr_trace_lines_ != 0u)) return;
+  if (native_nr_trace_lines_ >= 8u) {
+    ++native_nr_trace_suppressed_;
+    return;
+  }
+  ++native_nr_trace_lines_;
+  const auto& t = *native_nr_last_trace_;
+  const auto reason = [](nr::SkipReason reason) { return reason == nr::SkipReason::NONE ? "-" : nr::SkipReasonText(reason); };
+  const std::string_view present = [&]() -> std::string_view {
+    switch (t.present) {
+      case NativeNrTrace::Present::NOT_ARMED: return "not-armed";
+      case NativeNrTrace::Present::NOT_READY: return "not-ready";
+      case NativeNrTrace::Present::NOT_RUN: return "not-run";
+      case NativeNrTrace::Present::SKIPPED: return "skipped";
+      case NativeNrTrace::Present::APPLIED: return "applied";
+    }
+    return "-";
+  }();
+  const std::string_view replacement = t.calls == 0u ? "no-tracked-attempt" : t.uplift ? "applied" : "not-applied";
+  nr::Logf(nr::LogLevel::TRACE,
+           "Native NR frame: context={} frame={} serial={} calls={} replace={} site={} reason=[{}] game_nr_succeeded={} "
+           "present={} trigger=[{}] present_reason=[{}] reset(game_hint={}, uplift_first_pass={}, present_first_pass={}); suppressed={}",
+           static_cast<const void*>(this), t.frame, t.serial, t.calls, replacement,
+           t.calls == 0u ? "-" : t.path == NativeNrPath::DISABLED_FALLBACK ? "game-disabled" : "game-enabled",
+           t.bypass.empty() ? reason(t.native_reason) : std::string_view(t.bypass), t.game, present, TriggerPointName(t.trigger), reason(t.present_reason),
+           t.game_reset_hint, t.uplift_reset, t.present_reset, std::exchange(native_nr_trace_suppressed_, 0u));
+  if (t.Gap() || recovered || t.hook_bypasses != 0u || (t.uplift && t.game)) {
+    // The submit cursor is the Timeline value at ReShade's pre-Execute event, not proof of presentation.
+    // A stamp (fence) or a later frame on the same queue can prove ordering; pointer values are identity hints only.
+    const auto log_recording = [&](std::string_view which, const NativeNrRecording& recording) {
+      if (recording.token == 0u) return;
+      const auto proof = timeline_->InspectSubmission(recording.proof.get(), t.present_queue);
+      nr::Logf(nr::LogLevel::TRACE,
+               "Native NR submit: context={} frame={} {} token={} record_cursor={} list={} output={} "
+               "proof={} submit_cursor={} fence={} ordered={} replayed={}",
+               static_cast<const void*>(this), t.frame, which, recording.token, recording.cursor, recording.list, recording.output,
+               proof.has_proof, proof.submitted_frame, proof.fence, proof.ordered, proof.replayed);
+    };
+    nr::Logf(nr::LogLevel::TRACE,
+             "Native NR gap: context={} frame={} state={} target={} queue={} "
+             "hook_bypasses={} hook_serial={} hook_list={} hook_reason=[{}] first_list={} first_output={} last_list={} last_output={}",
+             static_cast<const void*>(this), t.frame, t.Gap() ? "present-fallback" : recovered ? "recovered" : t.hook_bypasses ? "hook-bypass" : "mixed",
+             t.present_target, static_cast<const void*>(t.present_queue), t.hook_bypasses, t.hook_serial, t.hook_list,
+             t.hook_reason.empty() ? "-" : t.hook_reason, t.first_list, t.first_output, t.last_list, t.last_output);
+    log_recording(t.uplift ? "current" : "latest", native_nr_recordings_[0]);
+    if (recovered) log_recording("previous", native_nr_recordings_[1]);
+  }
+} catch (...) {
+  // Never let diagnostic formatting interrupt the Present and its state bookkeeping.
+}
+
+void DeviceContext::NoteNativeNrPresent(TriggerPoint point, const sources::PresentResult& result) {
+  if (!native_nr_present_trace_) return;
+  auto& trace = *native_nr_present_trace_;
+  trace.trigger = point;
+  trace.present = result.nr_applied ? NativeNrTrace::Present::APPLIED : NativeNrTrace::Present::SKIPPED;
+  trace.present_reason = result.reason;
+  trace.present_reset = result.first_pass_reset;
+  FinishNativeNrTrace(std::chrono::steady_clock::now());
+}
+
 TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSettings& settings, const FrameFacts& facts, const TargetInfo& target,
                                        bool marker_expected, std::chrono::steady_clock::time_point now) {
+  FinishNativeNrTrace(now);  // a deferred Present trigger that never ran keeps its original frame number
+  const NativeNrFrame completed = native_nr_frame_.Close();
+  auto native_trace = std::exchange(native_nr_trace_, {});
   frame_ready_ = false;
   // Checked every frame, even OFF: a removed device must never be signalled or loaded into, and OFF
   // is exactly the state a Session settles into right after a mid-frame removal. The last
@@ -93,6 +216,14 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
   if (torn_down_ || device_lost_ || NoteDeviceRemoved(now)) {
     status_.Clear();
     return TriggerPoint::NONE;
+  }
+  const bool native_mode_changed = settings_.native_nr_mode != settings.native_nr_mode
+      && (ui::UsesNativeNrGameList(settings_.native_nr_mode) || ui::UsesNativeNrGameList(settings.native_nr_mode));
+  if (native_mode_changed) {
+    after_dlss_->OweReset();
+    native_nr_reset_owed_ = true;
+    native_nr_feature_serial_.reset();
+    native_nr_path_.reset();
   }
   settings_ = settings;
   facts_ = facts;
@@ -147,7 +278,26 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
   std::optional<color::Encoding> present_encoding;
   nr::Size present_size;
   // For a later group only while some pass is stored at another stage, so the default path reads nothing more.
-  const bool present_possible = (placement_.placement == Placement::PRESENT || SplitStored(settings_, facts_.split_capable));
+  const bool native_mode = ui::UsesNativeNrGameList(settings_.native_nr_mode);
+  const auto native_target_size = [&]() -> nr::Size {
+    if (!native_mode && !completed.NativeOwns()) return {};
+    if (!target.size.Empty()) return target.size;
+    if (target.resource == nullptr) return {};
+    const auto desc = target.resource->GetDesc();
+    if (desc.Width > UINT32_MAX) return {};
+    return {static_cast<uint32_t>(desc.Width), desc.Height};
+  }();
+  const bool native_size_changed = native_target_size != native_nr_present_size_;
+  native_nr_present_size_ = native_target_size;
+  // Wait until this boundary to choose the fallback: an earlier DLSS evaluate cannot know that
+  // the live native handle will go unused. Never arm a second recording for a completed image.
+  // The previous geometry cannot identify the image at a resize boundary.
+  const NativeNrFrame ownership = native_size_changed ? NativeNrFrame{.ordinary_dlss_applied = completed.ordinary_dlss_applied,
+      .deferred_to_native = completed.deferred_to_native} : completed;
+  const bool native_reserves = ownership.ReservesGameListRoute(native_mode, native_nr_feature_live_);
+  const bool native_present_fallback = ownership.NeedsPresentFallback(native_mode, native_nr_feature_live_);
+  const bool present_pass1 = native_present_fallback || (!native_reserves && placement_.placement == Placement::PRESENT);
+  const bool present_possible = present_pass1 || (!native_reserves && SplitStored(settings_, facts_.split_capable));
   if (present_possible && !target.problem.empty()) {
     present_problem = std::string(target.problem);  // the D3D11 bridge cannot hand this back buffer to NR
   } else if (present_possible && (target.resource != nullptr || target.format != DXGI_FORMAT_UNKNOWN)) {
@@ -168,9 +318,12 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
     }
   }
   present_cannot_ = (!present_problem.empty() ? present_problem : (present_encoding ? std::string() : std::string("the back buffer cannot reach NR")));
-  UpdateChain();
-  const bool dlss_placement =
-      (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
+  const auto exclusive = native_reserves ? std::optional(native_present_fallback ? Placement::PRESENT : Placement::AFTER_DLSS)
+                                         : std::nullopt;
+  // If settings changed after the evaluate, still preserve the ownership of the image about to be presented.
+  const bool skip_present = ownership.NativeOwns() || (native_reserves && ownership.ordinary_dlss_applied);
+  UpdateChain(exclusive);
+  const bool dlss_placement = !present_pass1 && (native_reserves || IsDlssStage(placement_.placement));
   if (!dlss_placement && !ran_since_present_) {
     // The Present path reports each frame afresh; the DLSS paths keep their last evaluate's result. 1.2.4: so does a Present-path Run that came
     // before this present (effects rendered mid-frame by another add-on), or the card would read "Waiting for a frame" while NR runs.
@@ -197,7 +350,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
   if (!dlss_placement) {
     frame_size_ = {};
   }
-  if (placement_.placement == Placement::PRESENT) {
+  if (present_pass1) {
     message = std::move(present_problem);
     encoding_ = present_encoding;
     frame_size_ = present_size;
@@ -220,6 +373,31 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
 
   if (!present_group || PresentFoveated()) present_source_->Pipeline().ReleaseDepthCopies();
 
+  if (!bridged_) {
+    const bool extent_changed = present_dlss_producer_.SetExtent(present_group && settings.session.enabled ? present_size : nr::Size{});
+    const auto producer = present_dlss_producer_.Finish(timeline_->CurrentFrame());
+    if (extent_changed || producer.changed) {
+      // Copies from a different viewport/source are not a safe one-frame fallback.
+      present_source_->Pipeline().ReleaseMotionCopies();
+      present_source_->Pipeline().ReleaseDepthCopies();
+      present_jitter_.Reset();
+      present_reset_owed_ = true;
+    }
+    present_reset_owed_ |= producer.game_reset;
+    auto& trace = present_capture_trace_;
+    trace.ambiguous += producer.ambiguous;
+    trace.source_changes += producer.changed;
+    trace.game_resets += producer.game_reset;
+    if (trace.since != std::chrono::steady_clock::time_point{} && now - trace.since >= std::chrono::seconds(5)) {
+      const auto& d = trace.decisions;
+      nr::Logf(nr::LogLevel::TRACE,
+               "Direct3D 12: Present DLSS producer: selected serial {}; capture eligible {}, duplicate {}, unselected {}, non-full-frame {}, no inputs {}; ambiguous frames {}, source resets {}, game resets {}{}{}",
+               present_dlss_producer_.Serial(), d[3], d[2], d[1], d[0], d[4], trace.ambiguous, trace.source_changes, trace.game_resets,
+               trace.sample.empty() ? "" : "; candidate sample: ", trace.sample);
+      trace = {};
+    }
+  }
+
   ApplySessionOptions(*session_, settings, chain_, settings_generation_);
   // The four-bit models replace the runtime's Model A launches on this D3D12 path. Configuring the
   // kernels is idempotent while the choice is unchanged; asking for none leaves the runtime alone.
@@ -232,7 +410,7 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
   }
   UpdateSession(now);
 
-  if (present_group && present_encoding) {
+  if (!skip_present && present_group && present_encoding) {
     const float diffuse_white_nits = (settings.diffuse_white_nits > 0.f ? settings.diffuse_white_nits
                                                                       : color::DefaultDiffuseWhiteNits(*present_encoding));
     if (*present_group == 0u) {
@@ -258,8 +436,30 @@ TriggerPoint DeviceContext::BeginFrame(ID3D12CommandQueue* queue, const FrameSet
       if (*present_group == 0u) status_.NoteSkip(nr::SkipReason::FRAME_TOO_SMALL, RecordingStatus::Reset::ALL);
     }
   }
+  if (nr::IsLogEnabled(nr::LogLevel::TRACE)
+      && (native_trace.calls != 0u || native_trace.hook_bypasses != 0u
+          || (settings.session.enabled && settings.native_nr_mode == ui::NativeNrMode::REPLACE))) {
+    native_trace.frame = timeline_->CurrentFrame();
+    native_trace.game = ownership.GameOwns();
+    native_trace.present_target = target.resource;
+    native_trace.present_queue = queue;
+    const bool present_expected = !skip_present && present_group.has_value();
+    if (present_expected) {
+      native_trace.present = frame_ready_ ? NativeNrTrace::Present::NOT_RUN : NativeNrTrace::Present::NOT_READY;
+    }
+    native_nr_present_trace_ = std::move(native_trace);
+    if (!present_expected || !frame_ready_) FinishNativeNrTrace(now);
+  } else {
+    native_nr_last_trace_.reset();
+    native_nr_recordings_ = {};
+  }
   // N belongs to the composer's current Present scope. Never defer NR into ReShade's effects/technique,
   // whose host targets the real back buffer after the composer has already closed N.
+  // The native fallback is decided on this image, not in a potentially mid-frame effects callback.
+  if (native_reserves || skip_present) {
+    const auto point = trigger_.OnPresent(false, false, false);
+    return skip_present ? TriggerPoint::NONE : point;
+  }
   return trigger_.OnPresent(marker_expected && !facts.hudless_present, facts.effects_on && !facts.hudless_present, facts.marker_rendered_early);
 }
 
@@ -277,12 +477,11 @@ nr::SkipReason DeviceContext::PresentWorkSkip() const {
 sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES entry_state, TriggerPoint point,
                                           ID3D12Resource* motion, bool motion_is_dlss, float dlss_scale_x, float dlss_scale_y,
                                           nr::Rect dlss_motion_region, uint64_t dlss_motion_age, ID3D12Resource* shared_mask) {
-  if (settings_.uplift_after_native_nr || settings_.replace_native_nr || settings_.native_nr_handle_mode) {
-    frame_ready_ = false;
-    return {};  // The game-owned DLSS-NR evaluate is the exclusive Uplift execution point.
-  }
   if (point == TriggerPoint::NONE || !frame_ready_) return {};
   frame_ready_ = false;
+  // An ordinary effects trigger may have been armed before a native handle appeared. Respect
+  // ownership acquired since BeginFrame too, without consuming the next Present's state here.
+  if (native_nr_frame_.NativeOwns()) return {};
   ran_since_present_ = true;
   // Split chain: the Present group is pass 1's (group 0, the single chain of before) or a later one, whose result only Status's groups report.
   const uint32_t group = GroupAt(chain_, Stage::PRESENT).value_or(0u);
@@ -298,7 +497,9 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
     } else {
       present_reset_owed_ = true;  // the Session never saw this frame: the group's next recording restarts its history
     }
-    return {.reason = reason};
+    const sources::PresentResult result{.reason = reason};
+    NoteNativeNrPresent(point, result);
+    return result;
   };
   // The detector's evidence of frame generation: NGX's live features and the present cadence.
   const bool frame_generation_on = frame_generation_.ObservedState().active;
@@ -348,6 +549,7 @@ sources::PresentResult DeviceContext::Run(FrameHost* host, D3D12_RESOURCE_STATES
       nr::Logf(nr::LogLevel::INFO, "NR trigger: {}", TriggerPointName(point));
     }
   }
+  NoteNativeNrPresent(point, result);
   if (trace_frames_ > 0u) {
     --trace_frames_;
     nr::Logf(nr::LogLevel::TRACE, "frame {}: NR {} at {}, {} pass(es) {}", timeline_->CurrentFrame(),
@@ -403,7 +605,9 @@ bool DeviceContext::NoteMainEvaluate(const ngx_hooks::DlssFrame& frame, std::chr
     // A placement change decided here needs the same bookkeeping BeginFrame gives
     // it, or the log stays silent and the work size keeps the old placement's until the next present.
     NotePlacementChange();
-    UpdateChain();  // split chain: the chain follows pass 1's placement, with the latest present's back buffer
+    if (!native_nr_feature_live_ || !ui::UsesNativeNrGameList(settings_.native_nr_mode)) {
+      UpdateChain();  // split chain follows pass 1's placement, with the latest present's back buffer
+    }
     // The same release BeginFrame gives a placement change, so the Present motion
     // copies do not linger past starvation switching Auto away from Present (or MotionVectors off).
     const bool present_group = GroupAt(chain_, Stage::PRESENT).has_value();
@@ -425,18 +629,40 @@ void DeviceContext::NoteDlssFeature(uint64_t serial) {
   if (dlss_feature_serial_ != 0u) {
     pre_sr_->OweReset();
     after_dlss_->OweReset();
-    present_reset_owed_ = true;
+    // Native Present has its own full-frame producer; DLSS subviews can rotate
+    // between evaluations without changing the image Present actually consumes.
+    if (bridged_) present_reset_owed_ = true;
     before_reset_.reset();
   }
   dlss_feature_serial_ = serial;
 }
 
+bool DeviceContext::IsNativeNrPresentCandidate(const ngx_hooks::DlssFrame& frame) const {
+  const auto& r = frame.output_region;
+  if (frame.output == nullptr || native_nr_present_size_.Empty() || nr::Size{r.width, r.height} != native_nr_present_size_) return false;
+  const auto desc = frame.output->GetDesc();
+  return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.DepthOrArraySize == 1u && desc.SampleDesc.Count == 1u
+      && uint64_t{r.x} + r.width <= desc.Width && uint64_t{r.y} + r.height <= desc.Height;
+}
+
+void DeviceContext::MarkNativeNrPassthrough(const ngx_hooks::DlssFrame& frame) {
+  if (IsNativeNrPresentCandidate(frame)) native_nr_frame_.MarkGameOutput(frame.output);
+}
+
 sources::PipelineResult DeviceContext::OnNativeNrEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
-                                                          std::chrono::steady_clock::time_point now, bool replacing_native) {
+                                                          std::chrono::steady_clock::time_point now, NativeNrPath path) {
+  if (!IsNativeNrPresentCandidate(frame) || !native_nr_frame_.CanApplyNative(frame.output)) return {.reason = nr::SkipReason::INACTIVE};
+  const bool replacing_native = path != NativeNrPath::AFTER;
+  const bool route_enabled = path == NativeNrPath::DISABLED_FALLBACK ? ui::UsesNativeNrGameList(settings_.native_nr_mode)
+      : settings_.native_nr_mode == (path == NativeNrPath::REPLACE ? ui::NativeNrMode::REPLACE : ui::NativeNrMode::AFTER);
+  if (!route_enabled || !dlss_unavailable_reason_.empty() || core_hold_.Held() || session_->State() != nr::SessionState::ACTIVE) return {.reason = nr::SkipReason::NR_OFF};
   if (torn_down_ || device_lost_ || NoteDeviceRemoved(now)) return {.reason = nr::SkipReason::DEVICE_REMOVED};
-  if ((replacing_native ? !settings_.replace_native_nr : !settings_.uplift_after_native_nr)
-      || settings_.native_nr_handle_mode
-      || session_->State() != nr::SessionState::ACTIVE) return {.reason = nr::SkipReason::NR_OFF};
+  if (native_nr_feature_serial_ != frame.serial || native_nr_path_ != path) {
+    native_nr_feature_serial_ = frame.serial;
+    native_nr_path_ = path;
+    after_dlss_->OweReset();
+    native_nr_reset_owed_ = true;
+  }
   if (frame.output == nullptr || frame.output_region.width == 0u || frame.output_region.height == 0u) return {.reason = nr::SkipReason::INVALID_INPUT};
   // Native DLSS-NR is expected to leave its output in UAV state on this same list. Reject outputs
   // that cannot legally take the UAV hand-off used by AfterDlssSource/RecordUav.
@@ -444,73 +670,27 @@ sources::PipelineResult DeviceContext::OnNativeNrEvaluate(const ngx_hooks::DlssF
     native_nr_reset_owed_ = true;
     return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
   }
+  // Install the actual full-chain slice before settling its size or recording. This keeps the
+  // Session's stage, history resets and pass accounting aligned with this path, even after a Present fallback.
+  UpdateChain(Placement::AFTER_DLSS);
   frame_size_ = {frame.output_region.width, frame.output_region.height};
   const sources::WorkLayout layout = SettleLayout(frame_size_, Stage::AFTER_DLSS, now);
   ApplyLookConfig(now, 0u);
   sources::AfterDlssConfig config = DlssConfig(layout, 0u);
   config.replace_native_nr = replacing_native;
-  config.part.slice.first = 0u;
-  config.part.slice.count = nr::MAX_PASSES;
   const sources::PipelineResult result = after_dlss_->Run(host, frame, frame.reset || native_nr_reset_owed_, config);
   ran_since_present_ = true;  // Preserve this evaluate's result (including a skip) until the overlay reads it at Present.
   NoteResult(Stage::AFTER_DLSS, 0u, result);
+  native_nr_reset_owed_ = !result.nr_applied;
   if (result.recorded) {
-    native_nr_reset_owed_ = false;
     last_game_list_recording_ = now;
     last_dlss_token_ = result.token;
-  } else {
-    native_nr_reset_owed_ = true;
   }
   if (result.nr_applied && !logged_after_dlss_) {
     logged_after_dlss_ = true;
     nr::Log(nr::LogLevel::INFO, (replacing_native ? "NR trigger: replaced native DLSS-NR" : "NR trigger: after native DLSS-NR"));
   }
-  return result;
-}
-
-std::optional<sources::NativeNrHandleWork> DeviceContext::PrepareNativeNrHandle(
-    const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host, std::chrono::steady_clock::time_point now) {
-  if (!settings_.native_nr_handle_mode || torn_down_ || device_lost_ || NoteDeviceRemoved(now)) {
-    return std::nullopt;
-  }
-  const nr::Rect region = sources::ResolveOutputRegion(frame);
-  if (region.width == 0u || region.height == 0u) return std::nullopt;
-  frame_size_ = {region.width, region.height};
-  const sources::WorkLayout layout = SettleLayout(frame_size_, Stage::AFTER_DLSS, now);
-  sources::NativeNrHandleWork work;
-  const sources::PipelineResult prepared = after_dlss_->Pipeline().PrepareNativeNrHandle(host, settings_.restore, frame, layout, &work);
-  if (!prepared.recorded || !work.ticket) {
-    if (prepared.reason != nr::SkipReason::NONE && !native_nr_handle_skip_logged_) {
-      native_nr_handle_skip_logged_ = true;
-      nr::Logf(nr::LogLevel::INFO, "Native DLSS-NR handle resize bypassed ({}); native evaluate will run unchanged",
-               nr::SkipReasonText(prepared.reason));
-    }
-    return std::nullopt;
-  }
-  ran_since_present_ = true;
-  last_game_list_recording_ = now;
-  return work;
-}
-
-sources::PipelineResult DeviceContext::CompleteNativeNrHandle(const sources::NativeNrHandleWork& work,
-                                                               sources::DlssFrameHost& host, bool native_succeeded,
-                                                               std::chrono::steady_clock::time_point now) {
-  if (torn_down_ || device_lost_ || NoteDeviceRemoved(now)) {
-    return {.reason = nr::SkipReason::DEVICE_REMOVED};
-  }
-  const sources::PipelineResult result = after_dlss_->Pipeline().CompleteNativeNrHandle(host, settings_.restore, work, native_succeeded);
-  if (result.recorded) last_game_list_recording_ = now;
-  if (native_succeeded && !native_nr_handle_evaluate_logged_) {
-    native_nr_handle_evaluate_logged_ = true;
-    nr::Log(nr::LogLevel::INFO, "Native DLSS-NR handle evaluate succeeded with Uplift's temporary input/size overrides");
-  } else if (!native_succeeded && !native_nr_handle_failure_logged_) {
-    native_nr_handle_failure_logged_ = true;
-    nr::Log(nr::LogLevel::WARN, "Native DLSS-NR handle evaluate failed; Uplift restored its inputs and left the original output unchanged");
-  }
-  if (result.nr_applied && !native_nr_handle_logged_) {
-    native_nr_handle_logged_ = true;
-    nr::Log(nr::LogLevel::INFO, "NR trigger: game-owned native DLSS-NR handle ran at Uplift work size; its change was composited over original Color");
-  }
+  if (result.nr_applied) native_nr_frame_.native_applied = true;
   return result;
 }
 
@@ -521,32 +701,78 @@ sources::PipelineResult DeviceContext::OnDlssEvaluate(const ngx_hooks::DlssFrame
     return {.reason = nr::SkipReason::DEVICE_REMOVED};
   }
   NoteDlssFeature(frame.serial);
-  if (settings_.uplift_after_native_nr || settings_.replace_native_nr || settings_.native_nr_handle_mode) return {.reason = nr::SkipReason::NONE};
   const std::optional<bool> before_reset = std::exchange(before_reset_, std::nullopt);  // this evaluate's, from BeforeDlssEvaluate
-  const ngx_hooks::MotionJitterOffset jitter = present_jitter_.Update(frame);
+  if (native_nr_frame_.DeferOrdinaryDlss(ui::UsesNativeNrGameList(settings_.native_nr_mode),
+                                           native_nr_feature_live_)) return {.reason = nr::SkipReason::NONE};
   sources::DlssRecordingBatch recording_host(host, settings_.restore);
   // Copy the game's motion vectors on its list for the present that closes this frame: with Source = Present, and (split
   // chain) for a later group at Present.
   const auto copy_present_inputs = [&]() -> sources::PipelineResult {
     ID3D12GraphicsCommandList* const list = recording_host.NativeList();
-    const bool wants_motion = settings_.motion_vectors && frame.motion_vectors != nullptr;
-    const bool wants_depth = !PresentFoveated() && frame.depth != nullptr;
-    if ((!wants_motion && !wants_depth) || PresentWorkSkip() != nr::SkipReason::NONE
-        || session_->State() != nr::SessionState::ACTIVE || list == nullptr
-        || !recording_host.StateKnown() || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+    sources::PresentDlssProducer::Inputs wanted{.motion = settings_.motion_vectors && frame.motion_vectors != nullptr,
+                                                .depth = !PresentFoveated() && frame.depth != nullptr};
+    if (PresentWorkSkip() != nr::SkipReason::NONE || session_->State() != nr::SessionState::ACTIVE) {
       return {.reason = nr::SkipReason::NOT_AFTER_DLSS};
     }
+    if (!bridged_) {
+      const nr::Rect region = frame.output_region;  // unknown active coverage is not evidence of a full-frame output
+      nr::Size output;
+      const nr::Size extent = present_dlss_producer_.Extent();
+      if (frame.output != nullptr && region.x == 0u && region.y == 0u && nr::Size{region.width, region.height} == extent) {
+        const auto desc = frame.output->GetDesc();
+        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.Width <= UINT32_MAX
+            && desc.DepthOrArraySize == 1u && desc.SampleDesc.Count == 1u) {
+          output = {static_cast<uint32_t>(desc.Width), desc.Height};
+        }
+      }
+      const uint64_t present_frame = timeline_->CurrentFrame() + 1u;
+      using Capture = sources::PresentDlssProducer::Capture;
+      const auto decision = present_dlss_producer_.Observe(present_frame, frame.serial, reinterpret_cast<uintptr_t>(frame.output),
+                                                          sources::CoversPresent(region, output, extent), frame.reset, wanted);
+      if (nr::IsLogEnabled(nr::LogLevel::TRACE)) {
+        auto& trace = present_capture_trace_;
+        if (trace.since == std::chrono::steady_clock::time_point{}) trace.since = now;
+        ++trace.decisions[static_cast<size_t>(decision)];
+        if ((decision == Capture::NOT_FULL_FRAME || decision == Capture::UNSELECTED) && trace.sample.empty()) {
+          trace.sample = std::format("frame={} serial={} output={} region={},{} {}x{} present={}x{} reason={}",
+              present_frame, frame.serial, static_cast<const void*>(frame.output), region.x, region.y, region.width, region.height,
+              extent.width, extent.height, decision == Capture::NOT_FULL_FRAME ? "non-full-frame" : "unselected");
+        }
+      }
+      if (decision != Capture::RECORD) return {.reason = nr::SkipReason::NOT_AFTER_DLSS};
+    }
+    if (!bridged_) wanted = present_dlss_producer_.Pending(wanted);
+    if ((!wanted.motion && !wanted.depth) || list == nullptr || !recording_host.StateKnown() || list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+      return {.reason = nr::SkipReason::NOT_AFTER_DLSS};
+    }
+    ngx_hooks::MotionJitterOffset jitter;
+    if (wanted.motion) {
+      const uint64_t frame_number = timeline_->CurrentFrame() + 1u;
+      if (bridged_) {
+        jitter = present_jitter_.Update(frame);
+      } else {
+        if (present_jitter_frame_ != frame_number) {
+          if (present_jitter_frame_ + 1u != frame_number) present_jitter_.Reset();
+          present_jitter_offset_ = present_jitter_.Update(frame);
+          present_jitter_frame_ = frame_number;
+        }
+        jitter = present_jitter_offset_;
+      }
+    }
+    sources::PresentDlssProducer::Inputs copied_inputs;
     const sources::PipelineResult copied = sources::RecordOnGameList(recording_host, *timeline_, settings_.restore, [&](uint64_t token) {
       auto producer = timeline_->TrackSubmission(token);
       auto& pipeline = present_source_->Pipeline();
-      const bool depth = wants_depth && pipeline.RecordDepthCopy(list, {.resource = frame.depth, .rect = frame.depth_region},
+      copied_inputs.depth = wanted.depth && pipeline.RecordDepthCopy(list, {.resource = frame.depth, .rect = frame.depth_region},
           settings_.depth_inverted.value_or(frame.snapshot.DepthInverted()), producer);
-      const bool motion = wants_motion && pipeline.RecordMotionCopy(list, {.resource = frame.motion_vectors, .rect = frame.motion_region},
+      copied_inputs.motion = wanted.motion && pipeline.RecordMotionCopy(list, {.resource = frame.motion_vectors, .rect = frame.motion_region},
           frame.mv_scale_x * settings_.motion_scale_x, frame.mv_scale_y * settings_.motion_scale_y, facts_.dlss_motion_upside_down,
           jitter.x * static_cast<float>(frame.motion_region.width) * settings_.motion_scale_x,
           jitter.y * static_cast<float>(frame.motion_region.height) * settings_.motion_scale_y, producer);
-      return sources::PipelineResult{.recorded = depth || motion};
+      return sources::PipelineResult{.recorded = copied_inputs.depth || copied_inputs.motion};
     });
+    // A duplicate can supply a missing guide without overwriting the other, already recorded guide.
+    if (!bridged_) present_dlss_producer_.Captured(copied_inputs);
     if (copied.recorded) last_game_list_recording_ = now;
     return copied;
   };
@@ -590,6 +816,7 @@ sources::PipelineResult DeviceContext::RecordAfterDlss(const ngx_hooks::DlssFram
   // Honour every game reset; successive frames can both start new history.
   const bool reset = before_reset.value_or(frame.reset);
   const sources::PipelineResult result = after_dlss_->Run(host, frame, reset, DlssConfig(layout, group));
+  if (result.nr_applied) native_nr_frame_.ordinary_dlss_applied = true;
   if (result.recorded) {
     last_game_list_recording_ = now;
     last_dlss_token_ = result.token;  // marked if the chain splits before its work is done
@@ -658,7 +885,15 @@ void DeviceContext::ApplyLookConfig(std::chrono::steady_clock::time_point now, u
   present_source_->Pipeline().SetLookConfig(GroupLookConfig(settings_, chain_, group, shaped, frame_seconds));
 }
 
-void DeviceContext::UpdateChain() {
+void DeviceContext::UpdateChain(std::optional<Placement> exclusive) {
+  if (exclusive != exclusive_chain_) {
+    // Even when the stage stays the same, native and ordinary recordings see different signals.
+    pre_sr_->OweReset();
+    after_dlss_->OweReset();
+    present_reset_owed_ = true;
+    native_nr_reset_owed_ = true;
+    exclusive_chain_ = exclusive;
+  }
   // Why each stage cannot run now.
   const std::string_view dlss_cause = DlssCause(dlss_unavailable_reason_, dlss_seen_, DlssStagesOff(dlss_off_.Off(), core_hold_.Held()));
   ChainFacts facts = {
@@ -697,10 +932,8 @@ void DeviceContext::UpdateChain() {
     present_cause = (frame_generation_on ? FRAME_GEN_QUEUE_REASON : OTHER_QUEUE_REASON);
   }
   facts.cannot[static_cast<size_t>(Stage::PRESENT)] = LaterPresentCause(facts_.fg_present_path, present_cause);
-  // Native NR is the exclusive execution point for all passes, independent of stored Source/pass-stage choices.
-  ChainPlan chain = (settings_.replace_native_nr || settings_.uplift_after_native_nr || settings_.native_nr_handle_mode)
-                        ? DecideChain({.pass1 = Placement::AFTER_DLSS, .passes = settings_.session.pass_count})
-                        : DecideChain(facts);
+  // The native path and its Present fallback each run one full group, never a stored split.
+  ChainPlan chain = exclusive ? DecideChain({.pass1 = *exclusive, .passes = settings_.session.pass_count}) : DecideChain(facts);
 
   LogChainChange(chain, chain_);
   const std::array<bool, STAGE_COUNT> reset = StagesToReset(chain, chain_);
@@ -787,7 +1020,8 @@ sources::AfterDlssConfig DeviceContext::DlssConfig(const sources::WorkLayout& la
 ID3D12Resource* DeviceContext::BeforeDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                                   std::chrono::steady_clock::time_point now) {
   if (torn_down_ || device_lost_ || NoteDeviceRemoved(now)) return nullptr;
-  if (settings_.uplift_after_native_nr || settings_.replace_native_nr || settings_.native_nr_handle_mode) return nullptr;
+  if (native_nr_frame_.DeferOrdinaryDlss(ui::UsesNativeNrGameList(settings_.native_nr_mode),
+                                           native_nr_feature_live_)) return nullptr;
   NoteDlssFeature(frame.serial);
   if (placement_.placement != Placement::BEFORE_UPSCALING || dlss_idle_) return nullptr;
   frame_size_ = {frame.color_region.width, frame.color_region.height};
@@ -805,6 +1039,7 @@ sources::PipelineResult DeviceContext::RecordBeforeUpscaling(const ngx_hooks::Dl
   ApplyLookConfig(now, 0u);  // Before upscaling is always pass 1's group
   const bool reset = frame.reset;
   const sources::PipelineResult result = pre_sr_->Run(host, frame, reset, DlssConfig(layout, 0u));
+  if (result.nr_applied) native_nr_frame_.ordinary_dlss_applied = true;
   if (chain_.Split()) {
     before_reset_ = reset;  // the After DLSS group behind it in this evaluate takes the same answer
   }
@@ -999,8 +1234,8 @@ void DeviceContext::StampThread(uint32_t thread_id, bool later_call) {
 }
 
 void DeviceContext::UpdateSession(std::chrono::steady_clock::time_point now) {
-  const bool dlss_placement =
-      (placement_.placement == Placement::AFTER_DLSS || placement_.placement == Placement::BEFORE_UPSCALING);
+  const Placement effective = exclusive_chain_.value_or(placement_.placement);
+  const bool dlss_placement = IsDlssStage(effective);
   const bool was_idle = dlss_idle_;
   dlss_idle_ = (dlss_placement && last_main_evaluate_.has_value()
                 && now - *last_main_evaluate_ > std::max(2 * settings_.session.grace, DLSS_IDLE_MINIMUM));
@@ -1018,7 +1253,8 @@ void DeviceContext::UpdateSession(std::chrono::steady_clock::time_point now) {
     }
   }
   const bool placement_ready =
-      (dlss_placement ? (!dlss_idle_ || later_present) : (placement_.placement == Placement::PRESENT && encoding_.has_value()));
+      (dlss_placement ? (exclusive_chain_.has_value() || !dlss_idle_ || later_present)
+                      : (effective == Placement::PRESENT && encoding_.has_value()));
   // Never while held after the game's NGX shutdown (no NGX call on this device until its DLSS starts again), at any placement.
   const bool want = (settings_.session.enabled && facts_.nr_allowed && blocked_reason_.empty() && placement_ready && !core_hold_.Held());
   if (nr::IsLogEnabled(nr::LogLevel::TRACE) && settings_.session.enabled
@@ -1039,7 +1275,7 @@ void DeviceContext::UpdateSession(std::chrono::steady_clock::time_point now) {
   // auto-resume"). DRAINING alone is not suspended.
   // The core-shutdown hold always takes priority so no suspension can auto-resume NR before the game's DLSS returns.
   const bool idle_only =
-      (settings_.session.enabled && facts_.nr_allowed && blocked_reason_.empty() && dlss_placement && dlss_idle_ && !later_present && !core_hold_.Held());
+      (settings_.session.enabled && facts_.nr_allowed && blocked_reason_.empty() && dlss_placement && !exclusive_chain_ && dlss_idle_ && !later_present && !core_hold_.Held());
   if (!(idle_only && session_->Status().suspended)) {
     session_->SetEnabled(want);
   }

@@ -228,7 +228,7 @@ void Composer() {
   std::cout << "PASS D3D12 FG-off tags, settle, command-list rotation and GPU opacity composition\n";
 
   // The overlay reads Status after BeginFrame, following the native-NR evaluate on the game list.
-  for (const auto source : {ui::PlacementSource::AUTO, ui::PlacementSource::DLSS, ui::PlacementSource::PRESENT}) {
+  for (const auto placement_source : {ui::PlacementSource::AUTO, ui::PlacementSource::DLSS, ui::PlacementSource::PRESENT}) {
   for (const bool replacing : {true, false}) {
     auto context = addon::DeviceContext::Create(device.Get(), {}, &error, {.host = std::make_unique<testing::IdentityHost>()});
     Check(context != nullptr, error.c_str());
@@ -236,8 +236,7 @@ void Composer() {
     settings.source = ui::PlacementSource::PRESENT;
     settings.session.enabled = true;
     settings.encoding = color::Encoding::LINEAR_BT709;
-    settings.replace_native_nr = replacing;
-    settings.uplift_after_native_nr = !replacing;
+    settings.native_nr_mode = replacing ? ui::NativeNrMode::REPLACE : ui::NativeNrMode::AFTER;
     settings.resolution = ui::ResolutionMode::CUSTOM;
     settings.resolution_scale = 50;
     settings.resolution_asymmetric = true;
@@ -280,9 +279,10 @@ void Composer() {
     const ngx_hooks::DlssFrame frame = {.color = image.Get(), .output = image.Get(),
         .color_region = {0u, 0u, target.size.width, target.size.height}, .output_region = {0u, 0u, target.size.width, target.size.height}};
     static_cast<void>(context->OnDlssEvaluate(frame, host, std::chrono::steady_clock::now()));
-    settings.source = source;
+    settings.source = placement_source;
     begin();
-    const auto recorded = context->OnNativeNrEvaluate(frame, host, std::chrono::steady_clock::now(), replacing);
+    const auto recorded = context->OnNativeNrEvaluate(frame, host, std::chrono::steady_clock::now(),
+        replacing ? addon::NativeNrPath::REPLACE : addon::NativeNrPath::AFTER);
     Check(recorded.nr_applied && recorded.passes_run == 1u, "native NR test did not record a frame");
     execute(0u);
     context->SubmitTokens(host.tokens, queue.Get(), GetCurrentThreadId(), std::chrono::steady_clock::now());
@@ -300,16 +300,17 @@ void Composer() {
           "native NR runtime and timing stage differ from the reported execution stage");
     begin();
     // Ordinary DLSS placements retain their last evaluate; Present reports each frame afresh.
-    if (source == ui::PlacementSource::PRESENT) {
+    if (placement_source == ui::PlacementSource::PRESENT) {
       Check(!context->Status().nr_applied, "native NR stayed live after a Present frame with no evaluate");
     }
     host.known = false;
-    const auto skipped = context->OnNativeNrEvaluate(frame, host, std::chrono::steady_clock::now(), replacing);
+    const auto skipped = context->OnNativeNrEvaluate(frame, host, std::chrono::steady_clock::now(),
+        replacing ? addon::NativeNrPath::REPLACE : addon::NativeNrPath::AFTER);
     Check(!skipped.nr_applied && skipped.reason == nr::SkipReason::LIST_STATE_UNKNOWN, "native NR skip was not exercised");
     begin();
     Check(!context->Status().nr_applied && context->Status().skip_reason == nr::SkipReason::LIST_STATE_UNKNOWN,
           "Present discarded the native NR skip reason");
-    settings.replace_native_nr = settings.uplift_after_native_nr = false;
+    settings.native_nr_mode = ui::NativeNrMode::OFF;
     settings.source = ui::PlacementSource::PRESENT;
     begin();
     Check(context->Status().groups[0].stage == addon::Stage::PRESENT, "normal execution stage was not restored");

@@ -46,10 +46,6 @@ constexpr std::array<std::string_view, 4> FG_PRESETS = {"Game", "A", "B", "C"};
 constexpr std::array<std::string_view, 6> FG_MULTIPLIERS = {"Game", "2x", "3x", "4x", "5x", "6x"};
 constexpr std::array<std::string_view, 4> REFLEX_MODES = {"Game", "On", "Boost", "Off"};
 constexpr std::array<std::string_view, 4> RR_PRESETS = {"Game", "D", "E", "F"};
-// The two create-time DLSS-SR overrides (hidden rows, kept for the ini and for a later page).
-constexpr std::array<std::string_view, 7> QUALITY_MODES = {"Game", "Performance", "Balanced", "Quality",
-                                                          "Ultra Performance", "Ultra Quality", "DLAA"};
-constexpr std::array<std::string_view, 3> AUTO_EXPOSURE = {"Game", "Off", "On"};
 constexpr std::array<std::string_view, 6> ENCODINGS = {"Auto", "Linear BT.709", "sRGB", "BT.2100 PQ", "scRGB", "scRGB-nl"};
 constexpr std::array<std::string_view, 3> DEPTH_DIRECTIONS = {"Game", "Normal", "Inverted"};
 constexpr std::array<std::string_view, 2> STATE_RESTORE_MODES = {"Full", "Minimal"};
@@ -108,7 +104,6 @@ using setting_flags::KEEP_FACES_HERE;
 using setting_flags::KEEP_FACES_OWN;
 using setting_flags::KEEP_FACES_ROW;
 using setting_flags::KEEP_FACES_TUNING;
-using setting_flags::NEXT_DLSS_CREATE;
 using setting_flags::NEXT_START;
 using setting_flags::NETWORK_PRESET;
 using setting_flags::PASS_STAGE;
@@ -129,6 +124,12 @@ Enum FromIndex(double value) {
 
 double Flag(bool value) {
   return (value ? 1.0 : 0.0);
+}
+
+void SetNativeNrMode(Settings& settings, NativeNrMode mode, double value) {
+  // The last true row in schema order still wins. False only clears its own mode.
+  if (value != 0.0) settings.native_nr_mode = mode;
+  else if (settings.native_nr_mode == mode) settings.native_nr_mode = NativeNrMode::OFF;
 }
 
 // The rows' `hidden` conditions: each is true while the choice that makes its row matter has not been made.
@@ -1031,36 +1032,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .get = [](const Settings& s) { return static_cast<double>(s.dlss_render_scale[5]); },
         .set = [](Settings& s, double v) { s.dlss_render_scale[5] = static_cast<uint32_t>(v); },
     },
-    // The two DLSS-SR create overrides are hidden: applying them means the game has to recreate its DLSS feature,
-    // so Uplift does not apply them and the game's own choices stand. The INI keys stay readable so an existing
-    // config keeps loading.
-    {
-        .key = "DLSSQualityMode",
-        .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
-        .label = "DLSS quality mode",
-        .tooltip = "The quality mode Uplift asks the game's next DLSS-SR feature to be created with, which is the render "
-                   "resolution everything else works from. Lands when the game creates its DLSS again: toggle DLSS in the "
-                   "game, or change its quality there, or change the resolution. It cannot change a DLSS feature that "
-                   "already exists. Game keeps the game's choice.",
-        .choices = QUALITY_MODES,
-        .flags = setting_flags::NEXT_DLSS_CREATE,
-        .get = [](const Settings& s) { return Index(s.dlss_quality_mode); },
-        .set = [](Settings& s, double v) { s.dlss_quality_mode = FromIndex<DlssQualityOverride>(v); },
-    },
-    {
-        .key = "DLSSAutoExposure",
-        .kind = SettingKind::CHOICE,
-        .section = SettingSection::HIDDEN,
-        .label = "DLSS auto-exposure",
-        .tooltip = "Forces DLSS-SR's auto-exposure on or off when the game creates its DLSS feature again (toggle DLSS in "
-                   "the game, or change its quality). It cannot change a DLSS feature that already exists. Game keeps the "
-                   "game's own flag.",
-        .choices = AUTO_EXPOSURE,
-        .flags = setting_flags::NEXT_DLSS_CREATE,
-        .get = [](const Settings& s) { return Index(s.dlss_auto_exposure); },
-        .set = [](Settings& s, double v) { s.dlss_auto_exposure = FromIndex<AutoExposureOverride>(v); },
-    },
     // The DLSS-FG model preset (2026-10-25, addon/fg_preset.hpp): one choice, applied by rewriting the
     // game's driver-settings read for the FG preset id after the driver answered -- so it also beats a
     // NVIDIA App override. The provider caches its first read, hence the restart.
@@ -1656,7 +1627,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .hidden = KeepFacesOrFillOff,
     },
     {
-        // The unpublished FaceSpeckFilter Boolean has no migration; this size setting is the persisted control.
         .key = "FaceSpeckSize",
         .kind = SettingKind::UINT,
         .section = SettingSection::ADVANCED,
@@ -1715,14 +1685,10 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .key = "OverrideNativeNrParameters",
         .kind = SettingKind::BOOL,
         .section = SettingSection::ADVANCED,
-        .label = "Use panel controls and resolution for the game's DLSS-NR",
-        .tooltip = "While Enabled is on, overrides the game's DLSS-NR Style, Intensity, Local Tone, Local Structure, Skin Structure and Auto Mask. Custom resolution, edge compression and upsampling are applied around the same game-owned NR handle when its inputs are safe; otherwise only parameters are overridden and the native evaluate runs unchanged. No extra Uplift NR runs. Mutually exclusive with After and Replace.",
-        .get = [](const Settings& s) { return Flag(s.override_native_nr_parameters || s.native_nr_handle_mode); },
-        .set = [](Settings& s, double v) {
-          s.override_native_nr_parameters = (v != 0.0);
-          s.native_nr_handle_mode = (v != 0.0);
-          if (s.override_native_nr_parameters) s.uplift_after_native_nr = s.replace_native_nr = false;
-        },
+        .label = "Use panel controls for the game's DLSS-NR",
+        .tooltip = "While Enabled is on, overrides the game's DLSS-NR Style, Intensity, Local Tone, Local Structure, Skin Structure and Auto Mask. No extra Uplift NR runs. Mutually exclusive with After and Replace.",
+        .get = [](const Settings& s) { return Flag(s.native_nr_mode == NativeNrMode::PARAMETERS); },
+        .set = [](Settings& s, double v) { SetNativeNrMode(s, NativeNrMode::PARAMETERS, v); },
     },
     {
         .key = "UpliftAfterNativeNr",
@@ -1730,11 +1696,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::ADVANCED,
         .label = "Run Uplift NR after the game's DLSS-NR",
         .tooltip = "Runs Uplift NR on the same tracked D3D12 command list after successful native DLSS-NR evaluation. This is an exclusive execution point and does not require DLSS Frame Generation.",
-        .get = [](const Settings& s) { return Flag(s.uplift_after_native_nr); },
-        .set = [](Settings& s, double v) {
-          s.uplift_after_native_nr = (v != 0.0);
-          if (s.uplift_after_native_nr) s.override_native_nr_parameters = s.replace_native_nr = s.native_nr_handle_mode = false;
-        },
+        .get = [](const Settings& s) { return Flag(s.native_nr_mode == NativeNrMode::AFTER); },
+        .set = [](Settings& s, double v) { SetNativeNrMode(s, NativeNrMode::AFTER, v); },
     },
     {
         .key = "ReplaceNativeNr",
@@ -1742,29 +1705,8 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .section = SettingSection::ADVANCED,
         .label = "Replace the game's DLSS-NR with Uplift NR",
         .tooltip = "At the native DLSS-NR evaluate hook, read the game's Color and write its Output, including separate resources with matching active extents. Uses safe native Depth, Motion, Control Mask and UI inputs when available; missing or unusable optional inputs bind null. Supports Custom resolution, foveated edges and upsampling. Skips the native call only after Uplift succeeds; otherwise native NR runs normally.",
-        .get = [](const Settings& s) { return Flag(s.replace_native_nr); },
-        .set = [](Settings& s, double v) {
-          s.replace_native_nr = (v != 0.0);
-          if (s.replace_native_nr) s.override_native_nr_parameters = s.uplift_after_native_nr = s.native_nr_handle_mode = false;
-        },
-    },
-    {
-        .key = "NativeNrHandleMode",
-        .kind = SettingKind::BOOL,
-        .section = SettingSection::ADVANCED,
-        .label = "Keep the game's DLSS-NR handle and resize its inputs",
-        .tooltip = "Runs the game's own NR handle at Uplift's work resolution: resamples Color and supported guides before the original evaluate, then upsamples that handle's Output to the original Output. Requires a tracked Direct3D 12 list and compatible game handle; handles that alias Color and Output bypass resizing and run natively. Uplift NR is not run.",
-        .get = [](const Settings& s) { return Flag(s.native_nr_handle_mode); },
-        .set = [](Settings& s, double v) {
-          // Retain the old config key as an alias so existing profiles migrate to the merged option.
-          if (v != 0.0) {
-            s.native_nr_handle_mode = true;
-            s.override_native_nr_parameters = true;
-            s.uplift_after_native_nr = s.replace_native_nr = false;
-          } else {
-            s.native_nr_handle_mode = false;
-          }
-        },
+        .get = [](const Settings& s) { return Flag(s.native_nr_mode == NativeNrMode::REPLACE); },
+        .set = [](Settings& s, double v) { SetNativeNrMode(s, NativeNrMode::REPLACE, v); },
     },
     {
         // Native by default, the private Direct3D 12 device as the fallback and as a choice. Uplift's helper process
@@ -1865,17 +1807,6 @@ const auto BASE_ROWS = std::to_array<SettingDescriptor>({
         .flags = BOOKKEEPING,
         .get = [](const Settings& s) { return Flag(s.dlss_placement_blocked); },
         .set = [](Settings& s, double v) { s.dlss_placement_blocked = (v != 0.0); },
-    },
-    {
-        .key = "ConfigVersion",
-        .kind = SettingKind::UINT,
-        .section = SettingSection::HIDDEN,
-        .label = "Settings version",
-        .min = 1.0,
-        .max = 65535.0,
-        .flags = BOOKKEEPING,
-        .get = [](const Settings& /*s*/) { return static_cast<double>(CONFIG_VERSION); },
-        .set = [](Settings& s, double v) { s.config_version = static_cast<uint32_t>(v); },
     },
 });
 

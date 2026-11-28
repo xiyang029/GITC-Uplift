@@ -141,9 +141,7 @@ uint64_t NrPipeline::HeldBytes() const {
   for (const StageSet& set : sets_) {
     sets += (set.intermediates.model_a ? set.intermediates.bytes : 0u) + set.look.bytes + (set.exposure.state ? METER_STATE_BYTES : 0u) + set.faces.bytes;
   }
-  uint64_t native_handle = 0u;
-  for (const auto& surfaces : native_handle_surfaces_) if (surfaces) native_handle += surfaces->bytes;
-  return sets + copies + depth + launchpad + ring + mask_.bytes + native_handle;
+  return sets + copies + depth + launchpad + ring + mask_.bytes;
 }
 
 bool NrPipeline::SupportsUavTarget(DXGI_FORMAT format) const {
@@ -232,11 +230,12 @@ void NrPipeline::RetireLaunchpadMotion() { RetireHeld(launchpad_motion_); }
 void NrPipeline::RetireDlssPresentMotion() { RetireHeld(dlss_present_motion_); }
 
 void NrPipeline::RetireLook(StageSet* set) {
-  if (set->look.plan == LookPlan{}) return;
-  if (!timeline_.IsComplete(set->look.last_use)) {
-    timeline_.ReleaseAfter(set->look.last_use, [retired = set->look] {});
+  auto& surfaces = set->look;
+  if (surfaces.plan == LookPlan{}) return;
+  if (!timeline_.IsComplete(surfaces.last_use)) {
+    timeline_.ReleaseAfter(surfaces.last_use, [retired = surfaces] {});
   }
-  set->look = {};
+  surfaces = {};
 }
 
 void NrPipeline::RetireFaces(StageSet* set) {
@@ -461,9 +460,10 @@ LookPlan NrPipeline::LookPlanFor(nr::Size image) const {
 }
 
 bool NrPipeline::EnsureLook(const LookPlan& plan) {
+  auto& surfaces = set_->look;
   const look::Atlas atlas = plan.shape ? look::MakeAtlas(plan.image) : look::Atlas{};
   const nr::Size history_size = plan.stabilize ? look::LowHistorySize(atlas, config_.look.detail_radius) : nr::Size{};
-  if (plan == set_->look.plan && history_size == set_->look.history_size) return true;
+  if (plan == surfaces.plan && history_size == surfaces.history_size) return true;
   RetireLook(set_);
   if (plan == LookPlan{}) return true;
   LookSurfaces created = {.plan = plan, .history_size = history_size, .atlas = atlas};
@@ -497,7 +497,7 @@ bool NrPipeline::EnsureLook(const LookPlan& plan) {
     return false;  // `created` was never used by the GPU: freed here
   }
   allocation_failure_logged_ = false;
-  set_->look = std::move(created);
+  surfaces = std::move(created);
   return true;
 }
 
@@ -663,16 +663,17 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
                                               ID3D12Resource* nr_output, uint32_t passes_run, bool reduced, bool look_ready,
                                               color::Upsampling upsampling, const color::StabilizeMotion& motion, bool reset,
                                               std::optional<ChangeStabilizeInput> change_input) {
-  if (set_->look.plan != LookPlan{}) {
-    set_->look.last_use = slot_marks_[slot];
+  LookSurfaces& look_surfaces = set_->look;
+  if (look_surfaces.plan != LookPlan{}) {
+    look_surfaces.last_use = slot_marks_[slot];
   }
   ID3D12Resource* const change = set_->intermediates.change.Get();
   if (change == nullptr) {
     return {.texture = nr_output, .fused = true,
             .model_input = passes_run == 1u ? set_->intermediates.model_a.Get() : nullptr};
   }
-  const bool shape = (look_ready && set_->look.plan.shape);
-  ID3D12Resource* const basis = (shape ? set_->look.basis.Get() : nullptr);
+  const bool shape = (look_ready && look_surfaces.plan.shape);
+  ID3D12Resource* const basis = (shape ? look_surfaces.basis.Get() : nullptr);
   // 1. NR's change field and, for the look, NR's input chroma κ_M.
   Transition(list, change, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   if (basis != nullptr) {
@@ -680,7 +681,7 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
   }
   // A still holds the original FP16 input after one pass; later passes overwrite it through ping-pong.
   const bool changed = color_.RecordChange(list, slot, {.encode = encode, .nr_output = nr_output, .change = change, .basis = basis,
-                                                       .model_input = (passes_run == 1u ? set_->intermediates.model_a.Get() : nullptr)});
+                                                       .model_input = passes_run == 1u ? set_->intermediates.model_a.Get() : nullptr});
   Transition(list, change, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   if (basis != nullptr) {
     Transition(list, basis, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
@@ -689,10 +690,10 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
   AfterNr after = {.texture = change, .upsampling = (reduced ? std::optional{upsampling} : std::nullopt)};
   if (shape) {
     // 2. The pyramids.
-    const look::Atlas& atlas = set_->look.atlas;
+    const look::Atlas& atlas = look_surfaces.atlas;
     const look::Bands bands = look::MakeBands(config_.look.detail_radius, atlas.image.height, atlas.levels);
-    ID3D12Resource* const gauss = set_->look.gauss.Get();
-    ID3D12Resource* const peaks = set_->look.peaks.Get();
+    ID3D12Resource* const gauss = look_surfaces.gauss.Get();
+    ID3D12Resource* const peaks = look_surfaces.peaks.Get();
     Transition(list, gauss, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     Transition(list, peaks, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     color_.RecordPyramid(list, slot, {.change = change, .gauss = gauss, .peaks = peaks, .atlas = atlas});
@@ -701,32 +702,32 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
     // 3. The stabiliser: the two levels the low band reads, then the fine band.
     ID3D12Resource* history = nullptr;
     ID3D12Resource* detail = nullptr;
-    if (set_->look.plan.stabilize) {
-      const uint32_t current = set_->look.current;
-      ID3D12Resource* const state = set_->look.state.Get();
-      history = set_->look.history[current].Get();
+    if (look_surfaces.plan.stabilize) {
+      const uint32_t current = look_surfaces.current;
+      ID3D12Resource* const state = look_surfaces.state.Get();
+      history = look_surfaces.history[current].Get();
       color::StabilizePass stabilize = {
-          .gauss = gauss, .previous = set_->look.history[1u - current].Get(), .current = history, .state = state, .atlas = atlas,
+          .gauss = gauss, .previous = look_surfaces.history[1u - current].Get(), .current = history, .state = state, .atlas = atlas,
           .bands = bands, .rate = look::StabilizeRate(config_.frame_seconds, config_.look.stabilize_ms),
-          .motion_mode = (config_.look.stabilize == look::StabilizeMode::MOTION), .reset = (reset || !set_->look.history_valid),
+          .motion_mode = (config_.look.stabilize == look::StabilizeMode::MOTION), .reset = (reset || !look_surfaces.history_valid),
           .motion = motion, .packed_history = true,
       };
       Transition(list, history, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
       Transition(list, state, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
       color_.RecordStabilize(list, slot, stabilize);
       Transition(list, history, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-      if (set_->look.plan.detail) {
-        detail = set_->look.detail_history[current].Get();
+      if (look_surfaces.plan.detail) {
+        detail = look_surfaces.detail_history[current].Get();
         stabilize.change = change;
-        stabilize.previous = set_->look.detail_history[1u - current].Get();
+        stabilize.previous = look_surfaces.detail_history[1u - current].Get();
         stabilize.current = detail;
         Transition(list, detail, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         color_.RecordDetail(list, slot, stabilize);
         Transition(list, detail, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
       }
       Transition(list, state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-      set_->look.current = 1u - current;
-      set_->look.history_valid = true;
+      look_surfaces.current = 1u - current;
+      look_surfaces.history_valid = true;
     }
     // 4. The shape pass rewrites C in place.
     Transition(list, change, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -739,22 +740,22 @@ NrPipeline::AfterNr NrPipeline::RecordAfterNr(ID3D12GraphicsCommandList* list, u
   //    residual stops shimmering where the network is unsure. It reads and writes the field the decode consumes,
   //    so the result is simply the other buffer of the pair, and the decode sees a field that has been through the
   //    same history as the picture it describes.
-  if (look_ready && set_->look.plan.change) {
-    const uint32_t current = set_->look.change_current;
-    ID3D12Resource* const stable = set_->look.change_history[current].Get();
+  if (look_ready && look_surfaces.plan.change) {
+    const uint32_t current = look_surfaces.change_current;
+    ID3D12Resource* const stable = look_surfaces.change_history[current].Get();
     const ChangeStabilizeInput history_input = change_input.value_or(ChangeStabilizeInput{.reset = reset});
-    const bool reset_history = history_input.reset || !set_->look.change_valid;
+    const bool reset_history = history_input.reset || !look_surfaces.change_valid;
     Transition(list, stable, COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     const bool recorded = color_.RecordChangeStabilize(list, slot,
-        {.change = change, .previous = set_->look.change_history[1u - current].Get(), .current = stable,
-         .image = set_->look.plan.image,
+        {.change = change, .previous = look_surfaces.change_history[1u - current].Get(), .current = stable,
+         .image = look_surfaces.plan.image,
          .rate = look::StabilizeRate(config_.frame_seconds, static_cast<float>(config_.look.stabilize_change_ms)),
          .reset = reset_history, .motion = history_input.reproject ? motion : color::StabilizeMotion{},
          .flat_denoise = change_input.has_value()});
     Transition(list, stable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    set_->look.change_valid = recorded;
+    look_surfaces.change_valid = recorded;
     if (recorded) {
-      set_->look.change_current = 1u - current;
+      look_surfaces.change_current = 1u - current;
       after.texture = stable;
     }
   }
@@ -914,24 +915,24 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   MotionSource motion_source = MotionSource::NONE;
   bool flip_y = false;
   uint64_t gpu_waits = 0u;
+  uint64_t older_gpu_waits = 0u;
   uint64_t gpu_wait_failures = 0u;
   std::array<uint64_t, MOTION_COPY_SLOTS> copy_frames = {};
   std::array<nr::Timeline::SubmissionStatus, MOTION_COPY_SLOTS> copy_status = {};
-  for (size_t index = 0u; index < MOTION_COPY_SLOTS; ++index) {
+  for (size_t index = 0u; index < motion_copies_.slots; ++index) {
+    if (motion_copies_.frames[index] == 0u) continue;
     copy_status[index] = timeline_.InspectSubmission(motion_copies_.producers[index].get(), timing_queue);
-    // Foveated warps cannot use a prior frame's vectors. If this is the exact copy for this Present and its
-    // producer fence has been signalled, order the consumer queue after it instead of dropping current-frame MV.
-    if (!copy_status[index].ordered && motion_copies_.frames[index] == frame) {
-      copy_status[index] = timeline_.PrepareSubmissionRead(motion_copies_.producers[index].get(), timing_queue);
-      gpu_waits += (copy_status[index].gpu_wait_enqueued ? 1u : 0u);
-      gpu_wait_failures += (copy_status[index].gpu_wait_failed ? 1u : 0u);
-    }
-    if (copy_status[index].ordered) {
-      copy_frames[index] = motion_copies_.frames[index];
-    }
+    if (copy_status[index].ordered) copy_frames[index] = motion_copies_.frames[index];
   }
-  // Foveation requires current-frame vectors; the uniform grid can reuse a recent copy.
-  const PresentMotionPick pick = PickPresentMotion(copy_frames, frame, foveated ? 0u : PRESENT_MOTION_MAX_AGE);
+  const PresentMotionPick pick = PickD3D12PresentMotion(motion_copies_.frames, copy_frames, frame, foveated, [&](size_t index) {
+    auto& status = copy_status[index];
+    if (!status.has_proof || status.replayed || status.fence == 0u) return false;
+    status = timeline_.PrepareSubmissionRead(motion_copies_.producers[index].get(), timing_queue);
+    gpu_waits += status.gpu_wait_enqueued;
+    older_gpu_waits += status.gpu_wait_enqueued && motion_copies_.frames[index] < frame;
+    gpu_wait_failures += status.gpu_wait_failed;
+    return status.ordered;
+  });
   const bool bridged_motion = target.dlss_motion.resource != nullptr && (!foveated || target.dlss_motion_age == 0u);
   if (pick.slot) {
     const size_t copy = *pick.slot;
@@ -1003,6 +1004,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
     PresentMotionCounters& counters = present_motion_counters_;
     ++counters.presents;
     counters.gpu_waits += gpu_waits;
+    counters.older_gpu_waits += older_gpu_waits;
     counters.gpu_wait_failures += gpu_wait_failures;
     if (!pick.slot) {
       ++counters.missed;
@@ -1012,7 +1014,10 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
       ++counters.older;
     }
     counters.age_max = std::max(counters.age_max, pick.age);
-    counters.resets += (inputs.reset_hint || motion_source != set_->present_motion ? 1u : 0u);
+    const bool provider_changed = motion_source != set_->present_motion;
+    counters.input_resets += inputs.reset_hint;
+    counters.provider_resets += provider_changed;
+    counters.resets += inputs.reset_hint || provider_changed;
     if (!pick.slot && counters.miss_sample.empty()) {
       std::string sample = std::format("present-frame={} foveated={} pick=none; bridge={} raw={} bridge-age={} launchpad={} final-source={}; exposure='{}' factor={} metered={} probe={}; slots=[",
           frame, foveated, bridged_motion, target.dlss_motion_raw, target.dlss_motion_age,
@@ -1031,13 +1036,17 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
       counters.miss_sample = std::move(sample);
     }
     const auto now = std::chrono::steady_clock::now();
+    // Keep the detailed reports responsive when motion falls back, but aggregate healthy intervals.
+    const bool motion_problem = counters.older != 0u || counters.missed != 0u || counters.skipped_input != 0u
+                             || counters.skipped_ring != 0u || counters.skipped_slot != 0u
+                             || counters.gpu_wait_failures != 0u || counters.resets != 0u;
     if (counters.since == std::chrono::steady_clock::time_point{}) {
       counters.since = now;
-    } else if (now - counters.since >= std::chrono::seconds(1)) {
-      nr::Logf(nr::LogLevel::TRACE, "Direct3D 12: Present motion: {} copy attempts for {} presents; {} copies, skipped {} (input) {} (ring slot) {} (no writable slot); {} writes redirected; presents bound {} own, {} older, {} none; max copy age {}, max GPU lag {}; {} producer GPU waits ({} failed); {} pipeline reset hints; latest jitter correction {} x {} px{}{}",
+    } else if (now - counters.since >= std::chrono::seconds(motion_problem ? 1 : 5)) {
+      nr::Logf(nr::LogLevel::TRACE, "Direct3D 12: Present motion: {} copy attempts for {} presents; {} copies, skipped {} (input) {} (ring slot) {} (no writable slot); {} writes redirected; presents bound {} own, {} older, {} none; max copy age {}, max GPU lag {}; {} producer GPU waits ({} failed); {} pipeline reset hints; latest jitter correction {} x {} px; older GPU waits {}; reset causes: input {}, provider {}{}{}",
                counters.evaluates, counters.presents, counters.copies, counters.skipped_input, counters.skipped_ring, counters.skipped_slot,
                counters.slot_redirects, counters.own, counters.older, counters.missed, counters.age_max, counters.lag_max, counters.gpu_waits, counters.gpu_wait_failures,
-               counters.resets, counters.offset_x, counters.offset_y,
+               counters.resets, counters.offset_x, counters.offset_y, counters.older_gpu_waits, counters.input_resets, counters.provider_resets,
                counters.miss_sample.empty() ? "" : "; miss sample: ", counters.miss_sample);
       counters = {.since = now};
     }
@@ -1079,7 +1088,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   const nr::EvaluateResult evaluated = Evaluate(list, slot, inputs, controls, part.slice, profile.Sample());
   if (evaluated.output == nullptr) {
     return {.recorded = true, .reason = evaluated.reason, .from_session = nr::SessionWroteMessage(evaluated.reason),
-            .motion_source = motion_source};
+            .motion_source = motion_source, .first_pass_reset = evaluated.first_pass_reset};
   }
   // 4. The change field and optional look stage.
   const auto change_input = set_->present_change_history.Advance(
@@ -1088,7 +1097,7 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   const AfterNr after = RecordAfterNr(list, slot, encode, evaluated.output, evaluated.passes_run, reduced, look_ready, work.upsampling,
                                       StabilizeMotionOf(inputs.motion, inputs.motion_scale_x, inputs.motion_scale_y), look_reset, change_input);
   if (!after.ok) {
-    return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source};
+    return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source, .first_pass_reset = evaluated.first_pass_reset};
   }
   // 5. The decode or compose through an RTV.
   Transition(list, after.texture, COMPUTE_READ, PIXEL_AND_COMPUTE_READ);
@@ -1109,9 +1118,12 @@ PipelineResult NrPipeline::RecordPresent(ID3D12GraphicsCommandList* list, const 
   Transition(list, target.resource, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
   Transition(list, after.texture, PIXEL_AND_COMPUTE_READ, COMPUTE_READ);
   if (after.model_input) Transition(list, after.model_input, PIXEL_AND_COMPUTE_READ, COMPUTE_READ);
-  if (!decoded) return {.recorded = true, .reason = nr::SkipReason::NO_TARGET_PIPELINE, .motion_source = motion_source};
+  if (!decoded) {
+    return {.recorded = true, .reason = nr::SkipReason::NO_TARGET_PIPELINE, .motion_source = motion_source,
+            .first_pass_reset = evaluated.first_pass_reset};
+  }
   return {.recorded = true, .nr_applied = true, .passes_run = evaluated.passes_run, .reason = evaluated.reason,
-          .from_session = nr::SessionWroteMessage(evaluated.reason), .motion_source = motion_source};
+          .from_session = nr::SessionWroteMessage(evaluated.reason), .motion_source = motion_source, .first_pass_reset = evaluated.first_pass_reset};
 }
 
 PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavTarget& target,
@@ -1175,12 +1187,9 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   if (slot == slot_marks_.size()) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
   const WorkLayout work = ResolveLayout(layout, size);
   const bool foveated = work.foveation.active();
-  const bool in_place = !separate_source && color_region.x == region.x && color_region.y == region.y
-      && description.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && description.DepthOrArraySize == 1u
-      && description.MipLevels == 1u && description.SampleDesc.Count == 1u
-      && (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0u
-      && (description.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0u
-      && format->source_view_format == format->uav_format && color_.CanDecodeInPlace(format->uav_format);
+  // A game-owned Color/Output alias must not be sampled and overwritten in the same UAV dispatch.
+  // The remote stable path always snapshots the input first; keeping that path here avoids driver-dependent
+  // frame-to-frame exposure/brightness changes when Uplift owns the NR call.
   const std::array native_inputs = {inputs.depth, inputs.control_mask, inputs.backbuffer, inputs.ui, inputs.ui_alpha};
   std::array<std::optional<NativeInputFormat>, 5> native_views;
   std::array<DXGI_FORMAT, 5> native_formats{};
@@ -1192,8 +1201,8 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   }
   if (const nr::SkipReason problem = EnsureIntermediates({
           .sizes = {.output = size, .image = work.image, .canvas = work.image},
-          .copy_format = in_place || separate_source ? DXGI_FORMAT_UNKNOWN : color_format->copy_format,
-          .source_bytes_per_pixel = in_place || separate_source ? 0u : color_format->bytes_per_pixel,
+          .copy_format = separate_source ? DXGI_FORMAT_UNKNOWN : color_format->copy_format,
+          .source_bytes_per_pixel = separate_source ? 0u : color_format->bytes_per_pixel,
           .kind = TargetKind::UAV,
           .canvas_motion = foveated,
           .foveation = work.foveation,
@@ -1213,10 +1222,8 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   const uint32_t options = ShaderOptions(config_.fixes);
   NoteMeterBasis(part.slice.stage, target.encoding, input_scale);
   const ExposureChoice exposure = ChooseExposure(target.encoding, target.exposure, target.exposure_factor);
-  ID3D12Resource* const source = separate_source ? color_input : in_place ? target.resource : set_->intermediates.source_copy.Get();
+  ID3D12Resource* const source = separate_source ? color_input : set_->intermediates.source_copy.Get();
 
-  // The typed load reads each target pixel just before that same thread writes it.
-  // Meter, encode and change use the resource as an SRV, before composition starts.
   struct RestoreOutput {
     ID3D12GraphicsCommandList* list;
     ID3D12Resource* resource;
@@ -1234,8 +1241,6 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   } restore_source{list, separate_source && target.source_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS ? color_input : nullptr};
   if (separate_source) {
     if (restore_source.resource != nullptr) Transition(list, color_input, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-  } else if (in_place) {
-    Transition(list, target.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
   } else {
     Transition(list, target.resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     Transition(list, source, COMPUTE_READ, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1249,7 +1254,7 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
     Transition(list, source, D3D12_RESOURCE_STATE_COPY_DEST, COMPUTE_READ);
     Transition(list, target.resource, D3D12_RESOURCE_STATE_COPY_SOURCE, restore.resource != nullptr ? COMPUTE_READ : D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   }
-  const nr::Rect copied = in_place || separate_source ? color_region : nr::Rect{.width = size.width, .height = size.height};
+  const nr::Rect copied = separate_source ? color_region : nr::Rect{.width = size.width, .height = size.height};
   nr::FrameInputs nr_inputs = inputs;
   nr::NativeInputReport report{.status = inputs.native_input_status, .foveated = foveated};
   // Direct pipeline clients need no capture metadata. Preserve an explicit rejection/disable reason.
@@ -1331,21 +1336,21 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   const nr::EvaluateResult evaluated = Evaluate(list, slot, nr_inputs, controls, part.slice, profile.Sample());
   if (evaluated.output == nullptr) {
     return {.recorded = true, .reason = evaluated.reason, .from_session = nr::SessionWroteMessage(evaluated.reason),
-            .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
+            .motion_source = motion_source, .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y, .first_pass_reset = evaluated.first_pass_reset};
   }
   // 4. The change field and optional look stage.
   const AfterNr after = RecordAfterNr(list, slot, encode, evaluated.output, evaluated.passes_run, reduced, look_ready, work.upsampling,
                                       StabilizeMotionOf(nr_inputs.motion, nr_inputs.motion_scale_x, nr_inputs.motion_scale_y), look_reset);
   if (!after.ok) {
     return {.recorded = true, .reason = nr::SkipReason::ENCODE_FAILED, .motion_source = motion_source,
-            .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
+            .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y, .first_pass_reset = evaluated.first_pass_reset};
   }
   // 5. The compute decode into the region, then a UAV barrier so the game's next reads see NR's result.
   restore.Now();
   const MaskBinding mask = BoundMask(slot, timing_host ? timing_host->SharedMask() : nullptr);
   const bool decoded = color_.RecordComputeDecode(
       list, slot,
-      {.source = in_place ? nullptr : source, .source_view_format = color_format->source_view_format, .nr_output = after.texture,
+      {.source = source, .source_view_format = color_format->source_view_format, .nr_output = after.texture,
        .target = target.resource, .target_uav_format = format->uav_format, .origin_x = region.x, .origin_y = region.y,
        .target_width = static_cast<uint32_t>(description.Width), .target_height = description.Height,
        .width = size.width, .height = size.height, .encoding = target.encoding, .input_scale = input_scale,
@@ -1358,11 +1363,11 @@ PipelineResult NrPipeline::RecordUav(ID3D12GraphicsCommandList* list, const UavT
   UavBarrier(list, target.resource);
   if (!decoded) {
     return {.recorded = true, .reason = nr::SkipReason::DECODE_FAILED, .motion_source = motion_source,
-            .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
+            .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y, .first_pass_reset = evaluated.first_pass_reset};
   }
   return {.recorded = true, .nr_applied = true, .passes_run = evaluated.passes_run, .reason = evaluated.reason,
           .from_session = nr::SessionWroteMessage(evaluated.reason), .motion_source = motion_source,
-          .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
+          .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y, .first_pass_reset = evaluated.first_pass_reset};
 }
 
 PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const UavTarget& color, const nr::FrameInputs& inputs,
@@ -1517,272 +1522,6 @@ PipelineResult NrPipeline::RecordPreSr(ID3D12GraphicsCommandList* list, const Ua
   return {.recorded = true, .nr_applied = true, .passes_run = evaluated.passes_run, .reason = evaluated.reason,
           .from_session = nr::SessionWroteMessage(evaluated.reason), .motion_source = motion_source,
           .motion_scale_x = inputs.motion_scale_x, .motion_scale_y = inputs.motion_scale_y};
-}
-
-PipelineResult NrPipeline::PrepareNativeNrHandle(DlssFrameHost& host, state::RestoreMode restore,
-                                                  const ngx_hooks::DlssFrame& frame, const WorkLayout& layout,
-                                                  NativeNrHandleWork* work) {
-  if (work == nullptr || frame.color == nullptr || frame.output == nullptr || !frame.native_nr || !frame.native_nr->enabled) {
-    return {.reason = nr::SkipReason::INVALID_INPUT};
-  }
-  ID3D12GraphicsCommandList* const list = host.NativeList();
-  if (list == nullptr || !host.StateKnown()) return {.reason = nr::SkipReason::LIST_STATE_UNKNOWN};
-  if (list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) return {.reason = nr::SkipReason::COMPUTE_QUEUE};
-
-  const D3D12_RESOURCE_DESC color_desc = frame.color->GetDesc();
-  const D3D12_RESOURCE_DESC output_desc = frame.output->GetDesc();
-  const nr::Rect input_region = frame.color_region;
-  const nr::Rect output_region = frame.output_region;
-  const bool color_output_alias = (frame.color == frame.output);
-  const nr::Size output_size{output_region.width, output_region.height};
-  const nr::Size image = (layout.image.Empty() ? output_size : layout.image);
-  if (input_region.width != output_size.width || input_region.height != output_size.height || image.Empty()
-      || !nr::MeetsNrFloor(image) || uint64_t{input_region.x} + input_region.width > color_desc.Width
-      || uint64_t{input_region.y} + input_region.height > color_desc.Height || uint64_t{output_region.x} + output_region.width > output_desc.Width
-      || uint64_t{output_region.y} + output_region.height > output_desc.Height
-      || color_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || output_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
-      || color_desc.DepthOrArraySize != 1u || output_desc.DepthOrArraySize != 1u || color_desc.SampleDesc.Count != 1u
-      || output_desc.SampleDesc.Count != 1u || (output_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0u) {
-    return {.reason = nr::SkipReason::INVALID_INPUT};
-  }
-  if (image == output_size && !layout.foveation.active()) return {.reason = nr::SkipReason::NONE};
-  if (!color_.NativeInputReady() || !color_.NativeCompositeReady()) return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
-  const auto color_format = color::DescribeUavFormat(color_desc.Format);
-  const auto output_format = color::DescribeUavFormat(output_desc.Format);
-  if (!color_format || !output_format || !color_.SupportsTypedUavStore(color_format->uav_format)
-      || !color_.SupportsTypedUavStore(output_format->uav_format)) {
-    return {.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
-  }
-  if (!frame.native_nr->color_state || (color_desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0u) {
-    return {.reason = nr::SkipReason::LIST_STATE_UNKNOWN};
-  }
-
-  const std::array<nr::BoundResource, 5> auxiliary = {
-      nr::BoundResource{frame.depth, frame.depth_region}, frame.native_nr->control_mask, frame.native_nr->backbuffer,
-      frame.native_nr->ui, frame.native_nr->ui_alpha};
-  std::array<std::optional<NativeInputFormat>, 5> auxiliary_formats;
-  std::array<DXGI_FORMAT, 5> auxiliary_views{};
-  std::array<DXGI_FORMAT, 5> auxiliary_uavs{};
-  for (size_t i = 0u; i < auxiliary.size(); ++i) {
-    auxiliary_formats[i] = NativeInputView(auxiliary[i], i == 0u);
-    if (auxiliary_formats[i] && color_.SupportsTypedUavStore(auxiliary_formats[i]->target)) {
-      auxiliary_views[i] = auxiliary_formats[i]->source;
-      auxiliary_uavs[i] = auxiliary_formats[i]->target;
-    }
-  }
-  const std::optional<DXGI_FORMAT> motion_view = (frame.motion_vectors != nullptr
-      ? MotionViewFormat(frame.motion_vectors->GetDesc().Format) : std::nullopt);
-  const bool remap_motion = motion_view.has_value() && frame.motion_region.width != 0u && frame.motion_region.height != 0u
-      && uint64_t{frame.motion_region.x} + frame.motion_region.width <= frame.motion_vectors->GetDesc().Width
-      && uint64_t{frame.motion_region.y} + frame.motion_region.height <= frame.motion_vectors->GetDesc().Height;
-
-  uint32_t descriptor_slots[2] = {UINT32_MAX, UINT32_MAX};
-  size_t found_slots = 0u;
-  for (uint32_t offset = 0u; offset < slot_marks_.size() && found_slots < 2u; ++offset) {
-    const uint32_t slot = (next_slot_ + offset) % static_cast<uint32_t>(slot_marks_.size());
-    if (timeline_.IsComplete(slot_marks_[slot])) descriptor_slots[found_slots++] = slot;
-  }
-  if (found_slots != 2u) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
-
-  size_t surface_index = native_handle_surfaces_.size();
-  for (size_t i = 0u; i < native_handle_surfaces_.size(); ++i) {
-    if (native_handle_surfaces_[i] && native_handle_surfaces_[i]->active) continue;
-    if (native_handle_surfaces_[i] && !timeline_.IsComplete(native_handle_surfaces_[i]->last_use)) continue;
-    surface_index = i;
-    break;
-  }
-  if (surface_index == native_handle_surfaces_.size()) return {.reason = nr::SkipReason::DESCRIPTORS_BUSY};
-
-  auto matches = [&](const std::shared_ptr<NativeHandleSurfaces>& held) {
-    if (!held || held->size != image || held->original_size != output_size || held->color_view != color_format->source_view_format
-        || held->color_uav != color_format->uav_format || held->output_view != output_format->source_view_format
-        || held->output_uav != output_format->uav_format || !held->color || !held->output || !held->baseline || !held->original
-        || held->color_output_alias != color_output_alias || static_cast<bool>(held->motion) != remap_motion) return false;
-    for (size_t i = 0u; i < auxiliary.size(); ++i) {
-      if (held->auxiliary_view[i] != auxiliary_views[i] || held->auxiliary_uav[i] != auxiliary_uavs[i]
-          || static_cast<bool>(held->auxiliary[i]) != (auxiliary_uavs[i] != DXGI_FORMAT_UNKNOWN)) return false;
-    }
-    return true;
-  };
-  auto& held = native_handle_surfaces_[surface_index];
-  if (!matches(held)) {
-    auto created = std::make_shared<NativeHandleSurfaces>();
-    created->size = image;
-    created->original_size = output_size;
-    created->color_view = color_format->source_view_format;
-    created->color_uav = color_format->uav_format;
-    created->output_view = output_format->source_view_format;
-    created->output_uav = output_format->uav_format;
-    created->color_output_alias = color_output_alias;
-    created->color = CreateTexture(image, color_format->uav_format, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle Color");
-    created->baseline = CreateTexture(image, color_format->uav_format, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle baseline");
-    created->original = CreateTexture(output_size, color_format->uav_format, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle original Color");
-    if (color_output_alias) {
-      // Preserve the game's in-place Color/Output contract for native NR. A separate read-only Color
-      // resource and UAV Output are only safe when the game's original parameters were separate too.
-      created->output = created->color;
-    } else {
-      created->output = CreateTexture(image, output_format->uav_format, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle Output");
-    }
-    if (remap_motion) created->motion = CreateTexture(image, DXGI_FORMAT_R16G16_FLOAT,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle motion");
-    for (size_t i = 0u; i < auxiliary.size(); ++i) {
-      created->auxiliary_view[i] = auxiliary_views[i];
-      created->auxiliary_uav[i] = auxiliary_uavs[i];
-      if (auxiliary_uavs[i] != DXGI_FORMAT_UNKNOWN) {
-        created->auxiliary[i] = CreateTexture(image, auxiliary_uavs[i], D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"Uplift native-handle guide");
-      }
-    }
-    if (!created->color || !created->output || !created->baseline || !created->original || (remap_motion && !created->motion)) {
-      return {.reason = nr::SkipReason::OUT_OF_MEMORY};
-    }
-    for (size_t i = 0u; i < auxiliary.size(); ++i) {
-      if (auxiliary_uavs[i] != DXGI_FORMAT_UNKNOWN && !created->auxiliary[i]) {
-        created->auxiliary_view[i] = DXGI_FORMAT_UNKNOWN;
-        created->auxiliary_uav[i] = DXGI_FORMAT_UNKNOWN;
-        created->auxiliary[i].Reset();  // optional guides fall back to null
-      }
-    }
-    const auto bytes_per_pixel = [](DXGI_FORMAT format) -> uint64_t {
-      if (const auto info = color::DescribeUavFormat(format)) return info->bytes_per_pixel;
-      if (format == DXGI_FORMAT_R32_FLOAT) return 4u;
-      if (format == DXGI_FORMAT_R16G16_FLOAT) return 4u;
-      if (format == DXGI_FORMAT_R8_UNORM) return 1u;
-      return 8u;
-    };
-    created->bytes = image.Pixels() * (2u * bytes_per_pixel(color_format->uav_format)
-        + (color_output_alias ? 0u : bytes_per_pixel(output_format->uav_format))
-        + (remap_motion ? 4u : 0u)) + output_size.Pixels() * bytes_per_pixel(color_format->uav_format);
-    for (const DXGI_FORMAT format : created->auxiliary_uav) if (format != DXGI_FORMAT_UNKNOWN) created->bytes += image.Pixels() * bytes_per_pixel(format);
-    held = std::move(created);
-  }
-  held->active = true;
-
-  auto ticket = std::make_shared<NativeNrHandleTicket>();
-  ticket->surfaces = held;
-  ticket->original_output = frame.output;
-  ticket->output_region = output_region;
-  ticket->layout = layout;
-  ticket->post_slot = descriptor_slots[1];
-  ticket->output_view = output_format->source_view_format;
-  ticket->output_uav = output_format->uav_format;
-
-  PipelineResult recorded = RecordOnGameList(host, timeline_, restore, [&] {
-    const uint32_t slot = descriptor_slots[0];
-    const D3D12_RESOURCE_STATES color_state = frame.native_nr->color_state;
-    Transition(list, frame.color, color_state, COMPUTE_READ);
-    const bool color_ok = color_.RecordNativeInput(list, slot, 0u, {frame.color, input_region}, color_format->source_view_format,
-        held->color.Get(), color_format->uav_format, image, layout.foveation, true, false);
-    if (!color_ok) {
-      Transition(list, frame.color, COMPUTE_READ, color_state);
-      return PipelineResult{.reason = nr::SkipReason::UNSUPPORTED_FORMAT};
-    }
-    static_cast<void>(color_.RecordNativeInput(list, slot, 6u, {frame.color, input_region}, color_format->source_view_format,
-        held->baseline.Get(), color_format->uav_format, image, layout.foveation, true, false));
-    static_cast<void>(color_.RecordNativeInput(list, slot, 7u, {frame.color, input_region}, color_format->source_view_format,
-        held->original.Get(), color_format->uav_format, output_size, {}, false, false));
-    if (!color_output_alias) {
-      Transition(list, held->color.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    } else {
-      // The game binds this same surface as both Color and Output. Keep it in UAV state for NGX,
-      // but order the preprocessing dispatch's writes before the native evaluate's UAV accesses.
-      UavBarrier(list, held->color.Get());
-    }
-    Transition(list, held->baseline.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    Transition(list, held->original.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    for (size_t i = 0u; i < auxiliary.size(); ++i) {
-      if (auxiliary[i].resource == nullptr || !held->auxiliary[i] || !auxiliary_formats[i]) continue;
-      static_cast<void>(color_.RecordNativeInput(list, slot, static_cast<uint32_t>(i + 1u), auxiliary[i],
-          auxiliary_formats[i]->source, held->auxiliary[i].Get(), auxiliary_uavs[i], image, layout.foveation));
-      Transition(list, held->auxiliary[i].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    }
-    if (remap_motion && held->motion) {
-      static_cast<void>(color_.RecordMotion(list, slot, {.source = frame.motion_vectors, .source_view_format = *motion_view,
-          .region = frame.motion_region, .target = held->motion.Get(), .image = image, .canvas = image,
-          .scale_x = frame.mv_scale_x * static_cast<float>(image.width) / static_cast<float>(frame.motion_region.width),
-          .scale_y = frame.mv_scale_y * static_cast<float>(image.height) / static_cast<float>(frame.motion_region.height),
-          .foveation = layout.foveation}));
-      Transition(list, held->motion.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-    }
-    Transition(list, frame.color, COMPUTE_READ, color_state);
-    slot_marks_[descriptor_slots[0]] = timeline_.MarkNow(true);
-    slot_marks_[descriptor_slots[1]] = slot_marks_[descriptor_slots[0]];  // reserved until the game's evaluate returns
-    held->last_use = slot_marks_[descriptor_slots[0]];
-    next_slot_ = (descriptor_slots[1] + 1u) % static_cast<uint32_t>(slot_marks_.size());
-    return PipelineResult{.recorded = true};
-  });
-  if (!recorded.recorded) {
-    held->active = false;
-    return recorded;
-  }
-
-  work->resources = {held->color.Get(), held->output.Get(),
-      (auxiliary[0].resource != nullptr && held->auxiliary[0] ? held->auxiliary[0].Get() : nullptr),
-      (remap_motion && held->motion ? held->motion.Get() : nullptr),
-      (auxiliary[1].resource != nullptr && held->auxiliary[1] ? held->auxiliary[1].Get() : nullptr),
-      (auxiliary[2].resource != nullptr && held->auxiliary[2] ? held->auxiliary[2].Get() : nullptr),
-      (auxiliary[3].resource != nullptr && held->auxiliary[3] ? held->auxiliary[3].Get() : nullptr),
-      (auxiliary[4].resource != nullptr && held->auxiliary[4] ? held->auxiliary[4].Get() : nullptr)};
-  work->image = image;
-  work->motion_rescaled = (work->resources[3] != nullptr);
-  work->motion_scale_x = 1.f;
-  work->motion_scale_y = 1.f;
-  work->ui_correction = frame.native_nr->ui_correction && work->resources[5] != nullptr
-      && (work->resources[6] != nullptr || work->resources[7] != nullptr);
-  work->ticket = std::move(ticket);
-  return recorded;
-}
-
-PipelineResult NrPipeline::CompleteNativeNrHandle(DlssFrameHost& host, state::RestoreMode restore,
-                                                   const NativeNrHandleWork& work, bool native_succeeded) {
-  const auto ticket = std::static_pointer_cast<NativeNrHandleTicket>(work.ticket);
-  if (!ticket || !ticket->surfaces) return {.reason = nr::SkipReason::INVALID_INPUT};
-  NativeHandleSurfaces& surfaces = *ticket->surfaces;
-  ID3D12GraphicsCommandList* const list = host.NativeList();
-  if (list == nullptr || !host.StateKnown()) {
-    surfaces.active = false;
-    return {.reason = nr::SkipReason::LIST_STATE_UNKNOWN};
-  }
-  return RecordOnGameList(host, timeline_, restore, [&] {
-    const uint32_t slot = ticket->post_slot;
-    bool upsampled = false;
-    if (native_succeeded) {
-      Transition(list, surfaces.output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, COMPUTE_READ);
-      upsampled = color_.RecordNativeComposite(list, slot,
-          {.original = surfaces.original.Get(), .original_view_format = surfaces.color_view,
-           .baseline = surfaces.baseline.Get(), .baseline_view_format = surfaces.color_view,
-           .nr_output = surfaces.output.Get(), .nr_output_view_format = surfaces.output_view,
-           .target = ticket->original_output.Get(), .target_uav_format = ticket->output_uav,
-           .output_size = {ticket->output_region.width, ticket->output_region.height}, .work_size = work.image,
-           .origin_x = ticket->output_region.x, .origin_y = ticket->output_region.y, .foveation = ticket->layout.foveation});
-      UavBarrier(list, ticket->original_output.Get());
-      Transition(list, surfaces.output.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    }
-    // Restore every substituted guide to its initial state. The next evaluate can then use the same
-    // resource set even when this command list is replayed.
-    if (surfaces.color && surfaces.color.Get() != surfaces.output.Get()) {
-      Transition(list, surfaces.color.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    }
-    Transition(list, surfaces.baseline.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    Transition(list, surfaces.original.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    if (surfaces.motion && work.motion_rescaled) Transition(list, surfaces.motion.Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    for (size_t i = 0u; i < surfaces.auxiliary.size(); ++i) {
-      if (surfaces.auxiliary[i] && work.resources[(i == 0u) ? 2u : (i + 3u)] != nullptr) {
-        Transition(list, surfaces.auxiliary[i].Get(), COMPUTE_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      }
-    }
-    slot_marks_[slot] = timeline_.MarkNow(true);
-    surfaces.last_use = slot_marks_[slot];
-    surfaces.active = false;
-    if (!native_succeeded) return PipelineResult{.recorded = true};
-    return PipelineResult{.recorded = true, .nr_applied = upsampled,
-                          .reason = (upsampled ? nr::SkipReason::NONE : nr::SkipReason::UNSUPPORTED_FORMAT)};
-  });
 }
 
 bool NrPipeline::ConvertWorkMotion(ID3D12GraphicsCommandList* list, uint32_t slot, nr::FrameInputs& inputs, const WorkLayout& work, bool flip_y) {

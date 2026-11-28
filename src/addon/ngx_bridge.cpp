@@ -107,7 +107,8 @@ void NgxBridge::LogD3D12Diagnostics(std::chrono::steady_clock::time_point now) {
   int64_t main_age = -1;
   {
     const std::scoped_lock lock(d3d12_diagnostic_mutex_);
-    if (last_d3d12_summary_ && now - *last_d3d12_summary_ < std::chrono::seconds(5)) return;
+    // One empty baseline is useful; repeating it before the first callback adds no information.
+    if (last_d3d12_summary_ && (!last_d3d12_callback_ || now - *last_d3d12_summary_ < std::chrono::seconds(5))) return;
     last_d3d12_summary_ = now;
     for (size_t index = 0u; index < counts.size(); ++index) counts[index] = d3d12_diagnostics_[index].count;
     if (last_d3d12_callback_) callback_age = std::chrono::duration_cast<std::chrono::milliseconds>(std::max(now, *last_d3d12_callback_) - *last_d3d12_callback_).count();
@@ -125,16 +126,14 @@ const void* NgxBridge::DeviceOf(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList
 }
 
 void NgxBridge::BeforeCreate(ngx_hooks::CreateCall* call) {
-  // Never take the add-on's lock for Uplift's own NGX creates. Checked
-  // before anything else, whatever the feature, so a create from Uplift's own runtime can never
-  // reach Overrides() below and re-lock the add-on's non-recursive mutex if the calling thread
-  // already holds it (Uplift's runtime creates no SuperSampling feature today, but this
-  // must hold even if a future NR version ever did).
+  // Observe the game's creates, not the creates issued by Uplift's runtime.
   if (routing_.IsOwnCode(call->caller)) return;
-  // The hidden DLSS-SR create overrides are always empty (addon::ToSrOverrides returns no overrides for every
-  // setting, INI keys included), so nothing is written to the game's block and its own DLSS choices stand.
-  if (call->feature == NVSDK_NGX_Feature_SuperSampling && call->parameters != nullptr) {
-    static_cast<void>(routing_.SrCreateOverrides());
+  // Observe the preset submitted by Streamline. Its options own change detection and feature recreation.
+  if (call->api == ngx_hooks::NgxApi::D3D12 && call->parameters != nullptr
+      && ngx_hooks::KindOf(call->feature) == ngx_hooks::FeatureKind::NEURAL_RENDERING) {
+    const auto preset = ngx_hooks::ReadUint(*call->parameters, nr::keys::PRESET);
+    nr::Logf(nr::LogLevel::INFO, "Native NR preset: NGX CreateFeature submitted {:#010x}; Streamline owns recreation",
+             preset.value_or(UINT32_MAX));
   }
   EnsureFgPresetHook();  // early: the FG provider's single preset read can precede the first present
 }
@@ -147,6 +146,11 @@ void NgxBridge::AfterCreate(const ngx_hooks::CreateCall& call, NVSDK_NGX_Handle*
   // SwapchainSize() and re-locks the add-on's non-recursive mutex if the calling thread already holds
   // it -- the exact self-deadlock the own-create hardening exists to prevent, one call later.
   if (routing_.IsOwnCode(call.caller)) return;
+  if (call.api == ngx_hooks::NgxApi::D3D12 && ngx_hooks::KindOf(call.feature) == ngx_hooks::FeatureKind::NEURAL_RENDERING) {
+    nr::Logf(nr::LogLevel::INFO, "Native NR preset: NGX CreateFeature completed result {:#010x}, handle {}, preset {:#010x}",
+             static_cast<uint32_t>(result), static_cast<const void*>(handle),
+             call.parameters ? ngx_hooks::ReadUint(*call.parameters, nr::keys::PRESET).value_or(UINT32_MAX) : UINT32_MAX);
+  }
   if (NVSDK_NGX_FAILED(result) || handle == nullptr || call.parameters == nullptr) return;
   // A Vulkan create names its device through its command buffer, or CreateFeature1's VkDevice. A Direct3D 11 one through its context.
   const void* const device =
@@ -226,34 +230,23 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
       }
     }
   }
-  // First step toward native-NR routing: observe the game's actual DLSSNR parameter contract without
-  // changing its evaluate. Keep this D3D12-only: Uplift's NR feature/runtime currently records D3D12 work.
-  if (call->api == ngx_hooks::NgxApi::D3D12 && call->parameters != nullptr && call->handle != nullptr) {
+  if (call->api == ngx_hooks::NgxApi::D3D12 && call->handle != nullptr) {
     if (const std::optional<ngx_hooks::FeatureRecord> native_nr = registry_.Find(call->handle);
         native_nr && ngx_hooks::KindOf(native_nr->feature) == ngx_hooks::FeatureKind::NEURAL_RENDERING) {
-      ProbeNativeNr(call, *native_nr);
-      call->native_nr_controls = routing_.NativeNrParameterOverrides();
-      if (routing_.NativeNrHandleModeEnabled() && ngx_hooks::ReadUint(*call->parameters, nr::keys::WIDTH)
-          && ngx_hooks::ReadUint(*call->parameters, nr::keys::HEIGHT)) {
-        const void* const device = routing_.DeviceOf(call->list);
-        if (device != nullptr) {
-          const ngx_hooks::DlssFrame frame = ngx_hooks::CaptureNativeNrFrame(*call->parameters, call->handle, *native_nr);
-          if (const auto work = routing_.PrepareNativeNrHandle(device, call->list, frame); work && work->ticket) {
-            call->native_nr_handle = ngx_hooks::EvaluateCall::NativeNrHandleOverrides{
-                .resources = work->resources, .width = work->image.width, .height = work->image.height,
-                .motion_rescaled = work->motion_rescaled, .ui_correction = work->ui_correction, .ticket = work->ticket};
-          }
-        }
-      }
-      if (routing_.NativeNrReplacementEnabled()) {
-        const void* const device = routing_.DeviceOf(call->list);
-        if (device != nullptr) {
-          const ngx_hooks::DlssFrame frame = ngx_hooks::CaptureNativeNrFrame(*call->parameters, call->handle, *native_nr);
-          if (routing_.TryReplaceNativeNrEvaluate(device, call->list, frame)) {
+      if (call->parameters != nullptr) {
+        ProbeNativeNr(call, *native_nr);
+        call->native_nr_controls = routing_.NativeNrParameterOverrides();
+        if (call->list != nullptr && !call->native_nr_controls) {
+          const auto frame = ngx_hooks::CaptureNativeNrFrame(*call->parameters, call->handle, *native_nr);
+          if (routing_.BeforeNativeNrEvaluate(call->list, frame, native_nr->device)) {
             call->skip_original = true;
-            return;  // Uplift recorded a complete replacement; otherwise the native evaluate remains untouched.
+            return;
           }
+        } else if (call->list == nullptr) {
+          routing_.NoteNativeNrHookBypass(native_nr->device, native_nr->serial, nullptr, "no command list");
         }
+      } else {
+        routing_.NoteNativeNrHookBypass(native_nr->device, native_nr->serial, call->list, "no parameters");
       }
     }
   }
@@ -302,17 +295,6 @@ void NgxBridge::BeforeEvaluate(ngx_hooks::EvaluateCall* call) {
   call->color = routing_.BeforeMainEvaluate(device, call->list, ngx_hooks::CaptureDlssFrame(*call->parameters, call->handle, *record));
 }
 
-void NgxBridge::AfterOriginalEvaluate(ngx_hooks::EvaluateCall* call, NVSDK_NGX_Result result) {
-  if (call == nullptr || !call->native_nr_handle || call->api != ngx_hooks::NgxApi::D3D12) return;
-  const void* const device = routing_.DeviceOf(call->list);
-  if (device == nullptr) return;
-  const auto& overrides = *call->native_nr_handle;
-  sources::NativeNrHandleWork work = {.resources = overrides.resources,
-      .image = {overrides.width, overrides.height}, .motion_rescaled = overrides.motion_rescaled,
-      .ui_correction = overrides.ui_correction, .ticket = overrides.ticket};
-  routing_.CompleteNativeNrHandle(device, call->list, work, NVSDK_NGX_SUCCEED(result));
-}
-
 void NgxBridge::ProbeNativeNr(ngx_hooks::EvaluateCall* call, const ngx_hooks::FeatureRecord& record) {
   if (native_nr_probe_logged_.exchange(true, std::memory_order_relaxed)) return;
   const NVSDK_NGX_Parameter& p = *call->parameters;
@@ -357,7 +339,7 @@ void NgxBridge::OnColorSwapRejected(ngx_hooks::NgxApi api, ID3D12GraphicsCommand
 }
 
 void NgxBridge::AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* list, const NVSDK_NGX_Handle* handle,
-                              const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Result result) {
+                              const NVSDK_NGX_Parameter* parameters, NVSDK_NGX_Result result, bool original_ran) {
   // Every API's evaluate of a feature the game created, whatever watches: an upscaler's activity, which MainHandle reads, and the foreign NR
   // producer's liveness (ForeignNr = Yield). The registry's exclusive lock, for one lookup and one store.
   if (NVSDK_NGX_SUCCEED(result)) registry_.OnEvaluate(handle);
@@ -380,11 +362,13 @@ void NgxBridge::AfterEvaluate(ngx_hooks::NgxApi api, ID3D12GraphicsCommandList* 
       return;
     }
     if (ngx_hooks::KindOf(record->feature) == ngx_hooks::FeatureKind::NEURAL_RENDERING) {
+      if (!original_ran) return;  // Uplift completed a pre-evaluate replacement; not a native success.
       NoteD3D12Evaluate(D3D12Route::NOT_UPSCALER, list, handle, result, &*record, nullptr, nullptr);
-      if (parameters == nullptr || !routing_.NativeNrFollowupEnabled()) return;
-      const void* const device = routing_.DeviceOf(list);
+      const void* const tracked_device = list != nullptr ? routing_.DeviceOf(list) : nullptr;
+      const void* const device = tracked_device != nullptr ? tracked_device : record->device;
       if (device == nullptr) return;
-      routing_.OnNativeNrEvaluate(device, list, ngx_hooks::CaptureNativeNrFrame(*parameters, handle, *record));
+      const ngx_hooks::DlssFrame frame = ngx_hooks::CaptureNativeNrFrame(*parameters, handle, *record);
+      if (frame.native_nr && frame.native_nr->enabled) routing_.OnNativeNrEvaluate(device, tracked_device != nullptr ? list : nullptr, frame);
       return;
     }
     if (ngx_hooks::KindOf(record->feature) != ngx_hooks::FeatureKind::UPSCALER) {

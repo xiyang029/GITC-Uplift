@@ -1,5 +1,6 @@
 #include "addon/streamline_present.hpp"
 #include "addon/sl_fg_hooks.hpp"
+#include "addon/sl_nr_hooks.hpp"
 
 #include <MinHook.h>
 #include <array>
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <cwchar>
 #include <chrono>
 #include <cstddef>
@@ -319,6 +321,8 @@ constexpr GUID OPTIONS_TYPE = {0xfac5f1cb, 0x2dfd, 0x4f36, {0xa1, 0xe6, 0x3a, 0x
 static_assert(offsetof(OptionsPrefix, mode) == 32);
 using SetOptions = int (*)(const void*, const OptionsPrefix&);
 using GetFeature = int (*)(uint32_t, const char*, void*&);
+using Evaluate = PFun_slEvaluateFeature*;
+using FreeResources = PFun_slFreeResources*;
 using Shutdown = int (*)();
 Hook<SetOptions> set_options;
 // The plug-in the slDLSSGSetOptions hook is in, recorded when it is attached. Written under install_mutex.
@@ -335,6 +339,8 @@ unsigned options_releases = 0u;
 // instance whose answer could not be hooked does not stop the next one from being asked. Written under install_mutex.
 bool options_attached_once = false;
 Hook<GetFeature> get_feature;
+Hook<Evaluate> evaluate_feature;
+Hook<FreeResources> free_resources;
 Hook<Shutdown> sl_shutdown;
 // The SDK takes the viewport and the frame token by reference: at the ABI they are pointers.
 using SetTag = int (*)(const void* viewport, const void* tags, uint32_t count, void* command_buffer);
@@ -895,6 +901,7 @@ void ReleaseSetOptions() {
 // that outlives slShutdown keeps the state slOnPluginLoad built for this instance, pointing into the sl.common Streamline
 // unloads, and the next slInit reuses it (Phantom Blade Zero, 17 Nov 2026, from another add-on's permanent lease).
 int OnShutdown() {
+  slnr::BeforeShutdown();
   if (observer.sl_shutdown) observer.sl_shutdown();
   mode.store(FgMode::UNKNOWN, std::memory_order_release);
   ReleaseSetOptions();
@@ -922,6 +929,7 @@ bool AttachSetOptions(void* address) {
 
 int OnGetFeature(uint32_t feature, const char* name, void*& output) {
   const int hr = get_feature.original.load(std::memory_order_acquire)(feature, name, output);
+  if (hr == 0) slnr::ObserveFunction(name, output);
   if (hr == 0 && name && !std::strcmp(name, SET_OPTIONS_NAME)) {
     const bool attached = AttachSetOptions(output);
     if (observer.diagnostic_dxgi) {
@@ -988,6 +996,19 @@ int OnSetTagForFrame(const void* frame, const void* viewport, const void* tags, 
   return result;
 }
 
+sl::Result OnEvaluateFeature(sl::Feature feature, const sl::FrameToken& frame, const sl::BaseStructure** inputs,
+                             uint32_t count, sl::CommandBuffer* command_buffer) {
+  if (feature == sl::kFeatureDLSS_NR) slnr::BeforeEvaluate(inputs, count);
+  return evaluate_feature.original.load(std::memory_order_acquire)(feature, frame, inputs, count, command_buffer);
+}
+
+sl::Result OnFreeResources(sl::Feature feature, const sl::ViewportHandle& viewport) {
+  // Call Streamline without the options-cache lock, and invalidate only when the provider actually freed it.
+  const auto result = free_resources.original.load(std::memory_order_acquire)(feature, viewport);
+  slnr::AfterFreeResources(feature, viewport, result);
+  return result;
+}
+
 void BindExports(HMODULE module) {
   const auto resolve = [&](const char* name) { return reinterpret_cast<void*>(get_proc.original.load(std::memory_order_acquire)(module, name)); };
   // Streamline v2 returns a Result from slUpgradeInterface, and its tag exports have the signatures above. Do not attach this ABI to v1.
@@ -997,6 +1018,8 @@ void BindExports(HMODULE module) {
     Attach(set_tag_for_frame, resolve(SET_TAG_FOR_FRAME_EXPORT), &OnSetTagForFrame);
     // HUD-less: the stored tags are released at slShutdown, so slShutdown is hooked with them, not only with slDLSSGSetOptions.
     Attach(sl_shutdown, resolve(SHUTDOWN_EXPORT), &OnShutdown);
+    Attach(evaluate_feature, resolve("slEvaluateFeature"), &OnEvaluateFeature);
+    Attach(free_resources, resolve("slFreeResources"), &OnFreeResources);
   }
   Attach(get_feature, resolve(GET_FEATURE_EXPORT), &OnGetFeature);
   if (get_feature.InstalledOriginal()) {
@@ -1031,6 +1054,12 @@ int FirstFeature(uint32_t feature, const char* name, void*& output) {
 
 int WINAPI FirstUpgrade(void** v) { return FirstCall<&OnUpgrade>(upgrade, "slUpgradeInterface", v); }
 int FirstSetTag(const void* v, const void* t, uint32_t c, void* b) { return FirstCall<&OnSetTag>(set_tag, SET_TAG_EXPORT, v, t, c, b); }
+sl::Result FirstEvaluateFeature(sl::Feature f, const sl::FrameToken& t, const sl::BaseStructure** i, uint32_t n, sl::CommandBuffer* b) {
+  return FirstCall<&OnEvaluateFeature>(evaluate_feature, "slEvaluateFeature", f, std::cref(t), i, n, b);
+}
+sl::Result FirstFreeResources(sl::Feature f, const sl::ViewportHandle& v) {
+  return FirstCall<&OnFreeResources>(free_resources, "slFreeResources", f, std::cref(v));
+}
 int FirstSetTagForFrame(const void* f, const void* v, const void* t, uint32_t c, void* b) {
   return FirstCall<&OnSetTagForFrame>(set_tag_for_frame, SET_TAG_FOR_FRAME_EXPORT, f, v, t, c, b);
 }
@@ -1049,6 +1078,8 @@ FARPROC WINAPI OnGetProc(HMODULE module, LPCSTR name) {
   if (!std::strcmp(name, "slUpgradeInterface")) replacement = reinterpret_cast<FARPROC>(&FirstUpgrade);
   else if (!std::strcmp(name, "slGetFeatureFunction")) replacement = reinterpret_cast<FARPROC>(&FirstFeature);
   else if (!std::strcmp(name, SET_TAG_EXPORT)) replacement = reinterpret_cast<FARPROC>(&FirstSetTag);
+  else if (!std::strcmp(name, "slEvaluateFeature")) replacement = reinterpret_cast<FARPROC>(&FirstEvaluateFeature);
+  else if (!std::strcmp(name, "slFreeResources")) replacement = reinterpret_cast<FARPROC>(&FirstFreeResources);
   else if (!std::strcmp(name, SET_TAG_FOR_FRAME_EXPORT)) replacement = reinterpret_cast<FARPROC>(&FirstSetTagForFrame);
   else if (!std::strcmp(name, "CreateDXGIFactory")) replacement = reinterpret_cast<FARPROC>(&FirstFactory);
   else if (!std::strcmp(name, "CreateDXGIFactory1")) replacement = reinterpret_cast<FARPROC>(&FirstFactory1);
@@ -1058,7 +1089,9 @@ FARPROC WINAPI OnGetProc(HMODULE module, LPCSTR name) {
   else if (!std::strcmp(name, "vkQueuePresentKHR")) replacement = reinterpret_cast<FARPROC>(&FirstVkPresent);
   if (!replacement || !IsInterposer(module) || Owner(reinterpret_cast<void*>(result)) != module) return result;
   const bool v2_only = (replacement == reinterpret_cast<FARPROC>(&FirstUpgrade) || replacement == reinterpret_cast<FARPROC>(&FirstSetTag)
-                        || replacement == reinterpret_cast<FARPROC>(&FirstSetTagForFrame));
+                        || replacement == reinterpret_cast<FARPROC>(&FirstSetTagForFrame)
+                        || replacement == reinterpret_cast<FARPROC>(&FirstEvaluateFeature)
+                        || replacement == reinterpret_cast<FARPROC>(&FirstFreeResources));
   if (v2_only && (!get_proc.original.load(std::memory_order_acquire)(module, "slGetNativeInterface") || !get_proc.original.load(std::memory_order_acquire)(module, "slGetFeatureFunction"))) return result;
   HMODULE empty = nullptr;
   interposer.compare_exchange_strong(empty, module);

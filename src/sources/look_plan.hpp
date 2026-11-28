@@ -46,6 +46,10 @@ struct KeepFacesConfig {
 struct LookConfig {
   look::LookSettings look;
   ColorFixes fixes;
+  color::Encoding encoding = color::Encoding::AUTO;
+  float diffuse_white_nits = 0.f;
+  float transfer_strength = 1.f;
+  float color_strength = 1.f;
   std::array<std::optional<nr::Controls>, LATER_PASSES> later_controls = {};  // pass n at [n - 2]; nullopt follows pass 1
   bool mask = false;                   // Mask = Auto: bind the mask copy once the add-on has copied into it
   bool present_ui_correction = false;  // UICorrection = On: forwarded on the Present path only (no effect without a Backbuffer)

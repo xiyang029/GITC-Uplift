@@ -31,10 +31,6 @@ void EnsureReflexHook();
 // land without waiting for the game's own next call. Called from the add-on's Present poll.
 void RefreshFromPanel();
 
-// Diagnostics: samples NvAPI_D3D_GetSleepStatus at most once every two seconds -- the interval
-// the driver holds, whether the game actually calls the Reflex sleep, and the live FG multiplier.
-void LogSleepStatusThrottled();
-
 // What the driver last accepted, for the panel's live row. known is false until a submission reached it
 // (a game that never calls SetSleepMode keeps it false, which is what the row should say). mode is the
 // accepted low-latency mode: 0 off, 1 on, 2 boost. fps_cap is the accepted minimum interval as an

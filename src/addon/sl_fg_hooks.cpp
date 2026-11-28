@@ -1,4 +1,5 @@
 #include "addon/sl_fg_hooks.hpp"
+#include "addon/sl_nr_hooks.hpp"
 
 #include <MinHook.h>
 #include <sl_core_api.h>
@@ -675,6 +676,7 @@ sl::Result HookedGetFeatureFunction(sl::Feature feature, const char* function_na
              static_cast<uint32_t>(result));
   }
   if (result != sl::Result::eOk || function_name == nullptr || function == nullptr) return result;
+  slnr::ObserveFunction(function_name, function);
   if (feature == sl::kFeatureDLSS_G && strcmp(function_name, "slDLSSGSetOptions") == 0
       && function != reinterpret_cast<void*>(&HookedSetOptions)) {
     ObserveStreamlineFunctionOwner(function);

@@ -44,6 +44,7 @@
 #include "addon/nvfp4_hook.hpp"
 #include "addon/reflex_override.hpp"
 #include "addon/sl_fg_hooks.hpp"
+#include "addon/sl_nr_hooks.hpp"
 #include "addon/environment.hpp"
 #include "addon/frame_config.hpp"
 #include "addon/frame_trigger.hpp"
@@ -373,17 +374,10 @@ class AddonRouting final : public addon::NgxRouting {
  public:
   ngx_hooks::SrOverrides DlssPresetOverrides() override;
   ngx_hooks::SrOverrides RrPresetOverrides() override;
-  ngx_hooks::SrOverrides SrCreateOverrides() override;
   std::optional<nr::Controls> NativeNrParameterOverrides() override;
-  bool NativeNrFollowupEnabled() override;
-  bool NativeNrReplacementEnabled() override;
-  bool NativeNrHandleModeEnabled() override;
-  std::optional<sources::NativeNrHandleWork> PrepareNativeNrHandle(
-      const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) override;
-  void CompleteNativeNrHandle(const void* device, ID3D12GraphicsCommandList* list,
-                              const sources::NativeNrHandleWork& work, bool native_succeeded) override;
-  bool TryReplaceNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list,
-                                  const ngx_hooks::DlssFrame& frame) override;
+  bool BeforeNativeNrEvaluate(ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame, const void* feature_device) override;
+  void NoteNativeNrHookBypass(const void* feature_device, uint64_t serial, ID3D12GraphicsCommandList* list,
+                              std::string_view reason) override;
   void OnNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) override;
   const void* DeviceOf(ID3D12GraphicsCommandList* list) override;
   nr::Size SwapchainSize(const void* device) override;
@@ -472,10 +466,10 @@ struct AddonState {
   std::filesystem::path game_directory;
   std::filesystem::path ngx_data_directory;
   std::filesystem::path latch_marker_path;   // computed once, at AddonInit
-  // 1.8.3 (upstream 7dbb337): the crash counter behind safe mode. Written at AddonInit with this
-  // session's pid and streak, deleted only on a clean exit; three unclean exits in a row pass
-  // safe_mode and XMX stays off for that start.
+  // The first request to enable XMX arms the crash marker. The third consecutive attempt after
+  // two unclean ones consumes it and leaves XMX off for this run.
   std::filesystem::path xmx_crash_marker;
+  std::atomic<bool> xmx_crash_marker_armed{false};
   bool safe_mode = false;
   bool snippet_hashed = false;               // the ~166 MB runtime is hashed at most once per process
   bool warned_no_immediate_list = false;     // ReShade gave no immediate list for a presenting queue
@@ -525,15 +519,25 @@ class HoldsLockForNr {
 };
 
 // Settings that act outside the per-frame FrameSettings.
-void ApplyProcessSettings(const ui::Settings& settings) {
-  // Safe mode (1.8.3, upstream 7dbb337) is an override, not a setting: the ini keeps what the user
-  // chose, and the panel's switch keeps working -- it just cannot turn XMX back on this session.
-  const bool safe_mode = g_state != nullptr && g_state->safe_mode;
-  uplift::xmx::SetEnabled(settings.xmx_generator && !settings.fg_hud_inputs_only && !safe_mode);
-  if (safe_mode && settings.xmx_generator) {
-    nr::Logf(nr::LogLevel::WARN, "safe mode: XMX stayed off after three unclean exits; it is back on the next start");
-  }
+void ApplyProcessSettings(AddonState& state) {
+  const auto& settings = state.settings;
   addon::InstallLogBridge(settings.log_level);
+  const bool wants_xmx = settings.xmx_generator && !settings.fg_hud_inputs_only;
+  // Don't count runs that never request XMX, including HUD-inputs-only mode. Check before enabling
+  // it, whether the request came from the INI at startup or from a live panel change.
+  if (wants_xmx && !state.safe_mode && !state.xmx_crash_marker_armed.load(std::memory_order_relaxed)) {
+    const uint32_t previous = addon::ReadXmxCrashStreak(state.xmx_crash_marker);
+    if (previous >= 2u) {
+      state.safe_mode = true;
+      addon::DeleteXmxCrashMarker(state.xmx_crash_marker);
+      nr::Logf(nr::LogLevel::WARN, "safe mode: {} previous starts did not exit cleanly; XMX is off for this run", previous);
+    } else {
+      addon::WriteXmxCrashMarker(state.xmx_crash_marker, previous + 1u);
+      state.xmx_crash_marker_armed.store(true, std::memory_order_release);
+    }
+  }
+  // Safe mode is an override for this run only; leave the user's setting untouched.
+  uplift::xmx::SetEnabled(wants_xmx && !state.safe_mode);
   // The NGX runtime reads it when the snippet next loads.
   SetEnvironmentVariableW(L"__NGX_SHOW_INDICATOR", (settings.show_nv_indicator ? L"1024" : nullptr));
 }
@@ -552,6 +556,8 @@ uint32_t FgMultiplierChoice(ui::FgMultiplierOverride choice) {
 
 // each is a live switch -- the atomics take the choice and the game's next relevant call applies it.
 void PushFgRuntimeChoices(const ui::Settings& settings) {
+  const bool native_nr = settings.enabled && settings.native_nr_mode == ui::NativeNrMode::PARAMETERS;
+  addon::slnr::SetDesiredPreset(native_nr ? settings.preset : 0u);
   const uint32_t multiplier = FgMultiplierChoice(settings.fg_multiplier);
   addon::slfg::SetHudInputsOnly(settings.fg_hud_inputs_only);
   addon::slfg::SetXmxMode(settings.xmx_generator && !settings.fg_hud_inputs_only);
@@ -592,7 +598,7 @@ void SaveAndApply(AddonState* state) {
   state->settings = ui::Sanitized(state->settings);
   ui::SaveSettings(state->settings, &state->config);
   state->poller.Seen(state->settings.enabled);
-  ApplyProcessSettings(state->settings);
+  ApplyProcessSettings(*state);
   PublishSettings(*state);
   PushPresetGates(*state, state->settings);
 }
@@ -638,7 +644,6 @@ void PollHooks() {
   // accepted, whether or not the panel is open.
   addon::framerate::SetMultiplier(addon::slfg::ReadLiveState().multiplier);
   addon::reflex::RefreshFromPanel();
-  addon::reflex::LogSleepStatusThrottled();
   addon::streamline::Poll();
 }
 
@@ -704,121 +709,85 @@ ngx_hooks::SrOverrides AddonRouting::RrPresetOverrides() {
   return addon::ToRrPresetOverrides(g_state->settings);
 }
 
-ngx_hooks::SrOverrides AddonRouting::SrCreateOverrides() {
-  const std::unique_lock lock(g_state->mutex);
-  return addon::ToSrOverrides(g_state->settings);
-}
 std::optional<nr::Controls> AddonRouting::NativeNrParameterOverrides() {
   const std::unique_lock lock(g_state->mutex);
-  if (g_state->settings.uplift_after_native_nr || g_state->settings.replace_native_nr) {
-    return std::nullopt;
-  }
   return ui::NativeNrParameterOverrides(g_state->settings);
 }
-bool AddonRouting::NativeNrFollowupEnabled() {
+void AddonRouting::NoteNativeNrHookBypass(const void* feature_device, uint64_t serial, ID3D12GraphicsCommandList* list,
+                                         std::string_view reason) {
+  if (feature_device == nullptr || !nr::IsLogEnabled(nr::LogLevel::TRACE)) return;
   const std::unique_lock lock(g_state->mutex);
-  return g_state->settings.enabled && !g_state->settings.override_native_nr_parameters
-      && !g_state->settings.native_nr_handle_mode && g_state->settings.uplift_after_native_nr && !g_state->settings.replace_native_nr;
-}
-
-bool AddonRouting::NativeNrReplacementEnabled() {
-  const std::unique_lock lock(g_state->mutex);
-  return g_state->settings.enabled && !g_state->settings.override_native_nr_parameters
-      && !g_state->settings.native_nr_handle_mode && g_state->settings.replace_native_nr;
-}
-
-bool AddonRouting::NativeNrHandleModeEnabled() {
-  const std::unique_lock lock(g_state->mutex);
-  return g_state->settings.enabled && (g_state->settings.native_nr_handle_mode || g_state->settings.override_native_nr_parameters)
-      && !g_state->settings.uplift_after_native_nr
-      && !g_state->settings.replace_native_nr;
-}
-
-std::optional<sources::NativeNrHandleWork> AddonRouting::PrepareNativeNrHandle(
-    const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) {
-  StampThisThread();
-  addon::ListState* const list_state = addon::FindListState(list);
-  std::string reason;
-  ngx_hooks::DlssFrame checked = frame;
-  if (!addon::NativeNrHandleResizeInputsReady(list_state, &checked, &reason)) {
-    static std::atomic<bool> logged_unavailable{false};
-    if (!logged_unavailable.exchange(true, std::memory_order_relaxed)) {
-      nr::Logf(nr::LogLevel::INFO, "Native DLSS-NR handle resize bypassed ({}); native evaluate will run unchanged", reason);
-    }
-    return std::nullopt;
+  if (!g_state->settings.enabled || g_state->settings.native_nr_mode != ui::NativeNrMode::REPLACE) return;
+  if (auto* context = ContextOf(static_cast<api::device*>(const_cast<void*>(feature_device)))) {
+    context->NoteNativeNrHookBypass(serial, list, reason);
   }
-  const std::unique_lock lock(g_state->mutex);
-  const HoldsLockForNr holds;
-  if (!g_state->settings.enabled || (!g_state->settings.native_nr_handle_mode && !g_state->settings.override_native_nr_parameters)
-      || g_state->settings.uplift_after_native_nr
-      || g_state->settings.replace_native_nr) return std::nullopt;
-  addon::DeviceContext* const context = ContextOf(static_cast<api::device*>(const_cast<void*>(device)));
-  if (context == nullptr) return std::nullopt;
-  addon::ReshadeDlssFrameHost host(list_state);
-  return context->PrepareNativeNrHandle(checked, host, std::chrono::steady_clock::now());
 }
 
-void AddonRouting::CompleteNativeNrHandle(const void* device, ID3D12GraphicsCommandList* list,
-                                           const sources::NativeNrHandleWork& work, bool native_succeeded) {
+bool AddonRouting::BeforeNativeNrEvaluate(ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame, const void* feature_device) {
+  if (!frame.native_nr) return false;
   StampThisThread();
   addon::ListState* const list_state = addon::FindListState(list);
-  if (list_state == nullptr) return;
-  const std::unique_lock lock(g_state->mutex);
-  const HoldsLockForNr holds;
-  addon::DeviceContext* const context = ContextOf(static_cast<api::device*>(const_cast<void*>(device)));
-  if (context == nullptr) return;
-  addon::ReshadeDlssFrameHost host(list_state);
-  context->CompleteNativeNrHandle(work, host, native_succeeded, std::chrono::steady_clock::now());
-  NoteLatchIfTripped(g_state, context);
-}
-
-bool AddonRouting::TryReplaceNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list,
-                                               const ngx_hooks::DlssFrame& frame) {
-  StampThisThread();
-  addon::ListState* const list_state = addon::FindListState(list);
-  std::string reason;
-  ngx_hooks::DlssFrame replacement = frame;
-  if (!addon::NativeNrReplaceInputsReady(list_state, &replacement, &reason)) {
-    static std::atomic<bool> logged_unavailable{false};
-    if (!logged_unavailable.exchange(true, std::memory_order_relaxed)) {
-      nr::Logf(nr::LogLevel::INFO, "Native DLSS-NR replacement bypassed ({}); native evaluate will run", reason);
-    }
+  if (list_state == nullptr) {
+    NoteNativeNrHookBypass(feature_device, frame.serial, list, "untracked command list");
     return false;
   }
   const std::unique_lock lock(g_state->mutex);
   const HoldsLockForNr holds;
-  if (!g_state->settings.enabled || g_state->settings.override_native_nr_parameters || g_state->settings.native_nr_handle_mode
-      || !g_state->settings.replace_native_nr) return false;
-  addon::DeviceContext* const context = ContextOf(static_cast<api::device*>(const_cast<void*>(device)));
-  if (context == nullptr) return false;
+  const auto mode = g_state->settings.native_nr_mode;
+  if (!g_state->settings.enabled || !ui::UsesNativeNrGameList(mode)) return false;
+  addon::DeviceContext* const context = ContextOf(list_state->device);
+  if (context == nullptr || !context->IsNativeNrPresentCandidate(frame)) return false;
+  context->NoteNativeNrSite();
+  const bool disabled = !frame.native_nr->enabled;
+  if (!disabled && mode != ui::NativeNrMode::REPLACE) return false;
+  const auto policy = disabled ? addon::NativeNrInputPolicy::DISABLED_FALLBACK : addon::NativeNrInputPolicy::ENABLED_ONLY;
+  const auto path = disabled ? addon::NativeNrPath::DISABLED_FALLBACK : addon::NativeNrPath::REPLACE;
+  ngx_hooks::DlssFrame replacement = frame;
+  std::string reason;
+  if (!addon::NativeNrInputsReady(list_state, &replacement, &reason, policy)) {
+    if (mode == ui::NativeNrMode::REPLACE) context->NoteNativeNrReplacement(frame, path, {}, reason, list);
+    static std::atomic<bool> logged_unavailable{false};
+    if (!disabled && !logged_unavailable.exchange(true, std::memory_order_relaxed)) {
+      nr::Logf(nr::LogLevel::INFO, "Native DLSS-NR replacement bypassed ({}); native evaluate will run", reason);
+    }
+    return false;
+  }
   addon::ReshadeDlssFrameHost host(list_state);
-  const uplift::sources::PipelineResult result = context->OnNativeNrEvaluate(replacement, host, std::chrono::steady_clock::now(), true);
+  const auto result = context->OnNativeNrEvaluate(replacement, host, std::chrono::steady_clock::now(), path);
+  if (mode == ui::NativeNrMode::REPLACE) context->NoteNativeNrReplacement(frame, path, result, {}, list);
   NoteLatchIfTripped(g_state, context);
   if (!result.nr_applied) {
     static std::atomic<bool> logged_pipeline_skip{false};
-    if (!logged_pipeline_skip.exchange(true, std::memory_order_relaxed)) {
+    if (!disabled && result.reason != nr::SkipReason::INACTIVE && !logged_pipeline_skip.exchange(true, std::memory_order_relaxed)) {
       nr::Logf(nr::LogLevel::INFO, "Native DLSS-NR replacement did not complete (reason {}); native evaluate will run",
                static_cast<uint32_t>(result.reason));
     }
     return false;
   }
-  static std::atomic<bool> logged_replacement{false};
-  if (!logged_replacement.exchange(true, std::memory_order_relaxed)) {
-    nr::Log(nr::LogLevel::INFO, "Uplift replaced native DLSS-NR on the game's command list; native evaluate skipped (subsequent replacements are not logged)");
+  static std::atomic<bool> logged_fallback{false}, logged_replacement{false};
+  auto& logged = disabled ? logged_fallback : logged_replacement;
+  if (!logged.exchange(true, std::memory_order_relaxed)) {
+    nr::Log(nr::LogLevel::INFO, disabled ? "Game-owned DLSS-NR is disabled; Uplift NR ran at the native call site"
+                                       : "Uplift replaced native DLSS-NR on the game's command list; native evaluate skipped (subsequent replacements are not logged)");
   }
   return true;
 }
 
 void AddonRouting::OnNativeNrEvaluate(const void* device, ID3D12GraphicsCommandList* list, const ngx_hooks::DlssFrame& frame) {
   StampThisThread();
-  addon::ListState* const list_state = addon::FindListState(list);
-  if (list_state == nullptr) return;
+  addon::ListState* const list_state = list != nullptr ? addon::FindListState(list) : nullptr;
   const std::unique_lock lock(g_state->mutex);
   const HoldsLockForNr holds;
+  const auto mode = g_state->settings.enabled ? g_state->settings.native_nr_mode : ui::NativeNrMode::OFF;
+  if (!ui::UsesNativeNrGameList(mode)) return;
   addon::DeviceContext* const context = ContextOf(static_cast<api::device*>(const_cast<void*>(device)));
-  if (context == nullptr) return;
-  addon::ReshadeDlssFrameHost host(list_state);
-  context->OnNativeNrEvaluate(frame, host, std::chrono::steady_clock::now());
+  if (context == nullptr || !context->IsNativeNrPresentCandidate(frame)) return;
+  if (mode == ui::NativeNrMode::AFTER && list_state != nullptr && list_state->device == device) {
+    addon::ReshadeDlssFrameHost host(list_state);
+    context->OnNativeNrEvaluate(frame, host, std::chrono::steady_clock::now(), addon::NativeNrPath::AFTER);
+  }
+  // A successful game evaluation is evidence even when this list cannot host Uplift commands.
+  context->MarkNativeNrPassthrough(frame);
   NoteLatchIfTripped(g_state, context);
 }
 
@@ -1924,6 +1893,12 @@ void BeforeFgDxgi(IDXGISwapChain* chain, UINT flags, const DXGI_PRESENT_PARAMETE
           break;
         }
         if (!route || !route->Inner() || entry.selector.Primary() != route->Inner()) continue;
+        // Outer Present owns this real frame. If validation rejects it before BeginFrame,
+        // still consume ownership here; generated inner Presents do not close a real frame.
+        struct CloseNativeNrOnExit {
+          addon::DeviceContext* context;
+          ~CloseNativeNrOnExit() { if (context) context->CloseNativeNrFrame(); }
+        } close_native_nr{entry.before_fg.outer_owns_frame ? entry.context.get() : nullptr};
         ++entry.before_fg.activity.real;
         entry.before_fg.outer_inner = route->Inner();
         entry.before_fg.outer_present_passes = 0u;
@@ -2321,8 +2296,8 @@ std::string BlockedReason(AddonState& state, DeviceEntry& entry) {
     const std::optional<std::chrono::steady_clock::time_point> last_evaluated =
         state.bridge.Registry().LastEvaluated(ngx_hooks::FeatureKind::NEURAL_RENDERING);
     foreign = addon::ForeignNrProducer({
-        .foreign_nr_evaluating = !state.settings.uplift_after_native_nr && !state.settings.replace_native_nr
-            && !state.settings.native_nr_handle_mode && last_evaluated
+        .foreign_nr_evaluating = !ui::UsesNativeNrGameList(state.settings.native_nr_mode)
+            && last_evaluated
                                  && now - *last_evaluated < addon::FOREIGN_NR_IDLE_MS,
         .renodx_marker = addon::IsEnvironmentMarkerSet(addon::RENODX_NR_MARKER),
     });
@@ -3348,6 +3323,9 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
         removable->RemoveDevice();
       }
     }
+    const bool native_game_list = settings.enabled && ui::UsesNativeNrGameList(settings.native_nr_mode);
+    const bool native_nr_live = native_game_list && state.bridge.Registry().LiveCount(ngx_hooks::FeatureKind::NEURAL_RENDERING, device) != 0u;
+    entry.context->SetNativeNrFeatureLive(native_nr_live);
     const bool nr_allowed =
         state.claim.Update(device, settings.enabled, before.dlss_seen, before.session.state != nr::SessionState::OFF);
     // Without a running UPLIFT_MASK there is no mask to bind; the copy is released (and the native context's too, in the Vulkan block
@@ -3548,9 +3526,9 @@ void OnPresent(api::command_queue* queue, api::swapchain* swapchain, const api::
     // Source = Present game still needs it once MotionVectors wants DLSS's motion vectors there too.
     // Never for a bridged device: a bridge never records on a game's Direct3D 12 list, and a Direct3D 11 DLSS game must not turn state tracking
     // on for a mod's device.
-    addon::SetTracking(state.tracking_registered && state.settings.enabled && before.dlss_seen && !Bridged(entry)
+    addon::SetTracking(state.tracking_registered && state.settings.enabled && (before.dlss_seen || native_nr_live) && !Bridged(entry)
                        && state.dlss_unavailable_reason.empty()
-                       && (state.settings.source != ui::PlacementSource::PRESENT
+                       && (native_nr_live || state.settings.source != ui::PlacementSource::PRESENT
                            || state.settings.motion_vectors == ui::MotionVectorSource::AUTO
                            || state.settings.motion_vectors == ui::MotionVectorSource::DLSS
                            || (entry.before_fg.outer_owns_frame && frame_settings.motion_vectors)));
@@ -4421,7 +4399,10 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   std::vector<std::string> warnings;
   g_state->settings = ui::LoadSettings(g_state->config, &warnings);
   g_state->e2e.Initialize();
-  ApplyProcessSettings(g_state->settings);
+  g_state->game_exe_path = addon::host::ModulePath(nullptr);
+  const std::filesystem::path state_directory = addon::UpliftStateDirectory();
+  g_state->xmx_crash_marker = addon::XmxCrashMarkerPath(state_directory, g_state->game_exe_path);
+  ApplyProcessSettings(*g_state);
   // The live DLSS preset swap's gate (SaveAndApply keeps both current): the ini may carry choices already.
   PushPresetGates(*g_state, g_state->settings);
   addon::EnsureFgPresetHook();  // the watchdog waits for nvapi64.dll, before any NvAPI caller
@@ -4431,13 +4412,8 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
 
   g_state->addon_directory = addon::host::ModulePath(addon_module).parent_path();
   addon::SetNvfp4AssetsDirectory(g_state->addon_directory);
-  g_state->game_exe_path = addon::host::ModulePath(nullptr);
   g_state->game_directory = g_state->game_exe_path.parent_path();
-  // One resolution (UPLIFT_STATE_DIR, else LOCALAPPDATA, else temp) shared
-  // by NGX's own app data and the latch marker below, instead of repeating LOCALAPPDATA-then-temp for
-  // the former -- so a test's UPLIFT_STATE_DIR override moves NGX's app data out of the user's profile
-  // too, not just the latch marker.
-  const std::filesystem::path state_directory = addon::UpliftStateDirectory();
+  // NGX data and the crash markers all share the same UPLIFT_STATE_DIR override.
   g_state->ngx_data_directory = state_directory / L"ngx";
 
   // Read before DlssUnavailableReason decides whether a DLSS placement
@@ -4446,23 +4422,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   g_state->latch_marker_path = addon::LatchMarkerPath(state_directory, g_state->game_exe_path);
   if (addon::LatchMarkerExists(g_state->latch_marker_path)) {
     g_state->settings.dlss_placement_blocked = true;
-  }
-
-  // 1.8.3 (upstream 7dbb337): three starts in a row that ended without reaching DllMain's clean-exit
-  // branch turn XMX off for this one. Its own file, not the placement latch above (that one is a
-  // verdict, this is a crash streak), and reaching three consumes it so the count starts over.
-  g_state->xmx_crash_marker = addon::XmxCrashMarkerPath(state_directory, g_state->game_exe_path);
-  {
-    const uint32_t streak = addon::ReadXmxCrashStreak(g_state->xmx_crash_marker) + 1u;
-    if (streak >= 3u) {
-      g_state->safe_mode = true;
-      addon::DeleteXmxCrashMarker(g_state->xmx_crash_marker);
-      nr::Logf(nr::LogLevel::WARN, "safe mode: {} starts in a row ended without a clean exit; XMX is off for this one",
-               streak);
-      ApplyProcessSettings(g_state->settings);  // the XMX switch was pushed before this point in AddonInit
-    } else {
-      addon::WriteXmxCrashMarker(g_state->xmx_crash_marker, streak);
-    }
   }
 
   // Direct3D 9 devices run NR in gitc-uplift-helper64.exe, which lies next to this add-on; the front is the one
@@ -4576,13 +4535,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
   nr::Logf(nr::LogLevel::INFO, "Uplift {} registered (build {}, ReShade API {}, Dear ImGui {}, ReShade {})", UPLIFT_VERSION, UPLIFT_BUILD_ID,
            RESHADE_API_VERSION, IMGUI_VERSION_NUM,
            (reshade_version ? addon::FormatModuleVersion(*reshade_version) : std::string("of unknown version")));
-  if (hooks_started) {
-    for (const ngx_hooks::HookedModule& module : g_state->hooks.Modules()) {
-      // Every API the module's hooks cover, Direct3D 11 included (ngx_hooks::HookedApis).
-      nr::Logf(nr::LogLevel::INFO, "NGX hooks on {} ({} entry points){}", addon::Utf8FromPath(module.file_name), ngx_hooks::HookedApis(module),
-               (module.evaluate_c ? " (with EvaluateFeature_C)" : ""));
-    }
-  }
   nr::Logf(nr::LogLevel::INFO, "DLSS placements: {}",
            (g_state->dlss_unavailable_reason.empty() ? std::string("available") : g_state->dlss_unavailable_reason));
   for (const std::string& warning : warnings) {
@@ -4618,7 +4570,7 @@ BOOL APIENTRY DllMain(HMODULE /*module*/, DWORD reason, LPVOID reserved) {
     }
     // 1.8.3 (upstream 7dbb337): and the XMX crash streak ends here -- this path is only reached when
     // the process itself is ending, not when ReShade unloads a launcher's copy (reserved == nullptr).
-    if (g_state != nullptr && !g_state->xmx_crash_marker.empty()) {
+    if (g_state != nullptr && g_state->xmx_crash_marker_armed.load(std::memory_order_acquire)) {
       DeleteFileW(g_state->xmx_crash_marker.c_str());
     }
   }

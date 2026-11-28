@@ -82,18 +82,7 @@ struct PipelineResult {
   float motion_scale_x = 1.f;  // valid when motion_source == DIRECT: MV.Scale x MotionScale
   float motion_scale_y = 1.f;
   uint64_t token = 0u;  // split chain: a game-list recording's completion token (RecordOnGameList); 0 otherwise
-};
-
-// The resources substituted into one game-owned DLSS-NR evaluate. Resource order is
-// Color, Output, Depth, MVec, ControlMask, Backbuffer, UI and UIAlpha.
-struct NativeNrHandleWork {
-  std::array<ID3D12Resource*, 8> resources{};
-  nr::Size image;
-  float motion_scale_x = 1.f;
-  float motion_scale_y = 1.f;
-  bool motion_rescaled = false;
-  bool ui_correction = false;
-  std::shared_ptr<void> ticket;
+  bool first_pass_reset = false;  // only set after the Session has issued the first evaluate
 };
 
 // The size NR works at for one recording.
@@ -166,13 +155,6 @@ class NrPipeline final : private nr::PassResolver {
   // region, left in NON_PIXEL_SHADER_RESOURCE for DLSS.
   PipelineResult RecordPreSr(ID3D12GraphicsCommandList* list, const UavTarget& color, const nr::FrameInputs& inputs,
                              const nr::Controls& controls, const WorkLayout& layout, const ChainPart& part = {}, DlssFrameHost* timing_host = nullptr);
-  // Resize the inputs and output around the game's original DLSS-NR handle. The caller applies
-  // the returned resources only to that evaluate and calls CompleteNativeNrHandle after it returns.
-  PipelineResult PrepareNativeNrHandle(DlssFrameHost& host, state::RestoreMode restore,
-                                       const ngx_hooks::DlssFrame& frame, const WorkLayout& layout,
-                                       NativeNrHandleWork* work);
-  PipelineResult CompleteNativeNrHandle(DlssFrameHost& host, state::RestoreMode restore,
-                                        const NativeNrHandleWork& work, bool native_succeeded);
   // After RecordPreSr applied NR and until the next recording: what DLSS reads as Color. Before upscaling is always pass 1's group: set 0.
   [[nodiscard]] ID3D12Resource* PrivateColor() const { return sets_[0].intermediates.private_color.Get(); }
   // Split chain: the sets of the groups from `first` on, a chain that has fewer, go behind their last use, as a placement switch's set did.
@@ -377,8 +359,8 @@ class NrPipeline final : private nr::PassResolver {
   };
   struct PresentMotionCounters : PresentMotionCounts {
     uint64_t age_max = 0u;
-    uint64_t resets = 0u;
-    uint64_t gpu_waits = 0u;
+    uint64_t resets = 0u, input_resets = 0u, provider_resets = 0u;
+    uint64_t gpu_waits = 0u, older_gpu_waits = 0u;
     uint64_t gpu_wait_failures = 0u;
     uint64_t slot_redirects = 0u;
     std::string miss_sample;
@@ -428,35 +410,6 @@ class NrPipeline final : private nr::PassResolver {
     nr::Mark last_use;  // the newest recording that wrote and read it
   };
 
-  struct NativeHandleSurfaces {
-    Texture color;
-    Texture output;
-    Texture baseline;
-    Texture original;
-    Texture motion;
-    std::array<Texture, 5> auxiliary;  // depth, control mask, backbuffer, UI and UI alpha
-    nr::Size size;
-    nr::Size original_size;
-    DXGI_FORMAT color_view = DXGI_FORMAT_UNKNOWN;
-    DXGI_FORMAT color_uav = DXGI_FORMAT_UNKNOWN;
-    DXGI_FORMAT output_view = DXGI_FORMAT_UNKNOWN;
-    DXGI_FORMAT output_uav = DXGI_FORMAT_UNKNOWN;
-    std::array<DXGI_FORMAT, 5> auxiliary_view{};
-    std::array<DXGI_FORMAT, 5> auxiliary_uav{};
-    uint64_t bytes = 0u;
-    nr::Mark last_use;
-    bool color_output_alias = false;
-    bool active = false;
-  };
-  struct NativeNrHandleTicket {
-    std::shared_ptr<NativeHandleSurfaces> surfaces;
-    Microsoft::WRL::ComPtr<ID3D12Resource> original_output;
-    nr::Rect output_region;
-    WorkLayout layout;
-    uint32_t post_slot = UINT32_MAX;
-    DXGI_FORMAT output_view = DXGI_FORMAT_UNKNOWN;
-    DXGI_FORMAT output_uav = DXGI_FORMAT_UNKNOWN;
-  };
 
   Texture CreateTexture(nr::Size size, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
                         const wchar_t* name);
@@ -523,7 +476,9 @@ class NrPipeline final : private nr::PassResolver {
   PresentMotionCounters present_motion_counters_;
   LaunchpadMotion launchpad_motion_;
   DlssPresentMotion dlss_present_motion_;
-  std::array<std::shared_ptr<NativeHandleSurfaces>, 4> native_handle_surfaces_{};
+  // Allocated lazily as frames overlap; eight entries cover multiple frames in flight without unbounded growth.
+  std::optional<look::LookSettings> logged_native_shape_;
+  bool logged_native_shape_applied_ = false;
 };
 
 }  // namespace uplift::sources

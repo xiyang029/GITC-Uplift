@@ -92,7 +92,18 @@ DlssFrame CaptureNativeNrFrame(const NVSDK_NGX_Parameter& parameters, const NVSD
   DlssFrame frame = {
       .handle = handle, .feature = record.feature, .snapshot = record.snapshot, .serial = record.serial,
       .color = color, .output = output, .motion_vectors = motion, .depth = depth,
+      .exposure_texture = resource(NVSDK_NGX_Parameter_ExposureTexture),
+      .jitter_x = ReadFloat(parameters, NVSDK_NGX_Parameter_Jitter_Offset_X).value_or(0.f),
+      .jitter_y = ReadFloat(parameters, NVSDK_NGX_Parameter_Jitter_Offset_Y).value_or(0.f),
       .mv_scale_x = scale(nr::keys::MVEC_SCALE_X), .mv_scale_y = scale(nr::keys::MVEC_SCALE_Y),
+      .pre_exposure = [&] {
+        const std::optional<float> value = ReadFloat(parameters, NVSDK_NGX_Parameter_DLSS_Pre_Exposure);
+        return value && std::isfinite(*value) && *value != 0.f ? *value : 1.f;
+      }(),
+      .exposure_scale = [&] {
+        const std::optional<float> value = ReadFloat(parameters, NVSDK_NGX_Parameter_DLSS_Exposure_Scale);
+        return value && std::isfinite(*value) && *value != 0.f ? *value : 1.f;
+      }(),
       .reset = flag(nr::keys::RESET).value_or(false),
       .render = record.snapshot.render,
       .color_region = region(nr::keys::COLOR, color), .motion_region = region(nr::keys::MVEC, motion),

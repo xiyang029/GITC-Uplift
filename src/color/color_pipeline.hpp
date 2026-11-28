@@ -100,24 +100,6 @@ struct ComputeDecodePass {
   ID3D12Resource* model_input = nullptr;
 };
 
-// Rebuild a resized native-NR result over the original full-resolution Color. The baseline and NR
-// output are the two work-resolution images; only their difference is upsampled.
-struct NativeCompositePass {
-  ID3D12Resource* original = nullptr;
-  DXGI_FORMAT original_view_format = DXGI_FORMAT_UNKNOWN;
-  ID3D12Resource* baseline = nullptr;
-  DXGI_FORMAT baseline_view_format = DXGI_FORMAT_UNKNOWN;
-  ID3D12Resource* nr_output = nullptr;
-  DXGI_FORMAT nr_output_view_format = DXGI_FORMAT_UNKNOWN;
-  ID3D12Resource* target = nullptr;
-  DXGI_FORMAT target_uav_format = DXGI_FORMAT_UNKNOWN;
-  nr::Size output_size;
-  nr::Size work_size;
-  uint32_t origin_x = 0u;
-  uint32_t origin_y = 0u;
-  nr::foveation::Grid foveation;
-};
-
 // v2 design §3.7: NR's change field at the work image size, from the model input recomputed exactly
 // as `encode` computed it (a later pass may have overwritten A) and NR's output.
 struct ChangePass {
@@ -268,7 +250,6 @@ class ColorPipeline {
   bool RecordDecode(ID3D12GraphicsCommandList* list, uint32_t slot, const DecodePass& pass);
   // False (logged, nothing recorded) when slot is out of range.
   bool RecordComputeDecode(ID3D12GraphicsCommandList* list, uint32_t slot, const ComputeDecodePass& pass);
-  bool RecordNativeComposite(ID3D12GraphicsCommandList* list, uint32_t slot, const NativeCompositePass& pass);
   // False (logged, nothing recorded) when slot is out of range. Also used for the change field.
   bool RecordChange(ID3D12GraphicsCommandList* list, uint32_t slot, const ChangePass& pass);
   bool RecordDepth(ID3D12GraphicsCommandList* list, uint32_t slot, ID3D12Resource* source, DXGI_FORMAT view_format,
@@ -278,10 +259,7 @@ class ColorPipeline {
   // Each input has its own descriptor table in the recording slot. Point sampling preserves mask/depth discontinuities.
   bool RecordNativeInput(ID3D12GraphicsCommandList* list, uint32_t slot, uint32_t input, nr::BoundResource source,
                          DXGI_FORMAT source_format, ID3D12Resource* target, DXGI_FORMAT target_format, nr::Size size,
-                         const nr::foveation::Grid& foveation, bool bilinear = false, bool warp_source = false,
-                         uint32_t target_x = 0u, uint32_t target_y = 0u);
-  [[nodiscard]] bool NativeInputReady() const { return native_input_pipeline_ != nullptr; }
-  [[nodiscard]] bool NativeCompositeReady() const { return native_composite_pipeline_ != nullptr; }
+                         const nr::foveation::Grid& foveation, bool bilinear = false);
   // Plan 5. Each: false (logged, nothing recorded) when slot is out of range.
   bool RecordMeter(ID3D12GraphicsCommandList* list, uint32_t slot, const MeterPass& pass);
   // One dispatch per level, with UAV barriers on both atlases between them.
@@ -303,7 +281,6 @@ class ColorPipeline {
   [[nodiscard]] bool HasDecodePipeline(DXGI_FORMAT target_view_format) const;
   // Whether the device can store to `format` through a typed UAV (cached per format).
   [[nodiscard]] bool SupportsTypedUavStore(DXGI_FORMAT format) const;
-  [[nodiscard]] bool CanDecodeInPlace(DXGI_FORMAT format) const;
   // Key decision 12: typed UAV loads of RGBA16F, R16F and RGBA32F, which the Plan 5 passes need.
   [[nodiscard]] bool SupportsUavLoads() const { return uav_loads_; }
   // Keep faces fix round 1 (C3): its pipeline was built (Initialize does not fail without it).
@@ -335,7 +312,6 @@ class ColorPipeline {
   Microsoft::WRL::ComPtr<ID3D12PipelineState> motion_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> depth_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> native_input_pipeline_;
-  Microsoft::WRL::ComPtr<ID3D12PipelineState> native_composite_pipeline_;
   // Plan 5: the look and meter pipelines.
   Microsoft::WRL::ComPtr<ID3D12PipelineState> meter_pipeline_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> pyramid_pipeline_;
@@ -346,7 +322,6 @@ class ColorPipeline {
   // A null entry records a format whose pipeline could not be built, so it is not retried every frame.
   std::unordered_map<DXGI_FORMAT, Microsoft::WRL::ComPtr<ID3D12PipelineState>> decode_pipelines_;
   mutable std::unordered_map<DXGI_FORMAT, bool> typed_uav_store_;
-  mutable std::unordered_map<DXGI_FORMAT, bool> in_place_formats_;
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> shader_heap_;  // shader-visible CBV/SRV/UAV ring
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> target_heap_;  // one CPU RTV, rewritten per decode
   uint32_t descriptor_size_ = 0u;

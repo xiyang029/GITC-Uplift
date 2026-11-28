@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 
+#include "addon/native_nr_frame.hpp"
 #include "addon/chain_plan.hpp"
 #include "addon/frame_config.hpp"
 #include "addon/frame_trigger.hpp"
@@ -32,6 +33,7 @@
 #include "nr/types.hpp"
 #include "sources/after_dlss_source.hpp"
 #include "sources/pre_sr_source.hpp"
+#include "sources/present_dlss_producer.hpp"
 #include "sources/present_source.hpp"
 #include "sources/work_size.hpp"
 #include "state/compute_shadow.hpp"
@@ -201,15 +203,18 @@ class DeviceContext {
   // add-on's lock. Records NR after DLSS when that is the chosen placement; otherwise notes the evaluate.
   sources::PipelineResult OnDlssEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
                                          std::chrono::steady_clock::time_point now);
-  // Records Uplift NR after the game-owned DLSS-NR evaluate on that same command list.
+  // A live handle reserves the game-list route, not ownership of any particular frame.
+  void SetNativeNrFeatureLive(bool live) { native_nr_feature_live_ = live; }
+  [[nodiscard]] bool IsNativeNrPresentCandidate(const ngx_hooks::DlssFrame& frame) const;
+  void NoteNativeNrSite() { native_nr_feature_live_ = native_nr_frame_.deferred_to_native = true; }
+  void MarkNativeNrPassthrough(const ngx_hooks::DlssFrame& frame);
+  void CloseNativeNrFrame();
+  // Called only for Replace mode, including an unsuccessful request at the game's disabled NR call site.
+  void NoteNativeNrReplacement(const ngx_hooks::DlssFrame& frame, NativeNrPath path, const sources::PipelineResult& result,
+                               std::string_view bypass = {}, ID3D12GraphicsCommandList* list = nullptr) noexcept;
+  void NoteNativeNrHookBypass(uint64_t serial, ID3D12GraphicsCommandList* list, std::string_view reason);
   sources::PipelineResult OnNativeNrEvaluate(const ngx_hooks::DlssFrame& frame, sources::DlssFrameHost& host,
-                                             std::chrono::steady_clock::time_point now, bool replacing_native = false);
-  std::optional<sources::NativeNrHandleWork> PrepareNativeNrHandle(const ngx_hooks::DlssFrame& frame,
-                                                                     sources::DlssFrameHost& host,
-                                                                     std::chrono::steady_clock::time_point now);
-  sources::PipelineResult CompleteNativeNrHandle(const sources::NativeNrHandleWork& work,
-                                                  sources::DlssFrameHost& host, bool native_succeeded,
-                                                  std::chrono::steady_clock::time_point now);
+                                             std::chrono::steady_clock::time_point now, NativeNrPath path);
   // Before the hooked evaluate of this device's main handle, under the add-on's lock.
   // Records NR before upscaling when that is the chosen placement, and returns the texture DLSS must read
   // as Color for this one call (null: the game's own).
@@ -345,7 +350,7 @@ class DeviceContext {
   // Split chain: the frame's chain from pass 1's placement, the stored "Runs at" and why each stage cannot run now, right after
   // ChoosePlacement (BeginFrame, and OnDlssEvaluate's present-starvation catch-up): logged once when it splits or changes, the Session's groups set, and a
   // set no group uses any more retired.
-  void UpdateChain();
+  void UpdateChain(std::optional<Placement> exclusive = std::nullopt);
   // The settled work layout for an output region of `output` at `stage`. Noted to the Session in every state, so a FAILED
   // session retries when it changes. Split chain: pass 1's group's stage at Setup's Resolution, a later group's at its stage's own.
   sources::WorkLayout SettleLayout(nr::Size output, Stage stage, std::chrono::steady_clock::time_point now);
@@ -392,6 +397,15 @@ class DeviceContext {
   nr::Size work_size_;  // pass 1's group's, as SettleLayout last settled it
   NVSDK_NGX_Feature main_feature_ = NVSDK_NGX_Feature_Reserved_Unknown;
   uint64_t dlss_feature_serial_ = 0u;
+  sources::PresentDlssProducer present_dlss_producer_;
+  uint64_t present_jitter_frame_ = 0u;
+  ngx_hooks::MotionJitterOffset present_jitter_offset_;  // reused if recording is retried in this frame
+  struct PresentCaptureTrace {
+    std::array<uint64_t, 5> decisions{};
+    uint64_t ambiguous = 0u, source_changes = 0u, game_resets = 0u;
+    std::string sample;
+    std::chrono::steady_clock::time_point since{};
+  } present_capture_trace_;
   FrameTrigger trigger_;
   ngx_hooks::FrameGenDetector frame_generation_;
   ngx_hooks::MotionJitterTracker present_jitter_;
@@ -455,11 +469,60 @@ class DeviceContext {
   bool dlss_paused_ = false;  // no evaluate for DLSS_IDLE_MINIMUM, at any placement (Status's DLSS_PAUSED)
   bool dlss_latch_tripped_ = false;
   bool logged_after_dlss_ = false;  // "NR trigger: after DLSS" was logged in this activation
-  bool native_nr_handle_logged_ = false;
-  bool native_nr_handle_evaluate_logged_ = false;
-  bool native_nr_handle_failure_logged_ = false;
-  bool native_nr_handle_skip_logged_ = false;
+  bool native_nr_feature_live_ = false;
+  NativeNrFrame native_nr_frame_;
+  nr::Size native_nr_present_size_;
+  struct NativeNrTrace {
+    enum class Present : uint8_t { NOT_ARMED, NOT_READY, NOT_RUN, SKIPPED, APPLIED };
+    uint64_t frame = 0u;
+    uint64_t serial = 0u;
+    uint32_t calls = 0u;
+    uint32_t hook_bypasses = 0u;
+    uint64_t hook_serial = 0u;
+    std::string_view hook_reason;  // literal
+    const void* hook_list = nullptr;
+    const void* first_list = nullptr;
+    const void* first_output = nullptr;
+    const void* last_list = nullptr;
+    const void* last_output = nullptr;
+    const void* present_target = nullptr;
+    ID3D12CommandQueue* present_queue = nullptr;
+    NativeNrPath path = NativeNrPath::REPLACE;
+    bool uplift = false;
+    bool game = false;
+    bool game_reset_hint = false;
+    bool uplift_reset = false;
+    bool present_reset = false;
+    Present present = Present::NOT_ARMED;
+    TriggerPoint trigger = TriggerPoint::NONE;
+    nr::SkipReason native_reason = nr::SkipReason::NONE;
+    nr::SkipReason present_reason = nr::SkipReason::NONE;
+    std::string bypass;
+
+    [[nodiscard]] bool ChangedFrom(const NativeNrTrace& previous) const;
+    [[nodiscard]] bool Gap() const { return calls == 0u && !game && present == Present::APPLIED; }
+  };
+  struct NativeNrRecording {
+    uint64_t token = 0u;
+    uint64_t cursor = 0u;
+    const void* list = nullptr;
+    const void* output = nullptr;
+    std::shared_ptr<nr::Timeline::SubmissionProof> proof;
+  };
+  void FinishNativeNrTrace(std::chrono::steady_clock::time_point now) noexcept;
+  void NoteNativeNrPresent(TriggerPoint point, const sources::PresentResult& result);
+  // Two successful recordings suffice to inspect the prior list both at a gap and again on recovery.
+  std::array<NativeNrRecording, 2> native_nr_recordings_;
+  NativeNrTrace native_nr_trace_;  // NGX observations between the previous and next real Present
+  std::optional<NativeNrTrace> native_nr_present_trace_;  // same image, after BeginFrame assigns its frame number
+  std::optional<NativeNrTrace> native_nr_last_trace_;
+  std::chrono::steady_clock::time_point native_nr_trace_window_{};
+  uint32_t native_nr_trace_lines_ = 0u;
+  uint32_t native_nr_trace_suppressed_ = 0u;
+  std::optional<Placement> exclusive_chain_;
   bool native_nr_reset_owed_ = true;
+  std::optional<uint64_t> native_nr_feature_serial_;
+  std::optional<NativeNrPath> native_nr_path_;
   // A submit-only thread's tokens age out only after Timeline's own
   // AGED_SUBMISSION_TIME, so the descriptor ring can stay fully busy for a while by design on that
   // engine shape. Tracks how long nr::SkipReason::DESCRIPTORS_BUSY has been the After-DLSS result, back to back, so
